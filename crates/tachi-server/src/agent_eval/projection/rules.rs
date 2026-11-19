@@ -98,6 +98,10 @@ pub(crate) mod reason {
     pub(crate) const TERMINAL_STATE_MISMATCH: &str = "terminal_state_mismatch";
     pub(crate) const TERMINAL_STATE_UNVERIFIABLE: &str = "terminal_state_unverifiable";
     pub(crate) const NOT_ADJUDICATED: &str = "not_adjudicated";
+    /// #2012 §5: `human_override` requires separate owner evidence; until an
+    /// independent owner-proof port exists, override-bearing samples are
+    /// excluded from every authority, eligibility, and projection calculation.
+    pub(crate) const HUMAN_OVERRIDE_UNVERIFIED: &str = "human_override_unverified";
     /// A judgment exists but carries no structured rubric row — the legacy
     /// free-text verdict (design D3). Ages out of policy learning naturally.
     pub(crate) const UNSTRUCTURED_VERDICT: &str = "unstructured_verdict";
@@ -248,6 +252,25 @@ fn row_scope<'a>(
     Ok(profile)
 }
 
+/// Read-time history cap (#2012 KNOB1 + Pitfall 2):
+/// - Known-`self` is NEVER flattened to `declared_only`.
+/// - Pre-v43 receipt-less or non-execution-witnessed `structural_cross_vendor`
+///   rubric rows (where `adjudication_attribution_basis != "observed"`) cap at
+///   `declared_only` for authority/gating while leaving the stored row intact.
+pub(crate) fn effective_independence_basis<'a>(
+    stored_independence_basis: &'a str,
+    adjudication_basis: &str,
+) -> &'a str {
+    if stored_independence_basis == "self" {
+        return "self";
+    }
+    if stored_independence_basis == ELIGIBLE_INDEPENDENCE_BASIS && adjudication_basis != "observed"
+    {
+        return "declared_only";
+    }
+    stored_independence_basis
+}
+
 /// The per-row usability rule (design D6), evaluated in the design's own
 /// order so the reported reason is the FIRST thing that disqualified the row.
 pub(crate) fn classify_row(
@@ -276,15 +299,22 @@ pub(crate) fn classify_row(
         TerminalCheck::Consistent | TerminalCheck::NotApplicable => {}
     }
 
-    if observation.adjudication.is_none() {
+    let Some(adjudication) = observation.adjudication.as_ref() else {
         return RowDisposition::Excluded(reason::NOT_ADJUDICATED);
+    };
+    if adjudication.human_override {
+        return RowDisposition::Excluded(reason::HUMAN_OVERRIDE_UNVERIFIED);
     }
     let Some(rubric) = observation.rubric.as_ref() else {
         return RowDisposition::Excluded(reason::UNSTRUCTURED_VERDICT);
     };
 
-    if rubric.independence_basis != ELIGIBLE_INDEPENDENCE_BASIS {
-        return RowDisposition::Excluded(match rubric.independence_basis.as_str() {
+    let effective_basis = effective_independence_basis(
+        &rubric.independence_basis,
+        &adjudication.adjudication_attribution_basis,
+    );
+    if effective_basis != ELIGIBLE_INDEPENDENCE_BASIS {
+        return RowDisposition::Excluded(match effective_basis {
             "declared_only" => reason::INDEPENDENCE_DECLARED_ONLY,
             "self" => reason::INDEPENDENCE_SELF,
             _ => reason::INDEPENDENCE_INELIGIBLE,

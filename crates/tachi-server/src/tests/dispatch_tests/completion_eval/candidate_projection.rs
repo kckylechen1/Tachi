@@ -2032,3 +2032,207 @@ async fn run_cohort_admission_is_instant_based_and_rfc3339_authoritative() {
     assert_eq!(cand["samples_total"], json!(2));
     assert_eq!(payload["rows_considered"], json!(3));
 }
+
+#[tokio::test]
+async fn candidate_projection_excludes_unverified_human_override_and_caps_legacy_rubric_basis() {
+    use crate::verified_admission::{
+        admit_verified_agent_connection, TrustedAdmissionVerifier, VerifiedAdmissionEvidence,
+        VerifiedAdmissionRequest, VerifiedEvidenceRef, VerifiedEvidenceState,
+    };
+
+    struct OkVerifier(VerifiedAdmissionEvidence);
+    impl TrustedAdmissionVerifier for OkVerifier {
+        fn verify(
+            &self,
+            _: &VerifiedAdmissionRequest,
+        ) -> Result<VerifiedAdmissionEvidence, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let server = make_server();
+    let _cutoff = crate::agent_eval::candidate_projection::test_hooks::CutoffGuard::set(
+        "2027-01-01T00:00:00.000Z",
+    );
+
+    // Admit verified reviewer; even a verified reviewer setting `human_override: true`
+    // without owner proof must be excluded as `human_override_unverified`.
+    let now = chrono::Utc::now();
+    let req = VerifiedAdmissionRequest {
+        agent_identity_id: "verified-reviewer".to_string(),
+        connection_id: "conn-cand-override".to_string(),
+        expected_issuer_id: "issuer.tachi.test".to_string(),
+        expected_verification_method: memcore::VERIFIED_ADMISSION_METHOD.to_string(),
+        expected_verification_version: memcore::VERIFIED_ADMISSION_VERSION.to_string(),
+        trust_domain: "tachi.local".to_string(),
+        verification_scope: memcore::VERIFIED_ADMISSION_SCOPE.to_string(),
+        idempotency_key: "idem-cand-override".to_string(),
+    };
+    let evidence = VerifiedAdmissionEvidence {
+        agent_identity_id: req.agent_identity_id.clone(),
+        connection_id: req.connection_id.clone(),
+        issuer_id: req.expected_issuer_id.clone(),
+        verification_method: req.expected_verification_method.clone(),
+        verification_version: req.expected_verification_version.clone(),
+        trust_domain: req.trust_domain.clone(),
+        verification_scope: req.verification_scope.clone(),
+        evidence_digest: "e".repeat(64),
+        evidence_ref: VerifiedEvidenceRef::attestation("oidc", "cand-1").unwrap(),
+        issued_at: now - chrono::Duration::seconds(5),
+        expires_at: now + chrono::Duration::minutes(10),
+        nonce: "nonce-cand-override".to_string(),
+        state: VerifiedEvidenceState::Active,
+    };
+    admit_verified_agent_connection(&server, &req, &OkVerifier(evidence)).unwrap();
+
+    let reg_override = server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            register: Some(MirrorEvalRegisterParams {
+                frozen_contract_ref: "kckylechen1/tachi#2012".to_string(),
+                execution_origin: "host_native_subagent".to_string(),
+                lifecycle_owner: "host".to_string(),
+                harness: Some("claude_code_task_tool".to_string()),
+                native_child_id: Some("cand-verified-override".to_string()),
+                requested_profile: Some("explore".to_string()),
+                requested_model: Some("anthropic/claude-sonnet".to_string()),
+                requested_agent: Some("claude".to_string()),
+                requested_task_type: None,
+                requested_role: None,
+            }),
+            ..agent_eval_params("register")
+        }))
+        .await
+        .unwrap();
+    let override_id = serde_json::from_str::<Value>(&reg_override).unwrap()["eval_run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            observe: Some(MirrorEvalObserveParams {
+                eval_run_id: Some(override_id.clone()),
+                native_child_id: None,
+                terminal_outcome: "success".to_string(),
+                duration_ms: Some(100),
+                cost_tokens: Some(10),
+                cost_usd: None,
+                result_ref: None,
+                artifacts: Vec::new(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                effective_backend: None,
+                effective_harness: Some("claude_code_task_tool".to_string()),
+                effective_role: None,
+                effective_model_revision: None,
+            }),
+            ..agent_eval_params("observe")
+        }))
+        .await
+        .unwrap();
+    let adj_override_raw = server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            adjudicate: Some(MirrorEvalAdjudicateParams {
+                eval_run_id: Some(override_id.clone()),
+                native_child_id: None,
+                actor: "verified-reviewer".to_string(),
+                verifier_model: Some("openai/gpt-5".to_string()),
+                usefulness: "useful".to_string(),
+                failure_mode: None,
+                first_review_findings: Vec::new(),
+                plan_delta: None,
+                next_prompt_delta: Some("override advisory".to_string()),
+                evidence_usable: true,
+                used_in_final_claim: true,
+                human_override: true,
+                evidence_ref: "run-override".to_string(),
+                event_key: Some("cand-override-ev".to_string()),
+                rubric: None,
+            }),
+            ..agent_eval_params("adjudicate")
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&adj_override_raw).unwrap()["adjudication_attribution_basis"],
+        json!("acknowledged_overlay")
+    );
+
+    // Clean run with a legacy pre-v43 `structural_cross_vendor` rubric row seeded directly.
+    let clean_id = full_run(
+        &server,
+        "cand-legacy-rubric-cap",
+        "anthropic/claude-sonnet",
+        "anthropic/claude-sonnet",
+        Some("claude_code_task_tool"),
+        Some("openai/gpt-5"),
+        "useful",
+        true,
+        Some("keep verified"),
+        "cand-legacy-cap-ev",
+    )
+    .await;
+    server
+        .with_global_store(|store| {
+            let conn = store.connection();
+            let adj_id: String = conn
+                .query_row(
+                    "SELECT adjudication_id FROM mirror_eval_adjudications WHERE eval_run_id = ?1",
+                    [&clean_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            memcore::insert_eval_rubric_score(
+                conn,
+                &memcore::NewEvalRubricScore {
+                    rubric_score_id: "rs-legacy-cap".to_string(),
+                    adjudication_id: adj_id,
+                    subject_kind: "mirror".to_string(),
+                    rubric_hash: "rubric-v1".to_string(),
+                    contract_correctness: "pass".to_string(),
+                    evidence_quality: "pass".to_string(),
+                    safety: "pass".to_string(),
+                    scope_discipline: "pass".to_string(),
+                    intervention_burden: "not_assessed".to_string(),
+                    completion_integrity: "pass".to_string(),
+                    adjudication_confidence: "high".to_string(),
+                    adjudicator_actor: "leader".to_string(),
+                    adjudicator_vendor: "openai".to_string(),
+                    independence_basis: "structural_cross_vendor".to_string(),
+                    occurred_at: "2026-08-01T00:00:00.000Z".to_string(),
+                },
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
+
+    let payload = projection(
+        &server,
+        CandidateProjectionParams {
+            task_type: None,
+            window_days: Some(365),
+            candidates: vec![candidate(
+                "c1",
+                "anthropic/claude-sonnet",
+                "claude_code_task_tool",
+            )],
+        },
+    )
+    .await;
+    let cand = &payload["candidates"][0];
+    assert_eq!(cand["samples_total"], json!(1));
+    assert_eq!(
+        cand["excluded_counts"]["human_override_unverified"],
+        json!(1)
+    );
+    let sample = &cand["samples"][0];
+    assert_eq!(sample["eval_run_id"], json!(clean_id));
+    assert_eq!(
+        sample["adjudication"]["cross_model_independent"],
+        json!(false)
+    );
+    assert_eq!(
+        sample["rubric"]["independence_basis"],
+        json!("declared_only"),
+        "pre-v43 receiptless structural_cross_vendor rubric must cap to declared_only on read"
+    );
+}

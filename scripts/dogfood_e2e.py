@@ -13,8 +13,9 @@ or updates a scenario here (AGENTS.md §3).
     python3 scripts/dogfood_e2e.py --list
 
 Without --baseline, any FAIL exits non-zero. With --baseline, both binaries
-run the same scenarios and the exit code reports regressions only: a check
-that passes on the baseline and fails on the candidate.
+must complete the selected scenarios without harness failures. Comparisons
+reject lost baseline passes and candidate failures that were not already
+failures on the baseline. Completed baseline assertion failures remain valid data.
 
 Adding a scenario: write a function taking a `Context`, decorate it with
 `@scenario("feature-tag", ...)`, and record checks with `ctx.check(...)`.
@@ -261,8 +262,13 @@ class Run:
     checks: list[Check] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)
 
-    def outcome(self) -> dict[str, str]:
-        return {c.name: c.status for c in self.checks if c.status != "NOTE"}
+    def outcome(self) -> dict[tuple[str, str], str]:
+        outcomes = {}
+        for check in self.checks:
+            key = (check.scenario, check.name)
+            if check.status != "NOTE" and outcomes.get(key) != "FAIL":
+                outcomes[key] = check.status
+        return outcomes
 
 
 def short(value: object, limit: int = 160) -> str:
@@ -864,7 +870,7 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
 from dogfood_memory import register_scenarios as register_memory_scenarios
 from dogfood_retirement import register_scenarios as register_retirement_scenarios
 
-register_memory_scenarios(scenario, find_key, make_fixture_repo)
+register_memory_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port, fixture_connection)
 register_retirement_scenarios(scenario, Daemon, McpSession, free_port, find_key, fixture_connection)
 
 
@@ -1879,7 +1885,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("queue-evidence")
+@scenario("queue-evidence", "readiness")
 def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     """A real save/search and owner CLI distinguish vector debt from queue evidence."""
     root = ctx.daemon.home / f"queue-evidence-{ctx.tag}"
@@ -1890,8 +1896,8 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     try:
         daemon.start()
         session = McpSession(daemon.url)
-        # Plain save (no `kind`): the note-file projection mints its own id,
-        # which would decouple the fixture from the id search must return.
+        with urllib.request.urlopen(f"http://127.0.0.1:{daemon.port}/health", timeout=2) as response:
+            ctx.require("readiness probes the admitted memory store", json.load(response).get("db_ready") is True, response.status)
         ok, saved, raw = session.call(
             "tachi_memory", action="save", id=expected_id, format="json",
             storage_scope="global", text=f"{needle} records an operator deployment checklist.",
@@ -1927,11 +1933,11 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
         row = rows[0] if len(rows) == 1 else {}
         missing = row.get("vector_missing")
         ctx.check(
-            "CLI snapshot preserves null queue evidence and numeric vector debt",
+            "CLI full diagnostics agree with lightweight recall coverage and null queue evidence",
             snapshot.returncode == 0 and len(rows) == 1 and row.get("error") is None
-            and type(missing) is int and missing >= 1
+            and type(missing) is int and missing >= 1 and missing == quality.get("vector_missing")
             and "pending_enrichment" in row and row["pending_enrichment"] is None,
-            {"matching_databases": len(rows), "vector_missing": missing,
+            {"matching_databases": len(rows), "vector_missing": missing, "recall_missing": quality.get("vector_missing"),
              "field_present": "pending_enrichment" in row,
              "pending_enrichment": row.get("pending_enrichment")},
         )
@@ -2802,16 +2808,26 @@ def main() -> int:
 
     candidate = runs["candidate"].outcome()
     if "baseline" not in runs:
-        # Raw rows, not the name-keyed outcome: a later PASS must not hide a FAIL.
+        # Standalone runs report every failure without a comparison baseline.
         return 1 if any(c.status == "FAIL" for c in runs["candidate"].checks) else 0
+    for label, run in runs.items():
+        missing = [item.name for item in chosen if item.name not in run.completed]
+        harness_failed = any(c.scenario == "harness" and c.status == "FAIL" for c in run.checks)
+        if missing or harness_failed:
+            reason = f"scenarios did not complete: {', '.join(missing)}" if missing else "harness failed"
+            print(f"INCOMPLETE  {label}: {reason}")
+            return 1
     baseline = runs["baseline"].outcome()
-    regressions = [n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"]
+    regressions = sorted(
+        {n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"}
+        | {n for n, s in candidate.items() if s == "FAIL" and baseline.get(n) != "FAIL"}
+    )
     fixed = [n for n, s in candidate.items() if s == "PASS" and baseline.get(n) != "PASS"]
     print("## candidate vs baseline")
-    for name in fixed:
-        print(f"FIXED       {name}")
-    for name in regressions:
-        print(f"REGRESSION  {name}")
+    for scenario_name, name in fixed:
+        print(f"FIXED       {scenario_name} / {name}")
+    for scenario_name, name in regressions:
+        print(f"REGRESSION  {scenario_name} / {name}")
     print(f"{len(fixed)} fixed, {len(regressions)} regressed")
     return 1 if regressions else 0
 

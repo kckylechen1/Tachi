@@ -132,6 +132,10 @@ impl AdjudicationReceipt {
     }
 
     pub fn validate_for_write(&self) -> Result<(), MemoryError> {
+        self.to_validated_json().map(|_| ())
+    }
+
+    fn to_validated_json(&self) -> Result<String, MemoryError> {
         if self.subject.actor.trim().is_empty() {
             return Err(MemoryError::InvalidArg(
                 "adjudication_receipt.subject.actor must be non-empty".to_string(),
@@ -158,7 +162,7 @@ impl AdjudicationReceipt {
                 "adjudication_receipt exceeds structural parse constraints".to_string(),
             ));
         }
-        Ok(())
+        Ok(serialized)
     }
 
     fn is_structurally_legal(&self) -> bool {
@@ -229,6 +233,13 @@ pub fn adjudication_basis_for_receipt(
     let Some(receipt) = raw.and_then(AdjudicationReceipt::parse_stored) else {
         return "unknown";
     };
+    adjudication_basis_for_subject(&receipt, row)
+}
+
+fn adjudication_basis_for_subject(
+    receipt: &AdjudicationReceipt,
+    row: ReceiptRowSubject<'_>,
+) -> &'static str {
     let subject_matches = match row {
         ReceiptRowSubject::Actor(actor) => receipt.subject.actor == actor,
         ReceiptRowSubject::ActorAndModel(actor, model) => {
@@ -246,12 +257,13 @@ pub(crate) fn receipt_columns(
     receipt: Option<&AdjudicationReceipt>,
     row: ReceiptRowSubject<'_>,
 ) -> Result<(Option<String>, &'static str), MemoryError> {
-    if let Some(receipt) = receipt {
-        receipt.validate_for_write()?;
+    match receipt {
+        Some(receipt) => Ok((
+            Some(receipt.to_validated_json()?),
+            adjudication_basis_for_subject(receipt, row),
+        )),
+        None => Ok((None, "unknown")),
     }
-    let json = receipt.map(AdjudicationReceipt::to_json).transpose()?;
-    let basis = adjudication_basis_for_receipt(json.as_deref(), row);
-    Ok((json, basis))
 }
 
 // `IS` (not `=`) so an absent field evaluates false, never a passing NULL.

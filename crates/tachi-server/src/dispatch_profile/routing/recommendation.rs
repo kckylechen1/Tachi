@@ -648,8 +648,8 @@ mod evidence_flip_tests {
                 conn.execute(
                     "INSERT INTO dispatch_adjudications \
                      (adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, \
-                      created_at, insertion_seq) \
-                     VALUES (?1, ?2, ?1, 'APPROVED', 'reviewer', 'evidence://pr4', ?3, 1)",
+                      created_at, insertion_seq, adjudication_attribution_basis) \
+                     VALUES (?1, ?2, ?1, 'APPROVED', 'reviewer', 'evidence://pr4', ?3, 1, 'observed')",
                     rusqlite::params![adjudication_id, outcome_id, occurred_at],
                 )
                 .map_err(|err| err.to_string())?;

@@ -317,7 +317,8 @@ pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, Stri
     // FIFO by submission time. `created_at` is an RFC3339 stamp, so this is a
     // parsed-instant comparison, not a string sort — a lexicographic compare of
     // mixed-offset timestamps ("+08:00" vs "Z") orders them wrong.
-    tickets.sort_by_key(|t| {
+    // Parse each stamp once; preserve the input order for equal/invalid stamps.
+    tickets.sort_by_cached_key(|t| {
         t.created_at
             .parse::<jiff::Timestamp>()
             .map(|ts| ts.as_microsecond())

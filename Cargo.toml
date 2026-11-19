@@ -12,56 +12,21 @@ members = [
     # portable-kernel library for the HyperMem runtime cutover.
     "crates/portable-server",
     "crates/tachi-bootstrap",
-    # Test-only member (#1610 Track T): workspace contract/census tests lifted
-    # out of tachi-server's test binary. Membership is load-bearing, not
-    # bookkeeping — `census_scan_roots_come_from_workspace_membership` in
-    # crates/tachi-contract-tests/src/tests/docs_tests/store_trigger_ddl_census.rs
-    # REDs on any directory under crates/ that is not a member, and the DDL
-    # census derives its scan roots from this list. Deliberately NOT in
-    # default-members: it has an empty lib and only dev-dependencies, so
-    # `cargo build --release` compiles nothing from it either way.
+    # Test crates stay in the workspace and out of default-members.
     "crates/tachi-contract-tests",
-    # Test-only member (#1714 Track T): the 24 bootstrap topology tests moved
-    # out of tachi-server's monolithic lib-test binary. The crate has an empty
-    # lib and activates tachi-server's non-default bootstrap-test-api feature
-    # only for its own integration-test target.
     "crates/tachi-bootstrap-tests",
-    # Test-only member (#1831 Track T): durable delivery seam tests moved
-    # out of tachi-server's monolithic lib-test binary.
     "crates/tachi-delivery-tests",
-    # Test-only member (#1831 Track T): vault integration and lifecycle tests moved
-    # out of tachi-server's monolithic lib-test binary.
     "crates/tachi-vault-tests",
     "crates/tachi-credential-profile",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
-    # GitHub-domain runtime (#1611 Track T3, carve 1). Membership is
-    # load-bearing, not bookkeeping — `census_scan_roots_come_from_workspace_membership`
-    # in crates/tachi-contract-tests/src/tests/docs_tests/store_trigger_ddl_census.rs
-    # REDs on any directory under crates/ that is not a member, and the DDL
-    # census derives its scan roots from this list. Deliberately NOT in
-    # default-members: it is a dependency of tachi-server, which is a default
-    # member, so it is already built transitively.
-    # Pure GitHub safe-merge gate/type/client contract. Membership is
-    # load-bearing because its moved unit tests belong to the covered nextest
-    # package set; it has no server or MemoryServer dependency.
-    # Build-broker domain runtime (#1702 Track T3, carve 4). Membership is
-    # load-bearing, not bookkeeping — the DDL/test census roots come from
-    # workspace membership, and the nextest known-red gate is widened with this
-    # crate when the tests move out of tachi-server.
     "crates/tachi-build-broker",
     # Report-only orphan build-artifact reaper (#894 S2b), carved out of
     # tachi-server with its complete safety/certification test suite.
     "crates/tachi-exec-env-reaper",
     "crates/tachi-hub",
     "crates/tachi-llm",
-    # Leaf runtime utilities + MemoryServer capability traits (#2077 stage 2,
-    # PR C). Membership is load-bearing, not bookkeeping — the DDL/test census
-    # roots come from workspace membership, and the dependency-allowlist
-    # contract test in tachi-contract-tests REDs if this crate ever depends on
-    # tachi-server or a domain crate. Deliberately NOT in default-members: it
-    # is a dependency of tachi-server, a default member, so it is already
-    # built transitively.
+    # Leaf utilities; dependency contracts forbid server/domain dependencies.
     "crates/tachi-runtime-core",
     # Vault crypto + versioned KDF-parameter format leaf crate, extracted
     # for cross-product reuse (tachi#1080 v1: crypto+format only, store
@@ -89,27 +54,9 @@ strip = true
 [profile.dev]
 debug = "line-tables-only"
 
-# Load-bearing, not a speed knob: `tachi-bootstrap` must be built with stack-slot
-# reuse on, or its clap tree cannot be constructed inside a 2 MiB test thread.
-#
-# `clap`'s derive emits `augment_subcommands`/`augment_args` as one straight-line
-# builder chain per enum, and every `.method()` in that chain consumes and
-# returns a `Command` (712 B) or an `Arg` (600 B) by value. At `opt-level = 0`
-# LLVM gives each of those temporaries its own stack slot instead of reusing one,
-# so a frame grows linearly with the number of builder calls in the enum:
-# `Commands::augment_subcommands` reserved 972 KiB and, nested inside it,
-# `VaultAction::augment_subcommands` another 924 KiB. `Cli::command()` therefore
-# needed ~2072 KiB of stack — 24 KiB past the 2 MiB libtest gives a test thread,
-# which is why every `cli::tests` case aborted the whole binary with
-# `has overflowed its stack`. The margin was one subcommand wide, so the crate
-# was going to cross it whatever landed next: `vault reconcile`'s nested enum
-# alone needs 95 KiB where `vault intake`'s needs 63 KiB.
-#
-# `opt-level = 1` reuses the slots: the same call needs ~179 KiB, and the
-# deepest real workload (`vault reconcile plan` parse) ~195 KiB. Release builds
-# were never affected. `cli_command_tree_builds_within_a_bounded_stack` in
-# crates/tachi-bootstrap/src/cli/tests.rs REDs if this override is removed or if
-# the tree ever grows back past ~1 MiB, so do not delete this without reading it.
+# clap derive needs stack-slot reuse to construct the CLI within the test
+# thread's stack. Keep until cli_command_tree_builds_within_a_bounded_stack
+# passes without this override.
 [profile.dev.package.tachi-bootstrap]
 opt-level = 1
 
@@ -121,34 +68,10 @@ opt-level = 3
 opt-level = 3
 
 [workspace.dependencies]
-# `bundled` compiles the SQLite C amalgamation (libsqlite3-sys).
-# Kept bundled intentionally (see #833 decision: CI/release targets
-# x86_64-pc-windows-msvc + 4 *nix targets with no per-platform SQLite install;
-# version drift would risk silent migration regressions).
-#
-# Bundled SQLite must be >= 3.54.0 (security floor, #833):
-#   - CVE-2026-119375 / RUSTSEC-2026-0459: a database opened with a sibling
-#     `-wal` of a different page size returns uninitialized page-cache memory
-#     (fixed 3.54.0)
-#   - CVE-2025-7709: corrupt FTS5 index -> memory access (fixed 3.50.3)
-#   - CVE-2025-6965: aggregate term count overflow (fixed 3.50.2)
-#   - CVE-2025-29087 / -3277: concat_ws() integer overflow (fixed 3.49.1)
-#   - CVE-2025-29088: lookaside allocator DoS via sqlite3_db_config (fixed 3.49.1)
-#
-# rusqlite 0.41 pulls libsqlite3-sys 0.39.x, which bundles SQLite 3.54.x.
-# Downstream ZeroClaw takes portable-kernel/memcore as a git dependency, and
-# only one `links = "sqlite3"` crate may exist in its graph, so its rusqlite
-# major follows this one; bump them together.
-#
-# The pin itself is not the security floor. The floor is enforced in two
-# places independently of the dependency pin:
-#   - compile time: `const _: () = assert!(SQLITE_VERSION_NUMBER >= 3_054_000)`
-#     in crates/memcore/src/lib.rs — fails the build of anyone, including a
-#     downstream git-dependency consumer, who resolves below the floor.
-#   - run time: `bundled_sqlite_meets_security_floor_3_54_0` in
-#     crates/memcore/src/db/tests.rs — checks the library actually loaded.
-# Both restate `3.54.0` on purpose; do not collapse them onto one shared
-# constant, and do not relax either one to make a below-floor pin resolve.
+# Bundle SQLite for consistent cross-platform migrations. Security floor:
+# SQLite >= 3.54.0 (#833). Keep the independent compile-time and runtime
+# floor checks in memcore. Downstream ZeroClaw must use the same rusqlite
+# major because Cargo permits only one `links = "sqlite3"` dependency.
 rusqlite = { version = "0.41", features = ["backup", "bundled", "vtab", "functions", "serialize"] }
 sqlite-vec = "0.1.9"
 serde = { version = "1", features = ["derive"] }
