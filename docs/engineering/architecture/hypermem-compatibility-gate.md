@@ -165,8 +165,9 @@ Docs tests parse it and assert that:
 ## Host-defined records (#2105 / Hyperion #3564)
 
 The fixture now contains `host_typed_records`: five Hypermem narrative kinds
-and two external reference contracts. The isolated `typed_record_contract`
-executes these inputs through the real portable library, including a denied
+and two external reference contracts. The isolated `portable_contract` suite's
+`typed_record_contract` module executes these inputs through the real portable
+library, including a denied
 copilot-to-outcome write and a payload-schema refusal. Hypermem also consumes
 the same fixture through its host adapter after the kernel pin intake, so
 required business links are checked at their owning boundary.

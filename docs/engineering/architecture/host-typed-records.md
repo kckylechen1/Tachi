@@ -152,8 +152,9 @@ immutable SQL guards, rowid replacement victims, frozen definitions after
 reopen, local-reference identity, idempotency, concurrent corrections and
 receipt-failure rollback. An ordinary note remains mutable beside typed rows.
 
-The isolated `typed_record_contract` covers a personal preference vocabulary
-without admin features and the real Hypermem JSON fixture. Hypermem's own
+The `typed_record_contract` module in the isolated `portable_contract` suite
+covers a personal preference vocabulary without admin features and the real
+Hypermem JSON fixture. Hypermem's own
 adapter suite consumes that fixture, tests its required links, invokes actual
 stdio MCP subprocesses, and verifies HTTP removes a programmatically bound
 writer. Build and run evidence belongs to the candidate's CI results; these

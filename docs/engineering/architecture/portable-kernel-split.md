@@ -133,7 +133,7 @@ As of tachi#1348-A, the plan/apply/restore goldens (happy path, revision-drift
 refusal with batch rollback, edge transfer/dedup/self-loop drop, receipt
 round-trip via `restore_exact_dedupe`, `memories_vec` conservation across
 apply) live in-repo at
-`crates/portable-kernel/tests/exact_dedupe_contract.rs`, run with
+`crates/portable-kernel/tests/portable_contract/exact_dedupe_contract.rs`, run with
 `cargo test -p portable-kernel --features portable-contract-test` the same
 way `portable_contract.rs` does. That goldens file is the mechanism a
 portable consumer (including a CI job outside this monorepo) can point at
@@ -363,8 +363,9 @@ without an extra EOF step. Resource exhaustion discards all partial rows;
 claim completeness. No index, schema migration, ranking change, or access/use
 receipt write is introduced.
 
-The isolated `exact_entity_contract` target requires `portable-contract-test`
-and proves the public API without admin on disposable `PortableKernel` stores.
+The `exact_entity_contract` module in the isolated `portable_contract` suite
+requires `portable-contract-test` and proves the public API without admin on
+disposable `PortableKernel` stores.
 Workspace tests also cover callback ownership and canonical namespace behavior.
 Current Hypermem adapter conformance and downstream benchmark/cutover acceptance
 remain separate gates; an archived prototype is not production evidence.
