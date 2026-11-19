@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::graph::GRAPH_EXPANSION_EDGE_LIMIT;
+use crate::db::memory_crud::upsert_within_tx;
 
 #[test]
 fn graph_add_and_get_edges() {
@@ -489,12 +490,15 @@ fn graph_expand_as_of_anchors_edge_validity_at_the_instant() {
 #[test]
 fn graph_expansion_bounds_edge_decoding_and_node_hydration() {
     let mut conn = make_conn();
-    upsert(&mut conn, &make_entry("cap-root", "cap fixture"), false).unwrap();
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    upsert_within_tx(&tx, &make_entry("cap-root", "cap fixture"), false, None).unwrap();
     for i in 0..(GRAPH_EXPANSION_EDGE_LIMIT + 10) {
         let target = format!("cap-nbr-{i:05}");
-        upsert(&mut conn, &make_entry(&target, "cap neighbor"), false).unwrap();
+        upsert_within_tx(&tx, &make_entry(&target, "cap neighbor"), false, None).unwrap();
         add_edge(
-            &conn,
+            &tx,
             &MemoryEdge {
                 source_id: "cap-root".into(),
                 target_id: target,
@@ -508,6 +512,7 @@ fn graph_expansion_bounds_edge_decoding_and_node_hydration() {
         )
         .unwrap();
     }
+    tx.commit().unwrap();
     // The SQL edge ceiling must apply before decoding, and the node ceiling
     // before hydrating memories. Each poisoned row lies just beyond its budget.
     conn.execute(
