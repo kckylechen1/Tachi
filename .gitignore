@@ -90,10 +90,6 @@ tmp/
 docs/superpowers/
 .gstack/
 
-# Ignore compiled artifacts left in old checkouts of the retired OpenClaw plugin.
-integrations/openclaw/*.js
-integrations/openclaw/*.d.ts
-integrations/openclaw/*.d.ts.map
 isolated-target/
 
 # CodeGraph local index

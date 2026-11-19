@@ -247,7 +247,6 @@ graph TD
 | `tools/` | Utilities such as `tachi-clean` and recall evaluation. |
 | `scripts/` | Installer, agent setup helper, and release checks. |
 | `docs/` | Install and upgrade guides, architecture, and engineering docs. |
-| `integrations/openclaw` | Retired OpenClaw plugin: migration notes and historical release notes only. |
 
 ---
 
