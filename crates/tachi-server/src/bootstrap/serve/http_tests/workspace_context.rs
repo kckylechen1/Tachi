@@ -428,3 +428,286 @@ fn http_zcode_workspace_context_keeps_claim_admission_separate() {
         });
     });
 }
+
+#[test]
+fn http_admitted_unbound_session_dynamically_switches_workspaces_across_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    with_tachi_home(temp.path(), || {
+        let _embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
+        let global = temp.path().join("global/memory.db");
+        let umbrella = temp.path().join("Projects");
+        let repo_a = umbrella.join("Sigil");
+        let repo_b = umbrella.join("Quant");
+        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_a.join("src")).unwrap();
+        std::fs::write(repo_a.join("src/lib.rs"), "// sigil").unwrap();
+        std::fs::create_dir_all(repo_b.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_b.join("src")).unwrap();
+        std::fs::write(repo_b.join("src/lib.rs"), "// quant").unwrap();
+        // Disjoint per-protocol-iteration worktrees: writable claims with the
+        // same worktree_path conflict (memcore paths_overlap), and the lease
+        // below outlives both iterations of the shared daemon.
+        std::fs::create_dir_all(repo_a.join("wt-false")).unwrap();
+        std::fs::create_dir_all(repo_a.join("wt-true")).unwrap();
+
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).unwrap();
+            let observer = server.clone();
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+
+            for modern in [false, true] {
+                let admitted =
+                    Caller::new(&daemon.url, modern, None, Some("antigravity-local")).await;
+                let anonymous = Caller::new(&daemon.url, modern, None, None).await;
+
+                // 1. Anonymous unbound session must still fail closed on explicit or inferred writes.
+                assert_denied(
+                    anonymous
+                        .call(
+                            10,
+                            "tachi_memory",
+                            json!({
+                                "action": "save",
+                                "project": repo_a,
+                                "text": "anonymous must stay blocked"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                assert_denied(
+                    anonymous
+                        .call(
+                            11,
+                            "tachi_memory",
+                            json!({
+                                "action": "save",
+                                "files": [repo_b.join("src/lib.rs")],
+                                "text": "anonymous file-inferred write must stay blocked"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+
+                // 2. Umbrella non-git unregistered parent folder must fail closed without creating `.tachi`.
+                assert_denied(
+                    admitted
+                        .call(
+                            12,
+                            "tachi_memory",
+                            json!({
+                                "action": "save",
+                                "project": umbrella,
+                                "text": "umbrella folder is not a git repo"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                assert!(!umbrella.join(".tachi").exists());
+
+                // 3. Same admitted unbound session dynamically switches between Repo A (via `project` path)
+                //    and Repo B (inferred from `files` without `project`)!
+                let saved_a = admitted
+                    .call(
+                        13,
+                        "tachi_memory",
+                        json!({
+                            "action": "save",
+                            "id": format!("dyn-a-{modern}"),
+                            "project": repo_a,
+                            "text": format!("DYNWORKSPACE alpha-{modern} lossless"),
+                            "summary": format!("DYNWORKSPACE alpha-{modern}"),
+                            "path": "/notes/dyn-workspace",
+                            "category": "fact",
+                            "force": true
+                        }),
+                        None,
+                    )
+                    .await;
+                assert!(saved_a.get("error").is_none(), "{saved_a:#}");
+                assert_ne!(saved_a["result"]["isError"], true, "{saved_a:#}");
+
+                let saved_b = admitted
+                    .call(
+                        14,
+                        "tachi_memory",
+                        json!({
+                            "action": "save",
+                            "id": format!("dyn-b-{modern}"),
+                            "files": [repo_b.join("src/lib.rs")],
+                            "text": format!("DYNWORKSPACE beta-{modern} lossless"),
+                            "summary": format!("DYNWORKSPACE beta-{modern}"),
+                            "path": "/notes/dyn-workspace",
+                            "category": "fact",
+                            "force": true
+                        }),
+                        None,
+                    )
+                    .await;
+                assert!(saved_b.get("error").is_none(), "{saved_b:#}");
+                assert_ne!(saved_b["result"]["isError"], true, "{saved_b:#}");
+
+                let project_a = observer
+                    .resolve_existing_workspace_project(repo_a.to_str().unwrap())
+                    .unwrap();
+                let project_b = observer
+                    .resolve_existing_workspace_project(repo_b.to_str().unwrap())
+                    .unwrap();
+                assert_ne!(project_a, project_b);
+
+                // Conflicting file paths across two workspaces must fail closed on save.
+                assert_denied(
+                    admitted
+                        .call(
+                            15,
+                            "tachi_memory",
+                            json!({
+                                "action": "save",
+                                "files": [repo_a.join("src/lib.rs"), repo_b.join("src/lib.rs")],
+                                "text": "ambiguous multi-repo write"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+
+                // 4. Search switches cleanly via explicit repo path, canonical name, or `file_context`.
+                let search_a = payload(
+                    &admitted
+                        .call(
+                            16,
+                            "tachi_memory",
+                            json!({
+                                "action": "search",
+                                "project": repo_a,
+                                "query": "DYNWORKSPACE",
+                                "scope": "memory",
+                                "format": "json"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                let rows_a = &search_a["sections"][0]["rows"];
+                assert!(
+                    rows_a.to_string().contains(&format!("alpha-{modern}")),
+                    "{search_a:#}"
+                );
+                assert!(
+                    !rows_a.to_string().contains(&format!("beta-{modern}")),
+                    "{search_a:#}"
+                );
+
+                let search_b = payload(
+                    &admitted
+                        .call(
+                            17,
+                            "tachi_memory",
+                            json!({
+                                "action": "search",
+                                "file_context": repo_b.join("src/lib.rs"),
+                                "query": "DYNWORKSPACE",
+                                "scope": "memory",
+                                "format": "json"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                let rows_b = &search_b["sections"][0]["rows"];
+                assert!(
+                    rows_b.to_string().contains(&format!("beta-{modern}")),
+                    "{search_b:#}"
+                );
+                assert!(
+                    !rows_b.to_string().contains(&format!("alpha-{modern}")),
+                    "{search_b:#}"
+                );
+
+                // 5. Briefing with workspace path reports full session readiness for that call.
+                let briefing = payload(
+                    &admitted
+                        .call(
+                            18,
+                            "tachi_memory",
+                            json!({
+                                "action": "briefing",
+                                "project": repo_a,
+                                "compact": true,
+                                "scope": "memory",
+                                "enable_rerank": false,
+                                "format": "json"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                assert_eq!(briefing["readiness"]["ready"], true, "{briefing:#}");
+                assert_eq!(
+                    briefing["readiness"]["available"],
+                    json!({
+                        "project_writes": true,
+                        "claims": true,
+                        "a2a": true,
+                        "staff_start": true
+                    }),
+                    "{briefing:#}"
+                );
+
+                // 6. WorkClaim via `worktree_path` (omitting `project`) and `tachi_staff(roster)` via repo path succeed!
+                let claim_args = json!({
+                    "action": "claim",
+                    "issue_ref": format!("owner/repo#dyn-{modern}"),
+                    "branch": format!("dyn-{modern}"),
+                    "worktree_path": repo_a.join(format!("wt-{modern}")),
+                    "claim_scope": [format!("dyn-{modern}/**")],
+                    "claim_role": "executor",
+                    "claim_mode": "writable",
+                    "expected_head": "test-head",
+                    "lease_expires_at": "2030-01-01T00:00:00Z"
+                });
+                assert_denied(
+                    anonymous
+                        .call(19, "tachi_task", claim_args.clone(), None)
+                        .await,
+                );
+                let claim = payload(&admitted.call(20, "tachi_task", claim_args, None).await);
+                assert_eq!(claim["status"], "completed", "{claim:#}");
+
+                let roster = payload(
+                    &admitted
+                        .call(
+                            21,
+                            "tachi_staff",
+                            json!({"action": "roster", "project": repo_a}),
+                            None,
+                        )
+                        .await,
+                );
+                assert_eq!(roster["available"], true, "{roster:#}");
+                assert_eq!(roster["project"], project_a, "{roster:#}");
+
+                // 7. No sticky session mutation: bare save with neither `project` nor `files` still fails closed.
+                assert_denied(
+                    admitted
+                        .call(
+                            22,
+                            "tachi_memory",
+                            json!({
+                                "action": "save",
+                                "text": "must not inherit previous call's workspace"
+                            }),
+                            None,
+                        )
+                        .await,
+                );
+                assert!(observer.session_project().is_none());
+            }
+
+            cancel.cancel();
+            task.await.unwrap();
+        });
+    });
+}

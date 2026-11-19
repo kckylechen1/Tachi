@@ -212,7 +212,7 @@ fn session_readiness(server: &MemoryServer) -> Value {
     }
     if !project_bound {
         fix.push(
-            "project: send header X-Tachi-Workspace-Root: <repo path> (or X-Tachi-Project: <project>) in this host's MCP config",
+            "project: send header X-Tachi-Workspace-Root: <repo path> (or X-Tachi-Project: <project>) in this host's MCP config, or pass project=<repo path> per call when X-Tachi-Agent-Identity is admitted",
         );
     }
     json!({

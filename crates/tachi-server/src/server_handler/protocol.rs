@@ -412,6 +412,17 @@ impl ServerHandler for MemoryServer {
                 None
             };
             let server = roots_server.as_ref().unwrap_or(server);
+            let admitted_target_server = if server.tool_router.has_route(name)
+                && context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .is_some()
+            {
+                server.clone_for_admitted_call_target(name, &mut params.arguments)?
+            } else {
+                None
+            };
+            let server = admitted_target_server.as_ref().unwrap_or(server);
             let bound_project = server.session_project();
             if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_server_session_project(
@@ -708,7 +719,13 @@ fn task_request_server(
                 .build(),
         ));
     }
-    let server = server.clone_for_modern_request(context, false)?;
+    let mut server = server.clone_for_modern_request(context, false)?;
+    if server.session_project().is_none() {
+        if let Ok(dispatch_id) = crate::mcp_tasks::dispatch_from_task(task_id) {
+            server.request_project =
+                crate::mcp_tasks::owned_project_for_dispatch(&server, dispatch_id);
+        }
+    }
     server.touch_activity();
     // Reuse the canonical read-only polling classification only for a valid
     // tasks/get handle. Updates, cancellation and malformed handles remain
