@@ -1,25 +1,14 @@
-mod holder;
-mod registry;
-mod scrap_ledger;
-mod sweep;
-mod tachi_clean;
-mod target_clean;
-#[cfg(test)]
-mod test_support;
-mod work_claim;
-mod wt_clean;
-mod wt_open;
-mod wt_reconcile;
-
 use std::path::PathBuf;
 
-use registry::{RegisterOptions, RegisterOutputFormat};
-use sweep::{SweepOptions, DEFAULT_SWEEP_MAX_AGE_DAYS};
-use tachi_clean::TachiCleanOptions;
-use target_clean::TargetCleanOptions;
-use wt_clean::{OutputFormat, WtRemoveOptions};
-use wt_open::{CargoTargetPolicy, OpenOptions};
-use wt_reconcile::WtReconcileOptions;
+use ::tachi_clean::{
+    registry::{self, RegisterOptions, RegisterOutputFormat},
+    sweep::{self, SweepOptions, DEFAULT_SWEEP_MAX_AGE_DAYS},
+    tachi_clean::{self, TachiCleanOptions},
+    target_clean::{self, TargetCleanOptions},
+    wt_clean::{self, OutputFormat, WtRemoveOptions},
+    wt_open::{self, CargoTargetPolicy, OpenOptions},
+    wt_reconcile::{self, WtReconcileOptions},
+};
 
 fn main() {
     let code = match run() {
