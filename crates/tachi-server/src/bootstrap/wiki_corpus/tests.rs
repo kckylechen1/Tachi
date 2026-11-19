@@ -5,14 +5,12 @@ use super::plan::*;
 use super::types::*;
 use super::*;
 
-use crate::memory_search_ops::EXPECTED_EMBEDDING_DIM;
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
-use memcore::{ExpectedMemoryState, MemoryEntry, MemoryStore};
+use memcore::{MemoryEntry, MemoryStore};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
