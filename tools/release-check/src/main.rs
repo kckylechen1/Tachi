@@ -10,13 +10,8 @@ use std::process::ExitCode;
 
 pub const RUST_MANIFEST_PATHS: &[&str] = &[
     "crates/memcore/Cargo.toml",
-    "crates/memory-server-capture-gate/Cargo.toml",
-    "crates/memory-server-hub-cli/Cargo.toml",
-    "crates/memory-server-manifest-audit/Cargo.toml",
     "crates/tachi-server/Cargo.toml",
     "crates/tachi-params/Cargo.toml",
-    "crates/memory-server-prompt-envelope/Cargo.toml",
-    "crates/memory-server-rescue/Cargo.toml",
     "crates/memory-server-runtime/Cargo.toml",
     "crates/memory-node/Cargo.toml",
     "crates/tachi-bootstrap/Cargo.toml",

@@ -1,7 +1,7 @@
-use memory_server_manifest_audit::{PlannedAction, ProjectDbClass, RelocationItem};
+use super::{PlannedAction, ProjectDbClass, RelocationItem};
 
 #[test]
-fn relocation_item_field_types_are_importable_from_crate_root() {
+fn relocation_item_field_types_are_importable_from_audit_module() {
     let item = RelocationItem {
         project_name: "demo".to_string(),
         db_path: "/tmp/demo/memory.db".to_string(),

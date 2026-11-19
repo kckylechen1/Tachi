@@ -243,13 +243,13 @@ fn native_tool_methods_do_not_accumulate_byte_identical_alias_bodies() {
 /// discrimination is the Unicode boundary, not a relaxed comparison.
 #[test]
 fn tool_method_body_parser_survives_unicode_lookback_boundary() {
-    // `#[tool]` followed by exactly 510 bytes, so the 512-byte lookback lands
-    // one byte into the `─` that precedes the attribute.
+    // Place the attribute after a comment ending in `─`, so the 512-byte
+    // lookback lands one byte into that glyph.
     let mut source = String::new();
+    source.push_str("// ");
     source.push_str(&"pad ".repeat(64));
-    source.push('─');
-    source.push_str("#[tool]\n");
-    source.push_str(&" ".repeat(501));
+    source.push_str("─\n#[tool]\n");
+    source.push_str(&" ".repeat(500));
     source.push('\n');
     source.push_str("pub(crate) async fn alpha() {\n    same();\n}\n#[tool]\n");
     source.push_str("pub(crate) async fn beta() {\n    same();\n}\n");
@@ -289,6 +289,7 @@ fn tool_method_body_parser_covers_public_methods_without_claiming_helpers() {
 pub(crate) async fn alpha() { same(); }
 #[tool(description = "Second tool")]
 pub async fn beta() { same(); }
+/// The retired `#[tool]` wrapper delegated to this helper.
 pub async fn ordinary_helper() { other(); }
 #[tool_router]
 pub async fn router_helper() { other(); }
@@ -356,11 +357,20 @@ fn tool_method_bodies(path: &str, source: &str) -> Vec<(String, String)> {
         let preceding = &source[..fn_start];
         let is_public =
             preceding.trim_end().ends_with("pub(crate)") || preceding.trim_end().ends_with("pub");
-        let is_tool = preceding.rfind("#[tool").is_some_and(|start| {
-            let attribute = &preceding[start..];
-            (attribute.starts_with("#[tool(") || attribute.starts_with("#[tool]"))
-                && !attribute.contains("fn ")
-        });
+        let is_tool = preceding
+            .rmatch_indices("#[tool")
+            .find(|&(start, _)| {
+                let before_attribute = &preceding[..start];
+                before_attribute
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line_prefix| line_prefix.trim().is_empty())
+            })
+            .is_some_and(|(start, _)| {
+                let attribute = &preceding[start..];
+                (attribute.starts_with("#[tool(") || attribute.starts_with("#[tool]"))
+                    && !attribute.contains("fn ")
+            });
         if !is_public || !is_tool {
             offset = fn_start + "async fn ".len();
             continue;

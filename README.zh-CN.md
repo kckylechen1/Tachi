@@ -238,7 +238,7 @@ graph TD
 | 路径 | 说明 |
 |------|------|
 | `crates/memcore` | 存储、迁移、混合检索、图谱、Vault 元数据、sqlite-vec。 |
-| `crates/tachi-server` | MCP 服务器与守护进程：路由、项目绑定、简报、Hub、派遣、Wiki、后台任务。 |
+| `crates/tachi-server` | MCP 服务器与守护进程：路由、项目绑定、简报、Hub、派遣、Wiki、后台任务，以及捕获校验、提示覆盖与运维 CLI 模块。 |
 | `crates/tachi-params` | 类型化的工具参数与门面 schema。 |
 | `crates/tachi-hub` | Hub 能力策略与 Skill 可见性规则。 |
 | `crates/tachi-bootstrap` | CLI 命令契约与启动解析。 |

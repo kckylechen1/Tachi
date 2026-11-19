@@ -472,10 +472,12 @@ Contract:
   already-approved row removes the inherited `review_receipt` and
   `source_bundle_hash` in the same projection transaction and returns the
   row to `pending_review` / `advisory`: an ordinary write is never an
-  approval. Public generic saves already strip both. Wiki ingest and the
-  REM evolver do not use the projection seam (both build fresh
-  replacement rows and supersede their predecessors), so trusted ingest
-  semantics are unchanged.
+  approval. Public generic saves already strip both. Wiki ingest does not
+  use the projection seam, so trusted ingest semantics are unchanged.
+  Weekly REM clustering and model-generated draft production are retired;
+  the daemon's existing Sunday maintenance pass only recovers historical
+  `pending_sources` operations and their cross-store source claims. Existing
+  drafts retain their review and read behavior.
 - **Effective-applicability gate** — apply refuses before any mutation
   when the approved row would not derive `active` (for example shared
   scope without bounded applicability and typed origins), so an approved

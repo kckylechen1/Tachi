@@ -1,10 +1,7 @@
 use memcore::MemoryEntry;
-use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 mod daily_distill;
 
@@ -68,10 +65,7 @@ pub fn classify_foundry_route(
 const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
 pub const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING: f64 = 0.85;
-const GUIDE_TYPE_CONSTRAINT: &str = "constraint";
 const GUIDE_TYPE_FIX_PATTERN: &str = "fix_pattern";
-const GUIDE_TYPE_DECISION: &str = "decision";
-const GUIDE_TYPE_RUNBOOK: &str = "runbook";
 
 #[derive(Debug, Clone)]
 pub struct DistillBucket {
@@ -80,24 +74,6 @@ pub struct DistillBucket {
     pub coherence_key: String,
     pub entries: Vec<MemoryEntry>,
     pub quality_flags: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct GuideDistillPlan {
-    pub path: String,
-    pub summary: String,
-    pub guide_type: String,
-    pub keywords: Vec<String>,
-    pub entities: Vec<String>,
-    pub file_patterns: Vec<String>,
-    pub error_patterns: Vec<String>,
-    pub source_memory_ids: Vec<String>,
-    pub source_path_prefix: String,
-    pub namespace_key: String,
-    pub coherence_key: String,
-    pub bucket_key: String,
-    pub quality_flags: Vec<String>,
-    pub legacy_distill_root: String,
 }
 
 #[derive(Debug, Clone)]
@@ -386,78 +362,6 @@ pub fn collect_coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<Distil
         .collect()
 }
 
-pub fn select_memory_distill_bucket(
-    entries: Vec<MemoryEntry>,
-    preferred_coherence_key: Option<&str>,
-    fallback_path_prefix: &str,
-) -> Option<DistillBucket> {
-    let mut buckets = collect_coherent_distill_buckets(entries);
-    if buckets.is_empty() {
-        return None;
-    }
-
-    if let Some(preferred_key) = preferred_coherence_key {
-        let preferred_bucket_key = format!("{fallback_path_prefix}#{preferred_key}");
-        if let Some(index) = buckets.iter().position(|bucket| {
-            bucket.bucket_key == preferred_bucket_key || bucket.bucket_key == preferred_key
-        }) {
-            return Some(buckets.swap_remove(index));
-        }
-    }
-
-    buckets.sort_by_key(|bucket| Reverse(bucket.entries.len()));
-    buckets.into_iter().next()
-}
-
-pub fn build_memory_distill_input(bucket: &DistillBucket) -> String {
-    build_distill_input(&bucket.entries)
-}
-
-pub fn plan_guide_distill_memory(
-    agent_id: &str,
-    bucket: &DistillBucket,
-    distill_text: &str,
-    timestamp_segment: &str,
-) -> GuideDistillPlan {
-    let guide_type = classify_distill_guide_type(distill_text, &bucket.entries);
-    let mut keywords = vec![
-        "foundry".to_string(),
-        "distill".to_string(),
-        "guide".to_string(),
-        guide_type.to_string(),
-    ];
-    for entry in &bucket.entries {
-        keywords.extend(entry.keywords.iter().cloned());
-    }
-
-    GuideDistillPlan {
-        path: build_guide_distill_path(agent_id, guide_type, timestamp_segment),
-        summary: distill_text.chars().take(100).collect(),
-        guide_type: guide_type.to_string(),
-        keywords: dedup_strings(keywords),
-        entities: dedup_strings(
-            bucket
-                .entries
-                .iter()
-                .flat_map(|entry| entry.entities.clone())
-                .collect(),
-        ),
-        file_patterns: infer_file_patterns(&bucket.entries),
-        error_patterns: infer_error_patterns(distill_text, &bucket.entries),
-        source_memory_ids: bucket
-            .entries
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect(),
-        source_path_prefix: bucket.path_prefix.clone(),
-        namespace_key: bucket.path_prefix.clone(),
-        coherence_key: bucket.coherence_key.clone(),
-        bucket_key: bucket.bucket_key.clone(),
-        quality_flags: bucket.quality_flags.clone(),
-        legacy_distill_root: build_foundry_distill_root(agent_id),
-    }
-}
-
 pub fn plan_daily_distill_memory(input: DailyDistillMemoryInput<'_>) -> DailyDistillMemoryPlan {
     let summary = if input.payload_summary.trim().is_empty() {
         input.payload_text.chars().take(100).collect::<String>()
@@ -660,45 +564,6 @@ fn coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<(String, Vec<Memor
         .collect()
 }
 
-fn build_distill_input(entries: &[MemoryEntry]) -> String {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(idx, entry)| {
-            let summary = if entry.summary.trim().is_empty() {
-                entry.text.chars().take(180).collect::<String>()
-            } else {
-                entry.summary.clone()
-            };
-            format!(
-                "Memory {} | topic={} | importance={:.2}\nSummary: {}\nText: {}",
-                idx + 1,
-                if entry.topic.is_empty() {
-                    "unknown"
-                } else {
-                    &entry.topic
-                },
-                entry.importance,
-                summary,
-                entry.text.chars().take(320).collect::<String>()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn guide_text_fragments<'a>(
-    distill_text: &'a str,
-    source_entries: &'a [MemoryEntry],
-) -> impl Iterator<Item = &'a str> {
-    std::iter::once(distill_text).chain(source_entries.iter().flat_map(|entry| {
-        std::iter::once(entry.summary.as_str())
-            .chain(std::iter::once(entry.text.as_str()))
-            .chain(std::iter::once(entry.topic.as_str()))
-            .chain(entry.keywords.iter().map(String::as_str))
-    }))
-}
-
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let n = needle.as_bytes();
     if n.is_empty() {
@@ -712,115 +577,10 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(n))
 }
 
-fn fragments_contain_any<'a, I>(fragments: I, needles: &[&str]) -> bool
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    for fragment in fragments {
-        for needle in needles {
-            if contains_ignore_ascii_case(fragment, needle) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles
         .iter()
         .any(|needle| contains_ignore_ascii_case(haystack, needle))
-}
-
-fn has_numbered_steps(text: &str) -> bool {
-    text.lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            let mut chars = trimmed.chars();
-            matches!(chars.next(), Some(ch) if ch.is_ascii_digit())
-                && matches!(chars.next(), Some('.' | ')'))
-        })
-        .take(2)
-        .count()
-        >= 2
-}
-
-fn classify_distill_guide_type(distill_text: &str, source_entries: &[MemoryEntry]) -> &'static str {
-    let fragments = || guide_text_fragments(distill_text, source_entries);
-
-    if fragments_contain_any(
-        fragments(),
-        &[
-            "fix",
-            "fixed",
-            "repair",
-            "bug",
-            "error",
-            "failure",
-            "failed",
-            "panic",
-            "exception",
-            "regression",
-            "linker",
-            "修复",
-            "报错",
-            "错误",
-            "失败",
-        ],
-    ) {
-        return GUIDE_TYPE_FIX_PATTERN;
-    }
-    if fragments_contain_any(
-        fragments(),
-        &[
-            "must",
-            "must not",
-            "never",
-            "required",
-            "constraint",
-            "invariant",
-            "policy",
-            "do not",
-            "don't",
-            "不得",
-            "必须",
-            "禁止",
-            "约束",
-        ],
-    ) {
-        return GUIDE_TYPE_CONSTRAINT;
-    }
-    if fragments_contain_any(
-        fragments(),
-        &[
-            "decided", "decision", "choose", "chosen", "accepted", "rejected", "tradeoff", "adr",
-            "决定", "取舍", "拒绝",
-        ],
-    ) || source_entries
-        .iter()
-        .any(|entry| entry.category.eq_ignore_ascii_case("decision"))
-    {
-        return GUIDE_TYPE_DECISION;
-    }
-    if fragments_contain_any(
-        fragments(),
-        &[
-            "runbook",
-            "checklist",
-            "procedure",
-            "step",
-            "steps",
-            "playbook",
-            "how to",
-            "操作",
-            "步骤",
-            "流程",
-        ],
-    ) || has_numbered_steps(distill_text)
-    {
-        return GUIDE_TYPE_RUNBOOK;
-    }
-    GUIDE_TYPE_RUNBOOK
 }
 
 fn mentions_rejection(text: &str) -> bool {
@@ -849,10 +609,8 @@ fn mentions_rejection(text: &str) -> bool {
 /// `distill_text` — it is the deterministic batch->source distillation link
 /// ([`EdgeAuthority::StructuralBookkeeping`]'s own doc example, "a
 /// distillation follows-chain"). Every other relation below is chosen by
-/// reading content: `fixed_by`/`causes` come from `guide_type`, and
-/// `classify_distill_guide_type` (this crate) that produces most callers'
-/// `guide_type` is itself a keyword-substring match against free text — the
-/// exact shape [`EdgeAuthority::DerivedHeuristic`] names; `rejected_because`
+/// reading content: guide-type relations are advisory derivations, the
+/// shape [`EdgeAuthority::DerivedHeuristic`] names; `rejected_because`
 /// comes straight from [`mentions_rejection`], also a keyword-substring
 /// match. Mirrors `compact/edges.rs:27-64`'s demotion exactly: `causes`
 /// (0.80 scorer activation multiplier, `scorer::graph_relation_activation_weight`)
@@ -944,15 +702,6 @@ pub fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
 
-fn build_guide_distill_path(agent_id: &str, guide_type: &str, timestamp_segment: &str) -> String {
-    format!(
-        "/guide/{}/{}/{}",
-        guide_type,
-        sanitize_safe_path_name(agent_id),
-        timestamp_segment
-    )
-}
-
 pub fn infer_memory_insight(
     entry: &MemoryEntry,
     avg_importance: f64,
@@ -998,170 +747,6 @@ pub fn infer_memory_insight(
             "related_count": related_count,
         }
     })
-}
-
-fn trim_context_token(raw: &str) -> String {
-    raw.trim_matches(|ch: char| {
-        ch.is_whitespace()
-            || matches!(
-                ch,
-                '`' | '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
-            )
-    })
-    .trim_end_matches('.')
-    .to_string()
-}
-
-fn looks_like_file_pattern(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty() {
-        return false;
-    }
-    if value.starts_with("http://") || value.starts_with("https://") {
-        return false;
-    }
-    let has_path_separator = value.contains('/');
-    let has_wildcard = value.contains('*');
-    if !has_path_separator && !has_wildcard {
-        match value.rfind('.') {
-            Some(dot) if dot > 0 && dot < value.len() - 1 => {}
-            _ => return false,
-        }
-    }
-    has_wildcard
-        || value.ends_with(".rs")
-        || value.ends_with(".ts")
-        || value.ends_with(".tsx")
-        || value.ends_with(".js")
-        || value.ends_with(".jsx")
-        || value.ends_with(".py")
-        || value.ends_with(".go")
-        || value.ends_with(".java")
-        || value.ends_with(".md")
-        || value.ends_with(".toml")
-        || value.ends_with(".json")
-        || value.ends_with(".yaml")
-        || value.ends_with(".yml")
-}
-
-fn file_pattern_token_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"[A-Za-z0-9_./*\-]+").expect("file pattern regex compiles"))
-}
-
-fn wildcard_for_file_path(path: &str) -> Option<String> {
-    let slash = path.rfind('/')?;
-    let dot = path.rfind('.')?;
-    if dot <= slash {
-        return None;
-    }
-    Some(format!("{}/*{}", &path[..slash], &path[dot..]))
-}
-
-fn collect_file_patterns_from_text(text: &str, out: &mut Vec<String>) {
-    for mat in file_pattern_token_regex().find_iter(text) {
-        let candidate = mat.as_str();
-        let bytes = candidate.as_bytes();
-        if !bytes.iter().any(|b| matches!(b, b'*' | b'.' | b'/')) {
-            continue;
-        }
-        let token = trim_context_token(candidate);
-        if looks_like_file_pattern(&token) {
-            if let Some(wildcard) = wildcard_for_file_path(&token) {
-                out.push(token);
-                out.push(wildcard);
-            } else {
-                out.push(token);
-            }
-        }
-    }
-}
-
-fn collect_metadata_file_patterns(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(raw) => {
-            let token = trim_context_token(raw);
-            if looks_like_file_pattern(&token) {
-                out.push(token.clone());
-                if let Some(wildcard) = wildcard_for_file_path(&token) {
-                    out.push(wildcard);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_metadata_file_patterns(item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                let key = key.to_ascii_lowercase();
-                if key.contains("file") || key.contains("path") {
-                    collect_metadata_file_patterns(value, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn infer_file_patterns(source_entries: &[MemoryEntry]) -> Vec<String> {
-    let mut patterns = Vec::new();
-    for entry in source_entries {
-        let context_path = entry
-            .metadata
-            .get("context_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        for candidate in [&entry.path, &entry.location, context_path] {
-            let token = trim_context_token(candidate);
-            if looks_like_file_pattern(&token) {
-                patterns.push(token.clone());
-                if let Some(wildcard) = wildcard_for_file_path(&token) {
-                    patterns.push(wildcard);
-                }
-            }
-        }
-        collect_metadata_file_patterns(&entry.metadata, &mut patterns);
-        collect_file_patterns_from_text(&entry.text, &mut patterns);
-    }
-    dedup_strings(patterns).into_iter().take(12).collect()
-}
-
-fn looks_like_error_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    contains_any(
-        &lower,
-        &[
-            "error",
-            "failed",
-            "failure",
-            "panic",
-            "exception",
-            "could not",
-            "cannot",
-            "linker",
-            "报错",
-            "错误",
-            "失败",
-        ],
-    )
-}
-
-fn infer_error_patterns(distill_text: &str, source_entries: &[MemoryEntry]) -> Vec<String> {
-    let mut patterns = Vec::new();
-    for text in std::iter::once(distill_text).chain(
-        source_entries
-            .iter()
-            .flat_map(|entry| [entry.summary.as_str(), entry.text.as_str()]),
-    ) {
-        for line in text.lines() {
-            if looks_like_error_line(line) {
-                patterns.push(line.trim().chars().take(120).collect::<String>());
-            }
-        }
-    }
-    dedup_strings(patterns).into_iter().take(8).collect()
 }
 
 #[cfg(test)]
@@ -1585,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn guide_planning_emits_edges_and_patterns() {
+    fn distill_edges_preserve_structural_and_heuristic_authority() {
         let source = entry(
             "source-1",
             "/project/tachi/crates/tachi-server/src/tools.rs",
@@ -1605,20 +1190,6 @@ mod tests {
             ..source.clone()
         };
 
-        assert_eq!(
-            classify_distill_guide_type(
-                "Fix linker error by rebuilding sqlite vec.",
-                std::slice::from_ref(&source)
-            ),
-            "fix_pattern"
-        );
-        assert!(infer_file_patterns(std::slice::from_ref(&source))
-            .contains(&"crates/tachi-server/src/tools.rs".to_string()));
-        assert!(
-            infer_error_patterns(&guide.text, std::slice::from_ref(&source))
-                .iter()
-                .any(|line| line.contains("linker error"))
-        );
         let edges = build_distill_edges(&guide, &[source], "fix_pattern", &guide.timestamp);
         let relations = edges
             .iter()

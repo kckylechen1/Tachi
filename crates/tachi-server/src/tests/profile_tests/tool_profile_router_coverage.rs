@@ -151,6 +151,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_tune",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_research",
     "wiki_browse",
     // These standalone routes folded into the Memory and Wiki facades.
     "extract_facts",

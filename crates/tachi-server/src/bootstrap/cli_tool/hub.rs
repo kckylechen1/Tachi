@@ -1,3 +1,6 @@
+#[cfg(feature = "full")]
+mod registry;
+
 use memcore::HubCapability;
 use rusqlite::OptionalExtension as _;
 use serde_json::json;
@@ -41,7 +44,7 @@ pub(crate) fn preflight_hub_action(action: &HubAction) -> Result<(), Box<dyn std
 }
 
 fn resolve_hub_enable_preflight_db(cli: &Cli, home: &Path, app_home: &Path) -> Option<PathBuf> {
-    let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
+    let hub_db = registry::resolve_hub_db(None, app_home);
     if memcore::legacy_copy_marker_path(&hub_db).exists() {
         return None;
     }
@@ -210,11 +213,8 @@ pub(crate) fn preflight_hub_action_with_home(
 
 fn collect_visible_hub_stats(
     hub_db: &Path,
-) -> Result<memory_server_hub_cli::HubStatsSnapshot, Box<dyn std::error::Error>> {
-    memory_server_hub_cli::collect_stats_filtered(
-        hub_db,
-        crate::builtins::is_visible_hub_capability,
-    )
+) -> Result<registry::HubStatsSnapshot, Box<dyn std::error::Error>> {
+    registry::collect_stats_filtered(hub_db, crate::builtins::is_visible_hub_capability)
 }
 
 fn collect_visible_hub_list(
@@ -222,7 +222,7 @@ fn collect_visible_hub_list(
     cap_type: Option<&str>,
     all: bool,
 ) -> Result<Vec<HubCapability>, Box<dyn std::error::Error>> {
-    memory_server_hub_cli::collect_list_filtered_with(
+    registry::collect_list_filtered_with(
         hub_db,
         cap_type,
         all,
@@ -235,7 +235,7 @@ pub(super) async fn run_hub_command(
     app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     preflight_hub_action(&action)?;
-    let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
+    let hub_db = registry::resolve_hub_db(None, app_home);
     match action {
         HubAction::List {
             cap_type,
@@ -250,7 +250,7 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            memory_server_hub_cli::cmd_list_filtered(
+            registry::cmd_list_filtered(
                 &hub_db,
                 cap_type.as_deref(),
                 all,
@@ -259,17 +259,17 @@ pub(super) async fn run_hub_command(
             Ok(())
         }
         HubAction::Show { id } => {
-            memory_server_hub_cli::run(&HubAction::Show { id }, &hub_db, app_home)
+            registry::run(&HubAction::Show { id }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
         HubAction::Bindings => {
-            memory_server_hub_cli::run(&HubAction::Bindings, &hub_db, app_home)
+            registry::run(&HubAction::Bindings, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
         HubAction::Doctor { fix } => {
-            memory_server_hub_cli::run(&HubAction::Doctor { fix }, &hub_db, app_home)
+            registry::run(&HubAction::Doctor { fix }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
@@ -352,11 +352,8 @@ pub(super) async fn run_hub_command(
             }))
         }
         HubAction::Stats { json: false } => {
-            memory_server_hub_cli::cmd_stats_filtered(
-                &hub_db,
-                crate::builtins::is_visible_hub_capability,
-            )
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            registry::cmd_stats_filtered(&hub_db, crate::builtins::is_visible_hub_capability)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
     }
@@ -399,7 +396,7 @@ mod tests {
             "tachi-cli-retired-register-{}",
             uuid::Uuid::new_v4()
         ));
-        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        let hub_db = registry::resolve_hub_db(None, &app_home);
 
         let err = run_hub_command(
             HubAction::Register {
@@ -425,7 +422,7 @@ mod tests {
         let _env = hub_db_env_isolation();
         let root = tempfile::tempdir().expect("fixture root");
         let app_home = root.path().join("home");
-        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        let hub_db = registry::resolve_hub_db(None, &app_home);
         for cap_type in ["mcp", "virtual"] {
             let err = run_hub_command(
                 HubAction::Register {
@@ -452,7 +449,7 @@ mod tests {
             "tachi-cli-retired-enable-{}",
             uuid::Uuid::new_v4()
         ));
-        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        let hub_db = registry::resolve_hub_db(None, &app_home);
         std::fs::create_dir_all(hub_db.parent().expect("Hub DB parent")).unwrap();
         let store = memcore::MemoryStore::open(hub_db.to_string_lossy().as_ref()).unwrap();
         let legacy = HubCapability {
