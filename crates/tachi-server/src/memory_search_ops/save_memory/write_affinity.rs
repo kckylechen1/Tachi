@@ -75,11 +75,9 @@
 //!   `resolve_save_domain` does for `save_memory`).
 //! - **Foundry distill** — verified NOT gated by #1114, and deliberately so:
 //!   `foundry_runtime_ops/daily_distill/persist.rs::persist_distill_memory`
-//!   and `foundry_runtime_ops/maintenance/distill_job.rs::process_memory_distill_job`
-//!   both read their source memories from one specific store
+//!   reads its source memories from one specific store
 //!   (`daily_distill/candidates.rs::collect_candidate_groups`'s
-//!   `project`/`FoundryMaintenanceItem`'s `target_db`/`named_project`/
-//!   `db_path`) and write the distilled summary BACK into that exact same
+//!   `project`) and writes the distilled summary BACK into that exact same
 //!   store — source and destination are the same store by construction
 //!   (`daily_distill/runner.rs::distill_one_project` threads one `project`
 //!   value through both the read and the write). There is no ambiguous

@@ -18,8 +18,7 @@ fn pending_review_draft_entry() -> memcore::MemoryEntry {
     entry.path = "/wiki/drafts/lifecycle-gate-draft".to_string();
     entry.summary = "Lifecycle gate pending draft".to_string();
     entry.text = "LifecycleGateNeedle documents the unreviewed pending draft entry.".to_string();
-    // Mirrors `foundry_runtime_ops::wiki_evolver::save_wiki_draft`'s real
-    // metadata marker, not a fabricated one this leaf invented.
+    // Historical REM drafts retain this review marker after the producer retires.
     entry.metadata = json!({"review_status": "pending"});
     entry
 }

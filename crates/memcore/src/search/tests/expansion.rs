@@ -10,18 +10,20 @@ fn fts_expansion_rejects_sqlite_unrepresentable_as_of_before_empty_query() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        // Six-digit signed year: parses under jiff, below SQLite's julianday
+        // domain, so the julianday gate fires.
+        Some("-004713-01-01T00:00:00Z"),
         &RecallConfig::default(),
         false,
         None,
         false,
     )
     .expect_err("FTS expansion must validate as_of before its empty-query return");
-    // Parse-gate rejection under jiff (no years past 9999, no BCE years, so
-    // the julianday gate is unreachable from string input — see
-    // time_compat::parser_parity_drift_is_pinned). `expect_err` above pins
-    // that the rejection still fires before the empty-query return.
-    assert!(matches!(error, crate::MemoryError::InvalidArg(_)));
+    assert!(matches!(
+        error,
+        crate::MemoryError::InvalidArg(ref message)
+            if message.contains("outside the SQLite julianday range")
+    ));
 }
 
 #[test]

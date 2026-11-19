@@ -1,46 +1,13 @@
-//! Dispatch V2 — Two-stage Plan -> Execute (Phase 6).
+//! Shared dispatch trajectory and canonical status writers.
 //!
-//! This module layers a real LLM-generated plan in front of the existing
-//! single-stage dispatch. It is **opt-in**: the default behaviour stays V1
-//! (see `dispatch.rs`) until operators flip the env var or pass a
-//! `stage="auto" | "plan_execute"`.
-//!
-//! Stage 1 (Plan):
-//!   * builds a planning prompt = `PLAN_SYSTEM_PROMPT` + task body
-//!   * invokes the provider-only reasoning lane (bounded by a wall-clock
-//!     timeout), preserving the lane's retry/key-rotation/cross-provider-
-//!     fallback policy and returning the actual serving engine's receipt.
-//!   * publishes the plan content and its exact `model-invocation-v1`
-//!     receipt together into `<run_dir>/status.json#/model_plan` — one
-//!     locked, fenced, atomic replacement (see `model_plan_commit`). The V1
-//!     placeholder `plan.md` is never overwritten with model content.
-//!   * appends a `plan_generated` event to `trajectory.jsonl` only after the
-//!     commit succeeds.
-//!   * an empty, truncated, or failed plan is treated as a hard error (no
-//!     silent fallback to V1 single-stage; the dispatcher is supposed to fail
-//!     loudly so the operator notices the planner regression).
-//!
-//! Stage 2 (Execute):
-//!   * the original V1 execute path is reused — see `dispatch.rs`. V2 just
-//!     enriches the prompt with the committed Stage-1 plan and the
-//!     `skill:implement-plan` skill body (inline fallback below; the
-//!     capability registry version, if present, is layered in by
-//!     `prompt::assemble_prompt`).
-//!
-//! Review gate:
-//!   * `DISPATCH_V2_PLAN_REVIEW=true` makes the dispatcher pause after
-//!     Stage 1 — for non-interactive callers this means returning a
-//!     `pending_review` response without executing. The MVP does NOT block
-//!     the async path on a TTY confirm; review is auditable via
-//!     `status.json#/model_plan` (plus the placeholder plan.md).
+//! New dispatches execute the host-supplied assignment without a server-side
+//! planning call. Historical model-plan receipts and planner failures remain
+//! readable and retain their original completion authority.
 
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Instant;
-use tachi_llm::{CompletionStatusV1, PersistedModelInvocationReceiptV1};
 
-mod model_plan_commit;
 #[cfg(all(test, windows))]
 mod windows_status_writers {
     use super::*;
@@ -66,7 +33,7 @@ mod windows_status_writers {
     }
 
     #[test]
-    fn generic_route_and_plan_writers_share_the_windows_private_fence() {
+    fn generic_and_route_writers_share_the_windows_private_fence() {
         let temp = tempfile::tempdir().unwrap();
         let run = temp.path();
         ordinary_write(
@@ -83,8 +50,6 @@ mod windows_status_writers {
         let status: Value = serde_json::from_slice(&before).unwrap();
         assert_eq!(status["route_decision_id"], "route-first");
         assert_eq!(status["project"], "preserved");
-        let revision = status["status_revision"].as_u64().unwrap();
-        let plan = PlanCommit::open(run, DISPATCH_ID).unwrap();
         std::fs::hard_link(
             run.join(".status-mutation.lock"),
             run.join("invalid-fence-link"),
@@ -92,17 +57,6 @@ mod windows_status_writers {
         .unwrap();
         ordinary_write(&alias, json!({"state":"TASK_STATE_COMPLETED"}));
         assert!(stamp_route_decision_id(&alias, "route-refused").is_err());
-        assert!(plan
-            .commit(
-                revision,
-                "## Goal\nThis must not be committed.",
-                &PersistedModelInvocationReceiptV1::test_fixture_reasoning(5),
-            )
-            .is_err());
-        assert!(matches!(
-            plan.publish_plan_failure(revision, "must not publish"),
-            PlanFailurePublication::PersistFailed
-        ));
         assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
     }
 
@@ -150,12 +104,18 @@ mod windows_status_writers {
     }
 }
 
-#[cfg(test)]
-pub(crate) use model_plan_commit::fail_next_plan_commit_write;
-pub(crate) use model_plan_commit::planner_failure_winner;
-pub(super) use model_plan_commit::{
-    CommittedModelPlan, PlanCommit, PlanCommitPre, PlanFailurePublication,
-};
+/// Recognize a historical planner failure without treating an ordinary
+/// execution failure as a planner winner. Completion must preserve this fact.
+pub(crate) fn planner_failure_winner(status: &serde_json::Map<String, Value>) -> bool {
+    status
+        .get("plan_failure")
+        .and_then(Value::as_object)
+        .and_then(|failure| failure.get("stage"))
+        .and_then(Value::as_str)
+        == Some("plan")
+        && status.get("state").and_then(Value::as_str) == Some("TASK_STATE_FAILED")
+        && !status.contains_key("model_plan")
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum StatusJsonLockKey {
@@ -264,265 +224,6 @@ fn persist_managed_terminal_status_failure(
             fence,
         )
         .map_err(|error| format!("write {}: {error}", target.status_path().display()))
-}
-
-/// System prompt prepended to the Stage-1 task body. Kept verbatim so the
-/// LLM produces a deterministic, parseable plan layout.
-pub(super) const PLAN_SYSTEM_PROMPT: &str = r#"You are a planning engine for Tachi dispatch.
-Given a task, output a markdown plan with EXACTLY these top-level sections, in order:
-
-## Goal
-One sentence describing the desired outcome.
-
-## Steps
-Numbered list. Each step must be concrete and independently verifiable.
-
-## Files
-- bullet list of files (relative paths) likely to be created or modified.
-
-## Validation
-- shell commands that prove the change works (e.g. `cargo test -p tachi-server`).
-
-Output ONLY the plan markdown. No preamble, no postscript, no code-fence wrapping
-the whole document."#;
-
-/// Inline fallback for the implement-plan skill when the capability is not
-/// registered in the running server. Keeps V2 functional on fresh boxes.
-///
-/// The canonical plan is the committed `status.json#/model_plan.content`
-/// (bound by its `model_invocation` receipt), also inlined below as
-/// `## Plan (from Stage 1)`. The V1 placeholder `plan.md` is not a model plan
-/// and must not be read as one.
-pub(super) const IMPLEMENT_PLAN_SKILL_FALLBACK: &str = r#"## Skill: implement-plan
-The plan is this dispatch's committed model plan: `status.json#/model_plan.content`,
-whose `model_invocation` receipt is bound to that exact content. Legacy
-single-stage (V1) dispatches carry no model plan (`n/a`). The committed plan is
-also appended below as `## Plan (from Stage 1)`. Follow it step by step; do not
-redesign it. After each step run the relevant Validation command. Stop and report
-blockers instead of improvising outside the plan. When done, call
-tachi_task(action="complete") with the dispatch_id."#;
-
-/// Default wall-clock budget for Stage 1 (`claude_pool.call`). Independent of
-/// the broader dispatch timeout so a slow planner can't burn the execute
-/// budget.
-pub(super) const DEFAULT_PLAN_TIMEOUT_SECS: u64 = 180;
-
-/// Generous ceiling for the Stage-1 plan-stage provider call (#1214 BUG#3) —
-/// a markdown plan (Goal/Steps/Files/Validation) can run longer than the
-/// terse JSON verdicts the other provider-rollout consumers produce.
-const PLAN_PROVIDER_MAX_TOKENS: u32 = 2000;
-
-/// Result of evaluating whether V2 should kick in for a given dispatch call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum V2Decision {
-    Enabled,
-    Disabled,
-}
-
-/// V2 is enabled when either:
-///   * `DISPATCH_V2_ENABLED=true|1|on|yes` is exported, OR
-///   * the per-call `stage` is one of `"auto"` / `"plan_execute"`.
-///
-/// Anything else (including the existing `"plan"` / `"execute"` single-stage
-/// hints used by the V1 prompt assembler) leaves V1 untouched.
-pub(super) fn v2_enabled(env_val: Option<&str>, stage: Option<&str>) -> V2Decision {
-    let env_on = env_val
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-    let stage_on = stage
-        .map(|s| {
-            matches!(
-                s.trim().to_ascii_lowercase().as_str(),
-                "auto" | "plan_execute"
-            )
-        })
-        .unwrap_or(false);
-    if env_on || stage_on {
-        V2Decision::Enabled
-    } else {
-        V2Decision::Disabled
-    }
-}
-
-/// Convenience reader that consults the live environment + stage param.
-pub(super) fn v2_enabled_from_env(stage: Option<&str>) -> V2Decision {
-    let env_val = std::env::var("DISPATCH_V2_ENABLED").ok();
-    v2_enabled(env_val.as_deref(), stage)
-}
-
-/// Whether a non-interactive review gate should pause execution after the
-/// plan is produced. Default false — the plan is still persisted so a human
-/// can audit it after the fact.
-pub(super) fn plan_review_required() -> bool {
-    std::env::var("DISPATCH_V2_PLAN_REVIEW")
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-pub(super) fn plan_timeout_secs() -> u64 {
-    std::env::var("DISPATCH_V2_PLAN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_PLAN_TIMEOUT_SECS)
-}
-
-/// Outcome of Stage 1: the plan body and the exact serving-engine receipt
-/// that produced it.
-pub(super) struct PlanOutcome {
-    pub plan_md: String,
-    pub invocation: PersistedModelInvocationReceiptV1,
-    pub duration_ms: u64,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(super) enum PlanStageTestOverride {
-    Success {
-        plan_md: String,
-        duration_ms: u64,
-    },
-    SuccessWithAssertion {
-        plan_md: String,
-        duration_ms: u64,
-        assert_before_return: PlanStageTestAssertion,
-    },
-    Failure(String),
-    Pending,
-}
-
-#[cfg(test)]
-pub(super) type PlanStageTestAssertion =
-    for<'a> fn(
-        &'a crate::MemoryServer,
-        &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
-
-#[cfg(test)]
-fn plan_stage_test_override() -> &'static std::sync::Mutex<Option<PlanStageTestOverride>> {
-    static OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<PlanStageTestOverride>>> =
-        std::sync::OnceLock::new();
-    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// One-shot planner outcome injection for the dispatch lifecycle discriminator.
-/// Compiled out of production: provider execution remains the only runtime path.
-#[cfg(test)]
-pub(super) fn set_plan_stage_test_override(value: Option<PlanStageTestOverride>) {
-    *plan_stage_test_override()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
-}
-
-/// Run Stage 1. Returns the plan body and elapsed time, or a descriptive
-/// error suitable for surfacing to the caller AND for writing to status.json.
-pub(super) async fn run_plan_stage(
-    server: &crate::MemoryServer,
-    task: &str,
-    _label: &str,
-) -> Result<PlanOutcome, String> {
-    #[cfg(test)]
-    let override_result = {
-        plan_stage_test_override()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-    };
-    #[cfg(test)]
-    if let Some(override_result) = override_result {
-        return match override_result {
-            PlanStageTestOverride::Success {
-                plan_md,
-                duration_ms,
-            } => Ok(PlanOutcome {
-                plan_md,
-                invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
-                duration_ms,
-            }),
-            PlanStageTestOverride::SuccessWithAssertion {
-                plan_md,
-                duration_ms,
-                assert_before_return,
-            } => {
-                assert_before_return(server, _label).await;
-                Ok(PlanOutcome {
-                    plan_md,
-                    invocation: PersistedModelInvocationReceiptV1::test_fixture_reasoning(0),
-                    duration_ms,
-                })
-            }
-            PlanStageTestOverride::Failure(error) => Err(error),
-            PlanStageTestOverride::Pending => std::future::pending().await,
-        };
-    }
-    if task.trim().is_empty() {
-        return Err("dispatch v2: task is empty; cannot plan".to_string());
-    }
-
-    let started = Instant::now();
-    let generated = call_plan_llm(server, task.trim())
-        .await
-        .map_err(|e| format!("dispatch v2 stage1 (plan) failed: {e}"))?;
-    let duration_ms = started.elapsed().as_millis() as u64;
-
-    // Only an explicit provider-declared truncation is refused here. An
-    // unknown completion status stays parseable for legacy compatibility, so
-    // this does not silently tighten valid plan formats.
-    if generated.invocation.completion_status() == CompletionStatusV1::Truncated {
-        return Err(tachi_llm::LLM_OUTPUT_TRUNCATED.to_string());
-    }
-
-    let plan_md = generated.value.trim().to_string();
-    if plan_md.is_empty() {
-        return Err("dispatch v2 stage1 (plan) returned empty plan.md".to_string());
-    }
-
-    Ok(PlanOutcome {
-        plan_md,
-        invocation: generated.invocation,
-        duration_ms,
-    })
-}
-
-/// Run the Stage-1 plan-stage LLM call. This is a provider-only reasoning
-/// round-trip that keeps the lane's full serving policy (retry, key rotation,
-/// configured cross-provider fallback) and returns the actual serving
-/// engine's durable receipt.
-///
-/// The successful plan payload deliberately does **not** go through
-/// `LlmCallRecorder`: the recorder writes `result.md`, which would publish a
-/// second, uncommitted copy of the model output next to the plan. The single
-/// durable publication boundary for the plan is the committed
-/// `status.json#/model_plan` receipt (`model_plan_commit`).
-async fn call_plan_llm(
-    server: &crate::MemoryServer,
-    task: &str,
-) -> Result<tachi_llm::Generated<String>, String> {
-    // Preserve the retired recorder path's bounded-concurrency admission
-    // (`CLAUDE_POOL_MAX_CONCURRENT`, default `DEFAULT_MAX_CONCURRENT`) while
-    // publishing no recorder run-directory success artifact. The permit is
-    // held across the provider call and released on success or error.
-    let _permit = server.llm_recorder.acquire_slot().await?;
-    server
-        .llm
-        .call_reasoning_llm_provider_only_with_serving_receipt(
-            PLAN_SYSTEM_PROMPT,
-            task,
-            None,
-            0.2,
-            PLAN_PROVIDER_MAX_TOKENS,
-        )
-        .await
 }
 
 /// Append a single JSON event line to `<run_dir>/trajectory.jsonl`. Best-effort.
@@ -924,11 +625,9 @@ fn write_status_json_inner(
     }
     if let Some(Value::Object(map)) = extra {
         for (k, v) in map {
-            // A committed model plan is immutable for this status file. No
-            // generic writer may set, clear, or overwrite it via `extra`; only
-            // `model_plan_commit` publishes it, through its own anchored
-            // read-modify-write. The preserve-if-absent loop below carries an
-            // existing committed object forward instead.
+            // Historical model plans are immutable. No generic writer may
+            // create, clear, or overwrite one through `extra`; the existing
+            // receipt is carried forward below.
             if matches!(
                 k.as_str(),
                 "model_plan" | "acp_permission" | "acp_permission_history"
@@ -1036,10 +735,8 @@ fn write_status_json_inner(
                 "execution_classification",
                 "lifecycle_owner",
                 "cancellation",
-                // A committed plan and its receipt are published exactly once
-                // by `model_plan_commit`. Every later canonical writer carries
-                // the object forward unchanged so a `status_revision` bump can
-                // never rebind the plan's `artifact_revision` or receipt.
+                // Preserve historical plan content and its original receipt;
+                // a status revision must never rebind artifact_revision.
                 "model_plan",
                 "acp_permission",
                 "acp_permission_history",
@@ -1210,107 +907,6 @@ fn write_status_json_inner(
         eprintln!("[dispatch-v2] failed to write {}: {e}", path.display());
     }
     completion
-}
-
-/// Build the Stage-2 execution prompt — wraps the original task with the plan
-/// body and the implement-plan skill instructions. The result is fed into the
-/// same agent (claude / codex / custom) that V1 would have used.
-pub(super) fn build_execute_prompt(
-    plan_md: &str,
-    original_task: &str,
-    base_prompt: &str,
-) -> String {
-    let mut out = String::with_capacity(base_prompt.len() + plan_md.len() + 512);
-    out.push_str("You are executing a pre-approved plan from Tachi Dispatch V2.\n\n");
-    out.push_str(IMPLEMENT_PLAN_SKILL_FALLBACK);
-    out.push_str("\n\n## Plan (from Stage 1)\n");
-    out.push_str(plan_md.trim());
-    out.push_str("\n\n## Original Task\n");
-    out.push_str(original_task.trim());
-    out.push_str("\n\n## Stage-1 Assembled Context\n");
-    out.push_str(base_prompt.trim());
-    out.push_str(
-        "\n\nExecute the plan step by step. Do not redesign it. \
-         When done, call `tachi_task(action=\"complete\")` with the dispatch_id.\n",
-    );
-    out
-}
-
-/// Best-effort parser for the four canonical sections of a plan. Used by
-/// tests and by the kanban summary so we can surface plan health without
-/// dumping the whole markdown blob.
-pub(super) fn parse_plan_sections(plan_md: &str) -> PlanSections {
-    let mut goal = String::new();
-    let mut steps = String::new();
-    let mut files = String::new();
-    let mut validation = String::new();
-
-    #[derive(Clone, Copy)]
-    enum Section {
-        Goal,
-        Steps,
-        Files,
-        Validation,
-    }
-
-    let mut current: Option<Section> = None;
-    for line in plan_md.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            let header = rest.trim().to_ascii_lowercase();
-            current = match header.as_str() {
-                "goal" => Some(Section::Goal),
-                "steps" => Some(Section::Steps),
-                "files" => Some(Section::Files),
-                "validation" => Some(Section::Validation),
-                _ => None,
-            };
-            continue;
-        }
-        match current {
-            Some(Section::Goal) => {
-                goal.push_str(line);
-                goal.push('\n');
-            }
-            Some(Section::Steps) => {
-                steps.push_str(line);
-                steps.push('\n');
-            }
-            Some(Section::Files) => {
-                files.push_str(line);
-                files.push('\n');
-            }
-            Some(Section::Validation) => {
-                validation.push_str(line);
-                validation.push('\n');
-            }
-            None => {}
-        }
-    }
-
-    PlanSections {
-        goal: goal.trim().to_string(),
-        steps: steps.trim().to_string(),
-        files: files.trim().to_string(),
-        validation: validation.trim().to_string(),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PlanSections {
-    pub goal: String,
-    pub steps: String,
-    pub files: String,
-    pub validation: String,
-}
-
-impl PlanSections {
-    pub fn is_complete(&self) -> bool {
-        !self.goal.is_empty()
-            && !self.steps.is_empty()
-            && !self.files.is_empty()
-            && !self.validation.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -1548,292 +1144,92 @@ mod tests {
     }
 
     #[test]
-    fn v2_enabled_default_off() {
-        assert_eq!(v2_enabled(None, None), V2Decision::Disabled);
-        assert_eq!(
-            v2_enabled(Some("false"), Some("plan")),
-            V2Decision::Disabled
-        );
-        assert_eq!(v2_enabled(Some(""), Some("")), V2Decision::Disabled);
-    }
+    fn historical_model_plan_survives_generic_route_and_terminal_writers() {
+        use serde_json::json;
+        use tachi_llm::PersistedModelInvocationReceiptV1;
 
-    #[test]
-    fn v2_enabled_by_env() {
-        assert_eq!(v2_enabled(Some("true"), None), V2Decision::Enabled);
-        assert_eq!(v2_enabled(Some("1"), None), V2Decision::Enabled);
-        assert_eq!(v2_enabled(Some("YES"), Some("plan")), V2Decision::Enabled);
-        assert_eq!(v2_enabled(Some("on"), Some("execute")), V2Decision::Enabled);
-    }
-
-    #[test]
-    fn v2_enabled_by_stage() {
-        assert_eq!(v2_enabled(None, Some("auto")), V2Decision::Enabled);
-        assert_eq!(v2_enabled(None, Some("AUTO")), V2Decision::Enabled);
-        assert_eq!(v2_enabled(None, Some("plan_execute")), V2Decision::Enabled);
-        // Legacy single-stage hints stay V1.
-        assert_eq!(v2_enabled(None, Some("plan")), V2Decision::Disabled);
-        assert_eq!(v2_enabled(None, Some("execute")), V2Decision::Disabled);
-    }
-
-    #[test]
-    fn parse_plan_extracts_all_sections() {
-        let md = r#"## Goal
-Add a feature.
-
-## Steps
-1. Edit foo.rs
-2. Run tests
-
-## Files
-- foo.rs
-- bar.rs
-
-## Validation
-- cargo test
-- cargo clippy
-"#;
-        let sections = parse_plan_sections(md);
-        assert_eq!(sections.goal, "Add a feature.");
-        assert!(sections.steps.contains("Edit foo.rs"));
-        assert!(sections.files.contains("foo.rs"));
-        assert!(sections.validation.contains("cargo test"));
-        assert!(sections.is_complete());
-    }
-
-    #[test]
-    fn parse_plan_marks_incomplete_when_section_missing() {
-        let md = r#"## Goal
-Only goal here.
-"#;
-        let sections = parse_plan_sections(md);
-        assert!(!sections.is_complete());
-        assert_eq!(sections.goal, "Only goal here.");
-        assert!(sections.steps.is_empty());
-    }
-
-    #[test]
-    fn build_execute_prompt_embeds_plan_and_task() {
-        let prompt = build_execute_prompt("## Goal\nX", "do X", "ctx");
-        assert!(prompt.contains("## Plan (from Stage 1)"));
-        assert!(prompt.contains("## Goal\nX"));
-        assert!(prompt.contains("do X"));
-        assert!(prompt.contains("ctx"));
-        assert!(prompt.contains("implement-plan"));
-    }
-
-    /// #1664: both the dynamically loaded skill source and the inline fallback
-    /// must point at the committed `status.json#/model_plan` content. Neither
-    /// may instruct the executor to read the V1 placeholder `plan.md`.
-    #[test]
-    fn implement_plan_skill_and_inline_fallback_reference_committed_plan() {
-        let inline = IMPLEMENT_PLAN_SKILL_FALLBACK;
-        assert!(
-            !inline.contains("plan.md"),
-            "inline fallback must not point at the V1 placeholder: {inline}"
-        );
-        assert!(inline.contains("status.json#/model_plan"), "{inline}");
-        assert!(inline.contains("model_invocation"), "{inline}");
-
-        let skill_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../wiki/skills/implement-plan.md");
-        let skill = std::fs::read_to_string(&skill_path)
-            .unwrap_or_else(|error| panic!("read {}: {error}", skill_path.display()));
-        assert!(
-            !skill.contains("plan.md"),
-            "the implement-plan skill must not instruct reading the V1 placeholder: {skill}"
-        );
-        assert!(skill.contains("status.json#/model_plan"), "{skill}");
-        assert!(skill.contains("model_invocation"), "{skill}");
-        assert!(
-            skill.contains("n/a"),
-            "the skill must call out legacy V1 as n/a: {skill}"
-        );
-    }
-
-    async fn spawn_chat_provider(app: axum::Router) -> (u16, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind provider");
-        let port = listener.local_addr().expect("provider addr").port();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve provider");
+        let temp = tempfile::tempdir().expect("run directory");
+        let content = "## Goal\ncanonical host-visible historical plan";
+        let invocation = PersistedModelInvocationReceiptV1::test_fixture_reasoning(5)
+            .bound_to_content(content, "dispatch:d1:stage:plan".to_string(), 4);
+        let model_plan = json!({
+            "dispatch_id": "d1",
+            "stage": "plan",
+            "content": content,
+            "payload_digest": PersistedModelInvocationReceiptV1::content_hash_for(content),
+            "artifact_revision": 4,
+            "model_invocation": invocation,
         });
-        (port, task)
-    }
-
-    fn reasoning_client(port: u16) -> tachi_llm::LlmClient {
-        use tachi_llm::{
-            llm::{ChatLaneConfig, ProviderRuntimeConfig},
-            LlmClient, ProviderSecret, RerankConfig, RerankProviderKind,
-        };
-        let unused = || ChatLaneConfig {
-            base_url: "https://unused.test/v1/chat/completions".to_string(),
-            model: "unused".to_string(),
-            api_key_envs: vec!["UNUSED_KEY"],
-        };
-        let config = ProviderRuntimeConfig {
-            extract: unused(),
-            summary: unused(),
-            reasoning: ChatLaneConfig {
-                base_url: format!("http://127.0.0.1:{port}/chat/completions"),
-                model: "slot-test-model".to_string(),
-                api_key_envs: vec!["PLAN_SLOT_TEST_KEY"],
-            },
-            distill: unused(),
-            rerank: RerankConfig {
-                provider: RerankProviderKind::Voyage,
-                local_endpoint: None,
-            },
-        };
-        let client = LlmClient::new_with_config(config, None).expect("slot test client");
-        client.set_provider_secret_pool(
-            "PLAN_SLOT_TEST_KEY",
-            vec![ProviderSecret {
-                key_id: "PLAN_SLOT_TEST_KEY".to_string(),
-                value: "slot-test-secret".to_string(),
-            }],
-        );
-        client
-    }
-
-    fn plan_slot_server(port: u16) -> crate::tests::TestServer {
-        // `make_server` isolates the test home and binds the recorder's
-        // semaphore from `CLAUDE_POOL_MAX_CONCURRENT` at construction; the
-        // caller must have set that env var before this call (global lock).
-        let mut server = crate::tests::make_server();
-        server.replace_llm(reasoning_client(port));
-        server
-    }
-
-    #[derive(Clone)]
-    struct SlotInflightState {
-        inflight: Arc<std::sync::atomic::AtomicUsize>,
-        max_inflight: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    async fn slot_inflight_response(
-        axum::extract::State(state): axum::extract::State<SlotInflightState>,
-    ) -> axum::Json<serde_json::Value> {
-        use std::sync::atomic::Ordering;
-        let now = state.inflight.fetch_add(1, Ordering::SeqCst) + 1;
-        state.max_inflight.fetch_max(now, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-        state.inflight.fetch_sub(1, Ordering::SeqCst);
-        axum::Json(serde_json::json!({
-            "choices": [{
-                "message": {"role": "assistant", "content": "gated plan"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            "model": "slot-test-model"
-        }))
-    }
-
-    #[derive(Clone)]
-    struct SlotCallsState {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    async fn slot_first_rejected_response(
-        axum::extract::State(state): axum::extract::State<SlotCallsState>,
-    ) -> axum::response::Response {
-        use axum::response::IntoResponse;
-        use std::sync::atomic::Ordering;
-        if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                "synthetic plan rejection",
-            )
-                .into_response()
-        } else {
-            axum::Json(serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "second plan"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-                "model": "slot-test-model"
-            }))
-            .into_response()
-        }
-    }
-
-    /// #1664: two simultaneous plan provider calls with the recorder limit at
-    /// 1 must never exceed one provider request in flight — the same admission
-    /// the retired recorder path enforced.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn plan_provider_calls_share_the_recorder_slot_limit() {
-        use axum::{routing::post, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
-
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let max_inflight = Arc::new(AtomicUsize::new(0));
-        let state = SlotInflightState {
-            inflight: Arc::clone(&inflight),
-            max_inflight: Arc::clone(&max_inflight),
-        };
-        let (port, task) = spawn_chat_provider(
-            Router::new()
-                .route("/chat/completions", post(slot_inflight_response))
-                .with_state(state),
+        std::fs::write(
+            temp.path().join("status.json"),
+            json!({
+                "dispatch_id": "d1",
+                "state": "TASK_STATE_WORKING",
+                "status_revision": 4,
+                "model_plan": model_plan,
+            })
+            .to_string(),
         )
-        .await;
-        let server = plan_slot_server(port);
+        .expect("seed historical receipt");
 
-        let (a, b) = tokio::join!(
-            call_plan_llm(&server, "task-a"),
-            call_plan_llm(&server, "task-b")
+        write_status_json(
+            temp.path(),
+            "d1",
+            true,
+            Some("fixed"),
+            None,
+            "approved",
+            None,
+            None,
+            None,
+            None,
+            Some(json!({"state": "TASK_STATE_WORKING", "model_plan": {"forged": true}})),
         );
-        assert!(a.is_ok(), "{a:?}");
-        assert!(b.is_ok(), "{b:?}");
-        assert_eq!(
-            max_inflight.load(Ordering::SeqCst),
-            1,
-            "simultaneous plan calls must share the recorder's slot limit"
+        stamp_route_decision_id(temp.path(), "route-historical").expect("stamp route");
+        write_status_json(
+            temp.path(),
+            "d1",
+            true,
+            Some("fixed"),
+            Some("done"),
+            "approved",
+            Some(0),
+            None,
+            None,
+            None,
+            Some(json!({"state": "TASK_STATE_COMPLETED"})),
         );
-        task.abort();
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("status bytes"),
+        )
+        .expect("status JSON");
+        assert_eq!(status["model_plan"], model_plan);
+        assert!(status["status_revision"].as_u64().unwrap() > 4);
+        assert_eq!(status["route_decision_id"], "route-historical");
+        assert_eq!(status["state"], "TASK_STATE_COMPLETED");
     }
 
-    /// #1664: an errored plan provider call must release its slot so the next
-    /// plan can run. The first request gets a non-retriable 400; the second
-    /// must still reach the provider and succeed.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn plan_provider_slot_is_released_after_an_error() {
-        use axum::{routing::post, Router};
-
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _limit = crate::test_support::EnvRestore::set("CLAUDE_POOL_MAX_CONCURRENT", "1");
-
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let state = SlotCallsState {
-            calls: Arc::clone(&calls),
-        };
-        let (port, task) = spawn_chat_provider(
-            Router::new()
-                .route("/chat/completions", post(slot_first_rejected_response))
-                .with_state(state),
-        )
-        .await;
-        let server = plan_slot_server(port);
-
-        let (a, b) = tokio::join!(
-            call_plan_llm(&server, "task-a"),
-            call_plan_llm(&server, "task-b")
-        );
-        let successes = [a.is_ok(), b.is_ok()].into_iter().filter(|ok| *ok).count();
-        assert_eq!(
-            successes, 1,
-            "the erroring call must release the slot so the next plan can run: a={a:?} b={b:?}"
-        );
-        task.abort();
+    #[test]
+    fn planner_failure_winner_requires_the_historical_producer_shape() {
+        use serde_json::json;
+        let winner = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "plan", "error": "x"},
+        });
+        assert!(planner_failure_winner(winner.as_object().unwrap()));
+        let bare = json!({"state": "TASK_STATE_FAILED"});
+        assert!(!planner_failure_winner(bare.as_object().unwrap()));
+        let with_plan = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "plan"},
+            "model_plan": {"content": "## Goal\nx"},
+        });
+        assert!(!planner_failure_winner(with_plan.as_object().unwrap()));
+        let other_stage = json!({
+            "state": "TASK_STATE_FAILED",
+            "plan_failure": {"stage": "execute"},
+        });
+        assert!(!planner_failure_winner(other_stage.as_object().unwrap()));
     }
 }

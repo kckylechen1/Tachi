@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::str::FromStr;
 
 use chrono::Utc;
 use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
@@ -224,8 +223,8 @@ fn relevant_health<'a>(
         .collect()
 }
 
-fn health_updated_at(health: &VaultKeyHealth) -> Option<jiff::Timestamp> {
-    jiff::Timestamp::from_str(&health.updated_at).ok()
+fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()
 }
 
 fn health_is_attributed(
@@ -994,6 +993,18 @@ mod tests {
     }
 
     #[test]
+    fn listing_selects_latest_health_by_chrono_rfc3339_grammar() {
+        let mut older = new_key_health("older", "key", at(0));
+        older.updated_at = "2026-01-01T00:00:00Z".into();
+        let mut latest = new_key_health("latest", "key", at(0));
+        latest.updated_at = "2026-01-01T00:00:00.1234567890Z".into();
+        let mut annotated = new_key_health("annotated", "key", at(0));
+        annotated.updated_at = "2026-01-01T00:00:01Z[UTC]".into();
+        let selected = selected_health(&[&older, &latest, &annotated]).unwrap();
+        assert_eq!(selected.logical_name, "latest");
+    }
+
+    #[test]
     fn typed_unknown_stays_unknown_with_its_evidence_timestamp_and_no_raw_error() {
         let prior = record_key_outcome(
             None,
@@ -1386,7 +1397,11 @@ mod tests {
         )
         .health;
         assert!(health_is_attributed(&old_success, true, 41));
-        assert!(health_updated_at(&late_old_success) > Some(at(3)));
+        let replaced_at = replacement
+            .updated_at
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
+        assert!(health_updated_at(&late_old_success).unwrap() > replaced_at);
         assert!(!health_is_attributed(&late_old_success, true, 42));
         assert!(!health_is_attributed(&late_old_success, false, 41));
 

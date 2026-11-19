@@ -25,8 +25,8 @@ pub(super) async fn write_dispatch_artifacts(
     ctx: DispatchArtifactInputs<'_>,
 ) -> Result<DispatchArtifacts, String> {
     let plan_path = ctx.workspace_dir.join("plan.md");
-    // V1 writes the assembled prompt as a placeholder plan.md (legacy);
-    // V2 will overwrite this with the real LLM-generated plan later.
+    // Keep the host-supplied assignment and assembled context available at
+    // the established artifact path; no server model rewrites this file.
     crate::utils::write_owner_only_file_atomic(&plan_path, ctx.base_prompt.as_bytes())
         .map_err(|e| format!("Failed to write plan file: {e}"))?;
 
@@ -76,7 +76,7 @@ pub(super) async fn write_dispatch_artifacts(
     // #971 receipt-first: `handle_tachi_dispatch` now appends a
     // "dispatch_received" event to this same trajectory.jsonl path BEFORE
     // this function runs (right after the workspace directory is created,
-    // ahead of prompt assembly / the V2 plan stage). Use APPEND here
+    // ahead of prompt assembly). Use APPEND here
     // (not overwrite) so that earlier event survives as line 1 and
     // "dispatch_started" lands as line 2 — no reader depends on
     // "dispatch_started" being the first line (grep confirmed: existing

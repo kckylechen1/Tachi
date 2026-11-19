@@ -1,82 +1,41 @@
 use crate::server_state::MemoryServer;
 use chrono::Utc;
 use memcore::MemoryStore;
-use serde_json::Value;
 use std::path::PathBuf;
-use tachi_llm::PersistedModelInvocationReceiptV1;
 
 use super::{
-    parse_llm_json, CategorySourceCount, DailyHealthPayload, DailyStageReport, DatabaseStats,
-    DuplicateSummary, ManifestDbTarget,
+    CategorySourceCount, DailyHealthPayload, DailyStageReport, DatabaseStats, DuplicateSummary,
+    ManifestDbTarget,
 };
 
-pub(crate) async fn run_health_check(
+pub(crate) async fn collect_health_stats(
     server: &MemoryServer,
     app_home: &std::path::Path,
     date: &str,
-) -> Result<
-    (
-        DailyStageReport,
-        Value,
-        PathBuf,
-        PersistedModelInvocationReceiptV1,
-    ),
-    String,
-> {
+) -> Result<DailyStageReport, String> {
     let manifest_path = app_home.join("manifest.json");
     let targets = load_manifest_targets(server, &manifest_path)?;
     let databases = collect_database_stats_for_targets(targets).await?;
-
+    let db_count = databases.len();
+    let failed_count = databases.iter().filter(|db| db.error.is_some()).count();
     let payload = DailyHealthPayload {
         date: date.to_string(),
         generated_at: Utc::now().to_rfc3339(),
         manifest_path: manifest_path.display().to_string(),
         databases,
     };
-    let user = serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("serialize daily health payload: {e}"))?;
-    let outcome = server
-        .llm
-        .call_reasoning_llm_with_receipt(
-            crate::prompts::DAILY_HEALTH_PROMPT,
-            &user,
-            None,
-            0.2,
-            3000,
-        )
-        .await
-        .map_err(|e| format!("daily health LLM call failed: {e}"))?;
-    if outcome.truncated {
-        return Err(
-            "daily health LLM output truncated; refusing clean report/wiki publish".to_string(),
-        );
-    }
-    let health_json = parse_llm_json(&outcome.text)?;
-    let overall = health_json
-        .get("overall_health")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let db_count = health_json
-        .get("databases")
-        .and_then(Value::as_array)
-        .map(|items| items.len())
-        .unwrap_or(0);
-    let report_path = app_home
-        .join("reports")
-        .join("daily")
-        .join(format!("{date}.md"));
-
-    Ok((
-        DailyStageReport {
-            status: overall.clone(),
-            summary: format!("Health check analyzed {db_count} database(s); overall={overall}"),
-            details: health_json.clone(),
-        },
-        health_json,
-        report_path,
-        outcome.invocation,
-    ))
+    let details = serde_json::to_value(payload)
+        .map_err(|e| format!("serialize daily database statistics: {e}"))?;
+    Ok(DailyStageReport {
+        status: if failed_count == 0 {
+            "collected"
+        } else {
+            "partial"
+        }
+        .to_string(),
+        summary: format!("Database statistics: {db_count} target(s), {failed_count} read error(s)"),
+        details,
+    })
 }
 
 pub(crate) async fn collect_database_stats_for_targets(

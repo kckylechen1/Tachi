@@ -92,7 +92,7 @@ class ReleaseVersionInventoryTests(unittest.TestCase):
             ),
             (
                 '[package]\nversion = "1.9.0"\n',
-                "crates/memory-server-capture-gate/Cargo.toml: missing package.name",
+                "crates/tachi-server/Cargo.toml: missing package.name",
             ),
         )
         for manifest_body, expected_error in cases:

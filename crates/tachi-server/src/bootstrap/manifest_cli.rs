@@ -1,3 +1,6 @@
+#[cfg(feature = "full")]
+mod audit;
+
 use super::print_pretty_json;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -1293,7 +1296,7 @@ fn run_audit_projects(
     git_root: Option<&PathBuf>,
     manifest_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    use memory_server_manifest_audit::{build_plan, gather_project_inputs, render_plan};
+    use audit::{build_plan, gather_project_inputs, render_plan};
 
     let projects_dir = app_home.join("projects");
 

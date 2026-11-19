@@ -1656,8 +1656,14 @@ fn freeze_sticky_cutover_source(
     as_of: &str,
     scrubber: &mut impl FnMut(&str) -> String,
 ) -> Result<StickyCutoverPlan, MemoryError> {
+    // Parse the *original* input, not the rendered form: `normalize_timestamp`
+    // renders BCE years with four digits (`-4713-…`), which jiff — like
+    // chrono before it — cannot re-parse, so re-parsing the canonical string
+    // would panic on a valid six-digit-year BCE input (astra review, C5).
+    let parsed_as_of = Timestamp::from_str(as_of).map_err(|_| {
+        MemoryError::InvalidArg("legacy sticky plan as_of is malformed".to_string())
+    })?;
     let as_of = normalize_timestamp(as_of, "plan as_of")?;
-    let parsed_as_of = Timestamp::from_str(&as_of).expect("normalized timestamp");
     let mut claims = read_claims(conn)?;
     let memories = read_legacy_memories(conn)?;
     let mut rows = Vec::with_capacity(memories.len() + claims.len());

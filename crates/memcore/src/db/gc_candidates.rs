@@ -123,7 +123,11 @@ fn lifecycle_reason(
     }
     let retention = i64::try_from(max_age_days)
         .ok()
-        .map(|days| jiff::SignedDuration::from_secs(days * 86_400))
+        // checked: chrono's `Duration::try_days` was checked too, and an
+        // unchecked `days * 86_400` can wrap to zero for huge `days`, which
+        // would silently drop the retention floor (astra review, C4).
+        .and_then(|days| days.checked_mul(86_400))
+        .map(jiff::SignedDuration::from_secs)
         .ok_or_else(|| {
             MemoryError::InvalidArg("Kanban GC retention interval is out of range".to_string())
         })?;

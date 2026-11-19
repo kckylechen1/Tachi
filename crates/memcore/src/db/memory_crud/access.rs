@@ -735,7 +735,7 @@ fn get_access_times_of_kind(
         for row in rows {
             let (mem_id, at_str) = row?;
             if let Ok(dt) = at_str.parse::<jiff::Timestamp>() {
-                let age_secs = (now.as_second() - dt.as_second()).max(1) as f64;
+                let age_secs = crate::time_compat::whole_seconds_between(now, dt).max(1) as f64;
                 result.entry(mem_id).or_default().push(age_secs);
             }
         }

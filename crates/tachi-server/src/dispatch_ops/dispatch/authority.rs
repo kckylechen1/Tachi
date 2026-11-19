@@ -4,7 +4,7 @@
 //! This is where the pure compiler in `tachi_dispatch::authority` is bound to a
 //! real dispatch: it runs immediately after profile resolution and the env
 //! binding gate, and **before** the run directory exists, before prompt
-//! assembly, before the V2 plan stage's provider call, before credential
+//! assembly, before credential
 //! materialization, and before any backend is chosen. That ordering is the
 //! whole contract:
 //!
@@ -161,8 +161,8 @@ fn compile_dispatch_contract_for_platform(
                     .to_string(),
             );
         }
-        // Validate before creating the run directory, resolving credentials or
-        // making the V2 planner call. The builder repeats this at spec minting.
+        // Validate before creating the run directory or resolving credentials.
+        // The builder repeats this at spec minting.
         tachi_dispatch::build_dsh_launch(
             &DispatchLaunchParams {
                 cwd: params.cwd.clone(),

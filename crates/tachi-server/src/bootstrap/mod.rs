@@ -20,6 +20,7 @@ mod manifest_cli;
 mod migrate_cli;
 mod poke_cli;
 mod recall_coverage_cli;
+#[cfg(feature = "full")]
 mod rescue_cli;
 mod serve;
 #[cfg(test)]

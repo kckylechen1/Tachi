@@ -1,6 +1,7 @@
 mod budget;
 mod completion;
 mod context;
+mod envelope;
 mod overlays;
 pub(crate) mod seat_card;
 mod skills;
@@ -142,9 +143,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
         PromptInputBudget::from_env(SKILL_TEXT_BUDGET_ENV, DEFAULT_SKILL_TEXT_BUDGET_CHARS);
 
     let agent = assignment.selected_backend.as_str();
-    if let Some(overlay) =
-        memory_server_prompt_envelope::render_envelope_overlay(agent, request.stage.as_deref())
-    {
+    if let Some(overlay) = envelope::render_envelope_overlay(agent, request.stage.as_deref()) {
         parts.push(overlay);
     }
 
