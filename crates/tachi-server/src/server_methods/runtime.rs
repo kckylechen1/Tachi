@@ -251,7 +251,9 @@ impl MemoryServer {
                 ))
             }
             Err(error) => {
-                return Err(format!("cannot inspect workspace path '{trimmed}': {error}"))
+                return Err(format!(
+                    "cannot inspect workspace path '{trimmed}': {error}"
+                ))
             }
         };
         let canonical_dir = std::fs::canonicalize(&dir)
@@ -447,12 +449,15 @@ impl MemoryServer {
                 self.infer_unambiguous_workspace_from_paths(paths, false)
             }
             "tachi_memory" | "tachi_save" | "tachi_search" => {
-                let paths: Vec<&str> = ["file_context", "files", "references"]
+                // `files` / `references` are path arrays in tachi-params while
+                // `file_context` is a single path string, so fold it in separately.
+                let mut paths: Vec<&str> = ["files", "references"]
                     .into_iter()
                     .filter_map(|key| args.get(key).and_then(serde_json::Value::as_array))
                     .flatten()
                     .filter_map(serde_json::Value::as_str)
                     .collect();
+                paths.extend(args.get("file_context").and_then(serde_json::Value::as_str));
                 self.infer_unambiguous_workspace_from_paths(paths, true)
             }
             _ => Ok(None),

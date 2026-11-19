@@ -444,6 +444,11 @@ fn http_admitted_unbound_session_dynamically_switches_workspaces_across_tools() 
         std::fs::create_dir_all(repo_b.join(".git")).unwrap();
         std::fs::create_dir_all(repo_b.join("src")).unwrap();
         std::fs::write(repo_b.join("src/lib.rs"), "// quant").unwrap();
+        // Disjoint per-protocol-iteration worktrees: writable claims with the
+        // same worktree_path conflict (memcore paths_overlap), and the lease
+        // below outlives both iterations of the shared daemon.
+        std::fs::create_dir_all(repo_a.join("wt-false")).unwrap();
+        std::fs::create_dir_all(repo_a.join("wt-true")).unwrap();
 
         test_runtime().block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).unwrap();
@@ -602,7 +607,7 @@ fn http_admitted_unbound_session_dynamically_switches_workspaces_across_tools() 
                             "tachi_memory",
                             json!({
                                 "action": "search",
-                                "file_context": [repo_b.join("src/lib.rs")],
+                                "file_context": repo_b.join("src/lib.rs"),
                                 "query": "DYNWORKSPACE",
                                 "scope": "memory",
                                 "format": "json"
@@ -656,14 +661,18 @@ fn http_admitted_unbound_session_dynamically_switches_workspaces_across_tools() 
                     "action": "claim",
                     "issue_ref": format!("owner/repo#dyn-{modern}"),
                     "branch": format!("dyn-{modern}"),
-                    "worktree_path": repo_a,
+                    "worktree_path": repo_a.join(format!("wt-{modern}")),
                     "claim_scope": [format!("dyn-{modern}/**")],
                     "claim_role": "executor",
                     "claim_mode": "writable",
                     "expected_head": "test-head",
                     "lease_expires_at": "2030-01-01T00:00:00Z"
                 });
-                assert_denied(anonymous.call(19, "tachi_task", claim_args.clone(), None).await);
+                assert_denied(
+                    anonymous
+                        .call(19, "tachi_task", claim_args.clone(), None)
+                        .await,
+                );
                 let claim = payload(&admitted.call(20, "tachi_task", claim_args, None).await);
                 assert_eq!(claim["status"], "completed", "{claim:#}");
 
