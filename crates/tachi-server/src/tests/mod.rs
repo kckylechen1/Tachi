@@ -23,6 +23,12 @@ fn ensure_test_env() {
         // layout (wiki, project, etc.). Disable path-routing validation so
         // those fixtures don't have to opt into cross-project routing.
         std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
+        // Keep test read pools minimal unless a test explicitly requests
+        // multi-slot concurrency so every `make_server()` avoids opening 4-8
+        // redundant read-only sqlite-vec connections.
+        if std::env::var_os("TACHI_MEMORY_READ_POOL_SIZE").is_none() {
+            std::env::set_var("TACHI_MEMORY_READ_POOL_SIZE", "1");
+        }
     });
 }
 
