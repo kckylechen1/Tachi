@@ -115,10 +115,7 @@ pub(crate) async fn handle_tachi_save(
                 server.prepare_named_project_store_for_write(project)?;
             } else {
                 let probe = |store: &mut memcore::MemoryStore| {
-                    store
-                        .stats(false)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
+                    store.probe_readable().map_err(|error| error.to_string())
                 };
                 match target_db {
                     DbScope::Global => server.with_global_store_identity_checked(probe)?,

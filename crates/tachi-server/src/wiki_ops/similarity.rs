@@ -25,7 +25,7 @@ fn tokenize_for_similarity(text: &str) -> Vec<String> {
 /// Token-frequency vectors for a batch of documents, tokenized once each.
 ///
 /// [`SimilarityCorpus::for_each_later_pair`] reports exactly (bit for bit) what
-/// [`token_cosine_similarity`] returns for the same two strings: term counts,
+/// the test reference `token_cosine_similarity` returns for the same two strings: term counts,
 /// their products and their squares are small integers, so every sum is exact
 /// in `f64` regardless of order and the final `dot / (norm_a * norm_b)` is the
 /// same expression. The difference is cost: each document is tokenized once
@@ -101,7 +101,36 @@ impl SimilarityCorpus {
     }
 }
 
-pub(super) fn token_cosine_similarity(a: &str, b: &str) -> f64 {
+/// The substring signals used by the lint contradiction heuristic, computed once per document.
+pub(super) struct ContradictionSignals {
+    negation: bool,
+    affirmation: bool,
+}
+
+impl ContradictionSignals {
+    pub(super) fn new(text: &str) -> Self {
+        let negations = [
+            "never", "not", "avoid", "disable", "forbid", "against", "cannot",
+        ];
+        let affirmations = ["always", "use", "enable", "allow", "prefer", "should"];
+        let lower = text.to_ascii_lowercase();
+        Self {
+            negation: negations.iter().any(|token| lower.contains(token)),
+            affirmation: affirmations.iter().any(|token| lower.contains(token)),
+        }
+    }
+
+    pub(super) fn score(&self, other: &Self, similarity: f64) -> f64 {
+        if (self.negation && other.affirmation) || (other.negation && self.affirmation) {
+            similarity
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(test)]
+fn token_cosine_similarity(a: &str, b: &str) -> f64 {
     let mut freq_a: HashMap<String, f64> = HashMap::new();
     let mut freq_b: HashMap<String, f64> = HashMap::new();
     for token in tokenize_for_similarity(a) {
@@ -128,7 +157,8 @@ pub(super) fn token_cosine_similarity(a: &str, b: &str) -> f64 {
     }
 }
 
-pub(super) fn contradiction_score(a: &str, b: &str) -> f64 {
+#[cfg(test)]
+fn contradiction_score(a: &str, b: &str) -> f64 {
     let negations = [
         "never", "not", "avoid", "disable", "forbid", "against", "cannot",
     ];
@@ -151,7 +181,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn similarity_corpus_matches_pairwise_cosine_bit_for_bit() {
+    fn similarity_corpus_matches_pairwise_cosine_and_contradictions_bit_for_bit() {
         let texts = [
             "Follow SOP: inspect logs, isolate failure, add regression test.",
             "Follow SOP: inspect logs, isolate failure, add regression tests!",
@@ -160,8 +190,17 @@ mod tests {
             "!!! ???",
             "gamma alpha BETA beta Delta_1 zeta zeta zeta zeta zeta",
             "alpha beta beta gamma gamma gamma delta_1 delta_1",
+            "NEVER enable retry, always use the guard.",
+            "Always enable retry and prefer the guard.",
+            // These intentionally match substrings, not whole-word tokens.
+            "A NOTICE about the useful guard.",
+            "无 ASCII 词法重叠",
         ];
         let mut corpus = SimilarityCorpus::new(texts.iter().copied());
+        let signals: Vec<_> = texts
+            .iter()
+            .map(|text| ContradictionSignals::new(text))
+            .collect();
         assert_eq!(corpus.len(), texts.len());
         let mut visited = 0;
         for left in 0..texts.len() {
@@ -174,6 +213,11 @@ mod tests {
                     similarity.to_bits(),
                     expected.to_bits(),
                     "pair ({left}, {right}): {similarity} != {expected}"
+                );
+                assert_eq!(
+                    signals[left].score(&signals[right], similarity).to_bits(),
+                    contradiction_score(texts[left], texts[right]).to_bits(),
+                    "contradiction pair ({left}, {right})"
                 );
                 visited += 1;
             });

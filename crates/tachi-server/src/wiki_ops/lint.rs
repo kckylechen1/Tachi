@@ -1,3 +1,4 @@
+use super::similarity::{ContradictionSignals, SimilarityCorpus};
 use super::*;
 
 fn default_checks() -> Vec<String> {
@@ -108,6 +109,10 @@ pub(crate) async fn handle_wiki_lint(
         None => WikiReadPlan::MigrationAudit,
     };
     let nodes = list_wiki_entries_for_plan(server, &plan, path_prefix, limit)?;
+    let check_stale = checks.iter().any(|check| check == "stale");
+    let check_missing_edges = checks.iter().any(|check| check == "missing_edges");
+    let check_duplicates = checks.iter().any(|check| check == "duplicates");
+    let check_contradictions = checks.iter().any(|check| check == "contradictions");
 
     let mut orphans = Vec::new();
     let mut stale_nodes = Vec::new();
@@ -117,7 +122,8 @@ pub(crate) async fn handle_wiki_lint(
     let mut duplicates = Vec::new();
     let mut stale_keys = HashSet::<(StoreRef, String)>::new();
 
-    let mut all_edges = Vec::<(StoreRef, memcore::MemoryEdge)>::new();
+    let mut connected_ids = HashMap::<StoreRef, HashMap<String, HashSet<String>>>::new();
+    let mut semantic_stale_targets = HashMap::<StoreRef, HashSet<String>>::new();
     for node in &nodes {
         let entry = &node.entry;
         let store_ref = &node.store;
@@ -134,8 +140,26 @@ pub(crate) async fn handle_wiki_lint(
                 "store": store_ref,
             }));
         }
-        all_edges.extend(edges.into_iter().map(|edge| (store_ref.clone(), edge)));
-        if checks.iter().any(|check| check == "stale") {
+        for edge in edges {
+            if check_stale && matches!(edge.relation.as_str(), "contradicts" | "supersedes") {
+                semantic_stale_targets
+                    .entry(store_ref.clone())
+                    .or_default()
+                    .insert(edge.target_id.clone());
+            }
+            if check_missing_edges {
+                let neighbors = connected_ids.entry(store_ref.clone()).or_default();
+                neighbors
+                    .entry(edge.source_id.clone())
+                    .or_default()
+                    .insert(edge.target_id.clone());
+                neighbors
+                    .entry(edge.target_id)
+                    .or_default()
+                    .insert(edge.source_id);
+            }
+        }
+        if check_stale {
             if let Some(ts) = parse_rfc3339_utc(&entry.timestamp) {
                 if ts < stale_cutoff
                     && !matches!(
@@ -176,8 +200,8 @@ pub(crate) async fn handle_wiki_lint(
     // independent of `retention_policy` (unlike the retention-age pass
     // above, which explicitly exempts permanent/pinned): any node targeted
     // by a `contradicts` or `supersedes` edge from another node is flagged
-    // regardless of retention policy. `all_edges` is fully populated by now
-    // (accumulated across every node's "both"-direction query above).
+    // regardless of retention policy. Targets are indexed by physical store
+    // from every node's "both"-direction query above.
     //
     // Scoping note (documented, not hidden — see `knowledge_artifact`
     // module doc): this covers the "supersedes/contradicts edges" trigger
@@ -186,18 +210,16 @@ pub(crate) async fn handle_wiki_lint(
     // changes") is a separate leaf's worth of work (needs #1002's
     // `CanonicalDocRefV1` resolver wired into wiki writes).
     let mut semantic_stale_to_persist: Vec<(MemoryEntry, StoreRef)> = Vec::new();
-    if checks.iter().any(|check| check == "stale") {
+    if check_stale {
         for node in &nodes {
             let entry = &node.entry;
             let store_ref = &node.store;
             if stale_keys.contains(&(store_ref.clone(), entry.id.clone())) {
                 continue;
             }
-            let contradicted_or_superseded = all_edges.iter().any(|(edge_store, edge)| {
-                edge_store == store_ref
-                    && edge.target_id == entry.id
-                    && matches!(edge.relation.as_str(), "contradicts" | "supersedes")
-            });
+            let contradicted_or_superseded = semantic_stale_targets
+                .get(store_ref)
+                .is_some_and(|targets| targets.contains(&entry.id));
             if contradicted_or_superseded {
                 stale_nodes.push(json!({
                     "id": entry.id,
@@ -253,31 +275,38 @@ pub(crate) async fn handle_wiki_lint(
         }
     }
 
-    if checks
-        .iter()
-        .any(|check| check == "contradictions" || check == "missing_edges" || check == "duplicates")
-    {
+    if check_contradictions || check_missing_edges || check_duplicates {
         // Cap pairwise comparison to avoid O(n²) blowup on large wikis.
-        // At 500 nodes the nested loop produces ≤124,750 pairs, which is
-        // fast enough for an interactive lint call.
+        // Tokenize each document once; visit at most 124,750 pairs in input order.
         const PAIRWISE_NODE_CAP: usize = 500;
         let nodes_for_pairwise = &nodes[..nodes.len().min(PAIRWISE_NODE_CAP)];
+        let mut corpus = SimilarityCorpus::new(
+            nodes_for_pairwise
+                .iter()
+                .map(|node| node.entry.text.as_str()),
+        );
+        let contradiction_signals: Vec<_> = if check_contradictions {
+            nodes_for_pairwise
+                .iter()
+                .map(|node| ContradictionSignals::new(&node.entry.text))
+                .collect()
+        } else {
+            Vec::new()
+        };
         for i in 0..nodes_for_pairwise.len() {
-            for j in (i + 1)..nodes_for_pairwise.len() {
+            corpus.for_each_later_pair(i, |j, similarity| {
                 let left = &nodes_for_pairwise[i].entry;
                 let right = &nodes_for_pairwise[j].entry;
                 let store_ref = &nodes_for_pairwise[i].store;
                 if store_ref != &nodes_for_pairwise[j].store {
-                    continue;
+                    return;
                 }
-                let similarity = token_cosine_similarity(&left.text, &right.text);
-                if checks.iter().any(|check| check == "missing_edges")
+                if check_missing_edges
                     && similarity > params.missing_edge_threshold
-                    && !all_edges.iter().any(|(edge_store, edge)| {
-                        edge_store == store_ref
-                            && ((edge.source_id == left.id && edge.target_id == right.id)
-                                || (edge.source_id == right.id && edge.target_id == left.id))
-                    })
+                    && !connected_ids
+                        .get(store_ref)
+                        .and_then(|neighbors| neighbors.get(&left.id))
+                        .is_some_and(|targets| targets.contains(&right.id))
                 {
                     missing_edge_hints.push(json!({
                         "left_id": left.id,
@@ -289,7 +318,7 @@ pub(crate) async fn handle_wiki_lint(
                         "store": store_ref,
                     }));
                 }
-                if checks.iter().any(|check| check == "duplicates") && similarity > 0.95 {
+                if check_duplicates && similarity > 0.95 {
                     duplicates.push(json!({
                         "left_id": left.id,
                         "right_id": right.id,
@@ -300,8 +329,9 @@ pub(crate) async fn handle_wiki_lint(
                         "store": store_ref,
                     }));
                 }
-                if checks.iter().any(|check| check == "contradictions") {
-                    let contradiction = contradiction_score(&left.text, &right.text);
+                if check_contradictions {
+                    let contradiction =
+                        contradiction_signals[i].score(&contradiction_signals[j], similarity);
                     if contradiction > params.contradiction_threshold {
                         contradiction_candidates.push(json!({
                             "left_id": left.id,
@@ -314,7 +344,7 @@ pub(crate) async fn handle_wiki_lint(
                         }));
                     }
                 }
-            }
+            });
         }
     }
 

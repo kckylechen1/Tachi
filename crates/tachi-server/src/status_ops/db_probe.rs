@@ -281,6 +281,12 @@ mod tests {
             err.contains("missing_vector_probe_fixture"),
             "vector read error must be preserved: {err}"
         );
+        let store = MemoryStore::open_read_only(db.to_str().unwrap()).expect("read-only fixture");
+        let coverage = crate::memory_search_ops::vector_health::vector_coverage(store.connection())
+            .expect_err("a failed coverage query must not claim healthy coverage");
+        assert!(coverage
+            .to_string()
+            .contains("missing_vector_probe_fixture"));
     }
 
     #[test]

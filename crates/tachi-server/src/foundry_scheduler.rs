@@ -7,7 +7,7 @@
 //! probes the DB read-only ([`memcore::probe_pending_foundry_jobs`]); only
 //! when that finds work (a pending row this worker has not sent recently, or
 //! a due retry) does it take the full open and call
-//! [`memcore::load_pending_foundry_jobs`] to find queued or stale `running`
+//! [`memcore::load_pending_foundry_jobs_batch`] to find queued or stale `running`
 //! jobs, and (for DBs the existing
 //! single-process foundry worker can route to) re-injects them into the
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
 use memcore::{
-    load_pending_foundry_jobs, probe_pending_foundry_jobs, FoundryPendingProbe, MemoryStore,
+    load_pending_foundry_jobs_batch, probe_pending_foundry_jobs, FoundryPendingProbe, MemoryStore,
     PendingFoundryJobMarker, PersistedFoundryJob,
 };
 use tachi_foundry::FoundryRoute as Route;

@@ -64,12 +64,16 @@ fn is_self_eval(producer_lineage: &str, verifier_lineage: &str) -> bool {
 
 fn to_subagent_eval_params(view: &memcore::MirrorEvalRunView) -> Option<TachiSubagentEvalParams> {
     let adjudication = view.current_adjudication()?;
-    if !adjudication.evidence_usable {
+    if !adjudication.evidence_usable || adjudication.human_override {
         return None;
     }
     let producer_lineage = producer_lineage_for_gating(view.observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
-    if is_self_eval(&producer_lineage, &verifier_lineage) {
+    if crate::agent_eval::mirror::actor_matches_executor(
+        &adjudication.actor,
+        view.run.requested_agent.as_deref(),
+    ) || is_self_eval(&producer_lineage, &verifier_lineage)
+    {
         return None;
     }
 
@@ -97,7 +101,10 @@ fn to_subagent_eval_params(view: &memcore::MirrorEvalRunView) -> Option<TachiSub
         usefulness_score: None,
         failure_mode: adjudication.failure_mode.clone(),
         verification_impact: None,
-        verification_present: true,
+        verification_present: matches!(
+            adjudication.adjudication_attribution_basis.as_str(),
+            "observed" | "acknowledged_overlay"
+        ),
         evaluator: Some(adjudication.actor.clone()),
         plan_delta: adjudication.plan_delta.clone(),
         human_override: adjudication.human_override,
@@ -354,5 +361,127 @@ mod tests {
         assert_eq!(projected.native_agent_id.as_deref(), Some("p-4"));
         assert_eq!(projected.latency_ms, Some(4_200));
         assert_eq!(projected.cost_tokens, Some(1_500));
+        assert!(!projected.verification_present);
+    }
+
+    #[test]
+    fn human_override_and_actor_self_eval_are_excluded_and_verified_basis_sets_verification_present(
+    ) {
+        let conn = open_conn();
+        let run = memcore::register_mirror_eval_run(&conn, &base_run("p-override")).unwrap();
+        memcore::record_mirror_eval_observation(
+            &conn,
+            &memcore::NewMirrorEvalObservation {
+                eval_run_id: run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let verified_receipt = memcore::AdjudicationReceipt {
+            subject: memcore::AdjudicationReceiptSubject {
+                actor: "leader".to_string(),
+                model: Some("openai/gpt-5".to_string()),
+            },
+            channel: memcore::AdjudicationChannel::VerifiedAdmission,
+            binding: None,
+            captured_at: "2026-08-01T00:00:00Z".to_string(),
+        };
+        memcore::append_mirror_eval_adjudication(
+            &conn,
+            &memcore::NewMirrorEvalAdjudication {
+                adjudication_id: "adj-override".to_string(),
+                eval_run_id: run.eval_run_id.clone(),
+                event_key: "adj-override-key".to_string(),
+                actor: "leader".to_string(),
+                verifier_model: Some("openai/gpt-5".to_string()),
+                usefulness: "useful".to_string(),
+                evidence_usable: true,
+                human_override: true,
+                evidence_ref: "run-override".to_string(),
+                adjudication_receipt: Some(verified_receipt.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let view = memcore::get_mirror_eval_run_view(&conn, Some(&run.eval_run_id), None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            to_subagent_eval_params(&view).is_none(),
+            "human_override without owner proof must be excluded even with verified_admission"
+        );
+
+        // Actor matching requested_agent ("claude") -> self_eval excluded.
+        let run_actor_self =
+            memcore::register_mirror_eval_run(&conn, &base_run("p-actor-self")).unwrap();
+        memcore::record_mirror_eval_observation(
+            &conn,
+            &memcore::NewMirrorEvalObservation {
+                eval_run_id: run_actor_self.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        memcore::append_mirror_eval_adjudication(
+            &conn,
+            &memcore::NewMirrorEvalAdjudication {
+                adjudication_id: "adj-actor-self".to_string(),
+                eval_run_id: run_actor_self.eval_run_id.clone(),
+                event_key: "adj-actor-self-key".to_string(),
+                actor: "claude".to_string(),
+                verifier_model: Some("openai/gpt-5".to_string()),
+                usefulness: "useful".to_string(),
+                evidence_usable: true,
+                evidence_ref: "run-actor-self".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let view_self =
+            memcore::get_mirror_eval_run_view(&conn, Some(&run_actor_self.eval_run_id), None)
+                .unwrap()
+                .unwrap();
+        assert!(
+            to_subagent_eval_params(&view_self).is_none(),
+            "actor matching executor must be excluded as self_eval"
+        );
+
+        // Non-override verified admission without self-eval projects with verification_present=true.
+        let run_ok = memcore::register_mirror_eval_run(&conn, &base_run("p-verified")).unwrap();
+        memcore::record_mirror_eval_observation(
+            &conn,
+            &memcore::NewMirrorEvalObservation {
+                eval_run_id: run_ok.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        memcore::append_mirror_eval_adjudication(
+            &conn,
+            &memcore::NewMirrorEvalAdjudication {
+                adjudication_id: "adj-verified".to_string(),
+                eval_run_id: run_ok.eval_run_id.clone(),
+                event_key: "adj-verified-key".to_string(),
+                actor: "leader".to_string(),
+                verifier_model: Some("openai/gpt-5".to_string()),
+                usefulness: "useful".to_string(),
+                evidence_usable: true,
+                evidence_ref: "run-verified".to_string(),
+                adjudication_receipt: Some(verified_receipt),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let view_ok = memcore::get_mirror_eval_run_view(&conn, Some(&run_ok.eval_run_id), None)
+            .unwrap()
+            .unwrap();
+        let projected = to_subagent_eval_params(&view_ok).unwrap();
+        assert!(projected.verification_present);
     }
 }

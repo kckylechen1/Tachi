@@ -39,6 +39,8 @@ struct Row {
     with_rubric: bool,
     adjudication_events: usize,
     adjudicated_at: String,
+    adjudication_attribution_basis: &'static str,
+    human_override: bool,
     terminal_outcome: Option<&'static str>,
     terminal: TerminalCheck,
     task_type: Option<&'static str>,
@@ -67,6 +69,8 @@ impl Default for Row {
             with_rubric: true,
             adjudication_events: 1,
             adjudicated_at: IN_WINDOW.to_string(),
+            adjudication_attribution_basis: "observed",
+            human_override: false,
             terminal_outcome: Some("completed"),
             terminal: TerminalCheck::Consistent,
             task_type: Some(TASK_TYPE),
@@ -126,6 +130,8 @@ impl Row {
             created_at: self.adjudicated_at.clone(),
             insertion_seq: self.adjudication_events as i64,
             event_count: self.adjudication_events,
+            adjudication_attribution_basis: self.adjudication_attribution_basis.to_string(),
+            human_override: self.human_override,
         });
         // The mirror spine structurally has no route decision — the fixture
         // cannot build one even if a test asked for it.
@@ -924,5 +930,57 @@ fn window_comparison_normalizes_legacy_timestamps() {
     assert_eq!(
         outcome.usable_rows, 3,
         "a second-precision legacy timestamp is still inside the window"
+    );
+}
+
+#[test]
+fn read_time_cap_downgrades_unwitnessed_cross_vendor_and_preserves_self_and_excludes_override() {
+    let mut specs = Vec::new();
+    for basis in [
+        "fallback_unreceipted",
+        "unknown",
+        "planned_unconfirmed",
+        "acknowledged_overlay",
+    ] {
+        specs.push(Row {
+            adjudication_attribution_basis: basis,
+            independence_basis: "structural_cross_vendor",
+            ..Row::default()
+        });
+    }
+    // Known-self with receiptless basis must stay `self`, never flattened to `declared_only`.
+    specs.push(Row {
+        adjudication_attribution_basis: "fallback_unreceipted",
+        independence_basis: "self",
+        ..Row::default()
+    });
+    // Override-bearing sample without owner proof is excluded even with `observed` basis.
+    specs.push(Row {
+        adjudication_attribution_basis: "observed",
+        independence_basis: "structural_cross_vendor",
+        human_override: true,
+        ..Row::default()
+    });
+
+    let outcome = run(&rows(specs), &eligible(&["profile_a"]));
+    assert_eq!(outcome.usable_rows, 0);
+    assert_eq!(
+        outcome
+            .excluded_counts
+            .get(reason::INDEPENDENCE_DECLARED_ONLY),
+        Some(&4),
+        "all non-observed structural_cross_vendor rows must cap to declared_only"
+    );
+    assert_eq!(
+        outcome.excluded_counts.get(reason::INDEPENDENCE_SELF),
+        Some(&1),
+        "known-self must never be flattened to declared_only"
+    );
+    assert_eq!(
+        outcome
+            .excluded_counts
+            .get(reason::HUMAN_OVERRIDE_UNVERIFIED),
+        Some(&1),
+        "human_override without owner proof must be excluded"
     );
 }

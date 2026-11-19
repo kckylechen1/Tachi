@@ -8,6 +8,42 @@ use rusqlite::OptionalExtension;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 
+#[derive(Debug)]
+pub(crate) struct VectorCoverage {
+    pub(crate) total: usize,
+    pub(crate) missing: usize,
+    pub(crate) coverage: f64,
+}
+
+/// Recall only needs coverage; failure grouping, orphan detection and schema
+/// inspection belong to the full status diagnostic below.
+pub(crate) fn vector_coverage(
+    conn: &rusqlite::Connection,
+) -> Result<VectorCoverage, rusqlite::Error> {
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), true);
+    let membership = if memcore::db::table_exists(conn, "memories_vec")? {
+        // EXISTS counts a memory once even if a damaged vector relation has
+        // duplicate IDs, without a second metadata scan or a DISTINCT set.
+        "COALESCE(SUM(EXISTS(SELECT 1 FROM memories_vec v WHERE v.id = m.id)), 0)"
+    } else {
+        "0"
+    };
+    let (total, with_vec) = conn.query_row(
+        &format!("SELECT COUNT(*), {membership} FROM memories m WHERE {where_clause}"),
+        [],
+        |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
+    )?;
+    Ok(VectorCoverage {
+        total,
+        missing: total.saturating_sub(with_vec),
+        coverage: if total == 0 {
+            1.0
+        } else {
+            with_vec as f64 / total as f64
+        },
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct EnrichmentFailureSummary {
     pub(crate) stage: String,
@@ -171,6 +207,30 @@ pub(crate) fn optional_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_coverage_counts_vector_membership_once_and_ignores_orphans() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories(id TEXT PRIMARY KEY, path TEXT, source TEXT, metadata TEXT,
+                                   topic TEXT NOT NULL DEFAULT '');
+             CREATE TABLE memories_vec(id TEXT);
+             INSERT INTO memories(id, path, source, metadata)
+             VALUES ('present', '/facts/present', 'manual', '{}'),
+                    ('missing', '/facts/missing', 'manual', '{}');
+             INSERT INTO memories_vec VALUES ('present'), ('present'), ('orphan');",
+        )
+        .unwrap();
+        let health = vector_health(&conn).unwrap();
+        let coverage = vector_coverage(&conn).unwrap();
+        assert_eq!(coverage.total, 2);
+        assert_eq!(coverage.missing, 1);
+        assert_eq!(coverage.coverage, 0.5);
+        assert_eq!(
+            (coverage.total, coverage.missing, coverage.coverage),
+            (health.total, health.missing, health.coverage)
+        );
+    }
 
     #[test]
     fn infer_vector_dimension_handles_uppercase_float_decl() {

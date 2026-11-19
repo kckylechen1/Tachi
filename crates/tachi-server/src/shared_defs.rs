@@ -137,7 +137,26 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
             obj.insert("metadata".into(), json!(m));
         }
     }
+    add_candidate_authority(&e.metadata, &mut obj);
     serde_json::Value::Object(obj)
+}
+
+fn add_candidate_authority(
+    metadata: &serde_json::Value,
+    output: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if metadata.get("kind").and_then(serde_json::Value::as_str) != Some("precedent_candidate") {
+        return;
+    }
+    let authority = crate::precedent_candidate_ops::load_candidate_authority_view(metadata);
+    output.insert(
+        "effective_authority_complete".into(),
+        json!(authority.effective_authority_complete),
+    );
+    output.insert(
+        "adjudication_attribution_basis".into(),
+        json!(authority.adjudication_attribution_basis),
+    );
 }
 
 /// Like `slim_entry` but additionally surfaces enrichment status fields:
@@ -358,6 +377,7 @@ pub(super) fn slim_search_result(
 ) -> serde_json::Value {
     let entry = &result.entry;
     let mut obj = serde_json::Map::new();
+    add_candidate_authority(&entry.metadata, &mut obj);
     obj.insert("id".into(), json!(entry.id));
     obj.insert("db".into(), json!(db.as_str()));
     obj.insert("path".into(), json!(entry.path));

@@ -693,8 +693,8 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        // v8 invalidates packs produced before default synthetic-memory isolation.
-        version: 8,
+        // v9 includes the read-time precedent authority projection.
+        version: 9,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,
