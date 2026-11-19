@@ -40,9 +40,9 @@
 //!
 //! * Vault secrets, hub / skill catalog, foundry job queue, dispatch /
 //!   ship. The crates backing these
-//!   (`tachi-hub`, `tachi-foundry`, `tachi-dispatch`, and
-//!   the operator CLIs) are `optional` deps enabled only by `full`, so a
-//!   `portable` build never compiles them into the trading runtime.
+//!   (`tachi-hub`, `tachi-foundry`, and `tachi-dispatch`) are `optional`
+//!   deps enabled only by `full`. The folded Hub registry, manifest audit,
+//!   and rescue CLI modules keep the same `full` source gate.
 //!
 //! ## Status (skeleton, #924)
 //!
