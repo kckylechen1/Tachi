@@ -695,7 +695,7 @@ pub(crate) fn target_mismatch_diagnosis(row: &RawRow, item: &PlanItem, plan_id: 
     ) && row.archived
         && row.copy_identity_sha256() == item.source_copy_identity_sha256;
     let hint = if sibling_damage_shape {
-        "; this is the sibling-race damage shape — `tachi wiki corpus --repair-sibling-damage` reports whether it is repairable"
+        "; this is the sibling-race damage shape"
     } else {
         ""
     };

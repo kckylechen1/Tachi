@@ -761,21 +761,6 @@ pub enum WikiAction {
         /// Optional JSON preview plan to apply; source revisions are checked.
         #[arg(long, value_name = "PATH")]
         plan: Option<PathBuf>,
-        /// Repair rows a sibling-worker race left archived and non-canonical.
-        ///
-        /// Its own mode: without `--confirm` it only reports the exact damage
-        /// signature it found. It cannot be combined with `--apply`/`--plan`.
-        #[arg(long)]
-        repair_sibling_damage: bool,
-        /// Bootstrap the shared `wiki` store and adopt eligible legacy-global
-        /// rows into it verbatim.
-        ///
-        /// Its own mode with its own confirmation token: without `--confirm`
-        /// it is a read-only preview that creates nothing. It cannot be
-        /// combined with `--apply`, `--plan`, `--backup-dir`, or
-        /// `--repair-sibling-damage`.
-        #[arg(long)]
-        adopt_legacy: bool,
     },
     /// Operator review of a pending Wiki entry: read-only preview, then an
     /// explicit apply that records the advisory approval receipt.

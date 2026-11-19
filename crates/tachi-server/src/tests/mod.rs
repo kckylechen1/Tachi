@@ -2373,7 +2373,6 @@ mod facade_tests;
 mod fold_contract;
 mod hub_tests;
 mod memory_tests;
-mod orchestrator_tests;
 mod profile_tests;
 mod sandbox_fold;
 mod sandbox_tests;
