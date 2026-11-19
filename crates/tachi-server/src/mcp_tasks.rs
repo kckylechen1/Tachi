@@ -161,6 +161,37 @@ pub(crate) fn require_run_owner(
     read_binding(anchor, owner, dispatch_id).map(|_| ())
 }
 
+/// Resolve the canonical project recorded in an existing run's sidecar binding
+/// when a locally admitted unbound connection invokes a dispatch-scoped action
+/// without repeating `project`. Full `RunOwner` verification (including the
+/// admission receipt, sandbox policy, and `source_fingerprint`) still runs
+/// downstream before any status, result, turn, or cancellation access.
+pub(crate) fn owned_project_for_dispatch(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Option<String> {
+    let (Some(agent_identity_id), _, admission) = server.work_claim_connection()? else {
+        return None;
+    };
+    if !matches!(admission.as_str(), "self_asserted" | "verified") {
+        return None;
+    }
+    let anchor = anchor_for(server, dispatch_id).ok()?;
+    #[cfg(unix)]
+    anchor.validate_current_path().ok()?;
+    let raw = anchor.read_mcp_binding().ok()??;
+    let binding: RunBinding = serde_json::from_str(&raw).ok()?;
+    if !matches!(binding.schema, 1 | 2)
+        || (binding.schema == 1 && binding.submission.is_some())
+        || (binding.schema == 2 && binding.submission.is_none())
+        || binding.dispatch_id != dispatch_id
+        || binding.owner.agent_identity_id != agent_identity_id
+    {
+        return None;
+    }
+    Some(binding.owner.canonical_project)
+}
+
 fn read_status(anchor: &AnchoredRunStatus, dispatch_id: &str) -> Result<Value, rmcp::ErrorData> {
     let status = anchor
         .read_json_bounded(MAX_STATUS_BYTES)

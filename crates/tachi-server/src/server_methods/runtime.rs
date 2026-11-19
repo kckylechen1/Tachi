@@ -179,6 +179,293 @@ impl MemoryServer {
         Ok(ControlFlow::Continue(Some(request_server)))
     }
 
+    pub(crate) fn has_admitted_agent_identity(&self) -> bool {
+        self.work_claim_connection()
+            .is_some_and(|(identity, _, admission)| {
+                identity.is_some() && matches!(admission.as_str(), "self_asserted" | "verified")
+            })
+    }
+
+    fn with_request_project(&self, project: String) -> Self {
+        let mut request_server = self.clone();
+        request_server.request_project = Some(project);
+        request_server
+    }
+
+    fn strip_glob_to_path_prefix(raw: &str) -> &str {
+        let prefix = match raw.find(['*', '?', '[']) {
+            Some(idx) => &raw[..idx],
+            None => raw,
+        };
+        let trimmed = prefix.trim_end_matches('/');
+        if trimmed.is_empty() && prefix.starts_with('/') {
+            "/"
+        } else {
+            trimmed
+        }
+    }
+
+    fn resolve_call_workspace_path(
+        &self,
+        raw_path: &str,
+        allow_git_auto_register: bool,
+        allow_planned_child: bool,
+    ) -> Result<String, String> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return Err("workspace path cannot be empty".into());
+        }
+        let candidate = std::path::Path::new(trimmed);
+        if !candidate.is_absolute() {
+            return Err(format!(
+                "workspace path '{trimmed}' must be an absolute path on the daemon host"
+            ));
+        }
+        let dir = match std::fs::metadata(candidate) {
+            Ok(metadata) if metadata.is_dir() => candidate.to_path_buf(),
+            Ok(metadata) if metadata.is_file() => candidate
+                .parent()
+                .ok_or_else(|| format!("workspace file '{trimmed}' has no parent directory"))?
+                .to_path_buf(),
+            Ok(_) => {
+                return Err(format!(
+                    "workspace path '{trimmed}' must be a local directory or regular file"
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_planned_child => {
+                let parent = candidate.parent().ok_or_else(|| {
+                    format!("workspace path '{trimmed}' does not exist on the daemon host")
+                })?;
+                match std::fs::metadata(parent) {
+                    Ok(meta) if meta.is_dir() => parent.to_path_buf(),
+                    _ => {
+                        return Err(format!(
+                            "workspace path '{trimmed}' does not exist on the daemon host"
+                        ))
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "workspace path '{trimmed}' does not exist on the daemon host"
+                ))
+            }
+            Err(error) => {
+                return Err(format!("cannot inspect workspace path '{trimmed}': {error}"))
+            }
+        };
+        let canonical_dir = std::fs::canonicalize(&dir)
+            .map_err(|error| format!("cannot canonicalize workspace path '{trimmed}': {error}"))?;
+        let dir_str = canonical_dir
+            .to_str()
+            .ok_or_else(|| format!("workspace path '{trimmed}' is not valid UTF-8"))?;
+        match self.resolve_existing_workspace_project(dir_str) {
+            Ok(project) => Ok(project),
+            Err(_)
+                if allow_git_auto_register
+                    && crate::utils::find_git_root_from(&canonical_dir).is_some() =>
+            {
+                self.resolve_or_register_workspace_root(dir_str)
+            }
+            Err(error) => {
+                if crate::utils::find_git_root_from(&canonical_dir).is_none() {
+                    Err(format!(
+                        "workspace path '{trimmed}' is not inside a Git repository or an already-registered Tachi workspace; pass a repository path or initialize the directory explicitly"
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn infer_unambiguous_workspace_from_paths<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a str>,
+        allow_planned_child: bool,
+    ) -> Result<Option<String>, String> {
+        let mut resolved = std::collections::BTreeMap::new();
+        for raw in paths {
+            let candidate = Self::strip_glob_to_path_prefix(raw.trim());
+            if candidate.is_empty() || !std::path::Path::new(candidate).is_absolute() {
+                continue;
+            }
+            let Ok(project) =
+                self.resolve_call_workspace_path(candidate, true, allow_planned_child)
+            else {
+                continue;
+            };
+            let db_identity = self.resolve_server_named_project_db_identity(&project)?;
+            resolved.entry(db_identity).or_insert(project);
+        }
+        if resolved.len() > 1 {
+            return Err(
+                "Tool arguments reference multiple distinct workspaces; pass an explicit `project` workspace path or name"
+                    .into(),
+            );
+        }
+        Ok(resolved.into_values().next())
+    }
+
+    /// Dynamically scope a single tool call to its target workspace/project
+    /// library when the HTTP connection has an admitted local agent identity
+    /// (`self_asserted` or `verified`) and no static session project binding.
+    /// Never mutates `agent_runtime.session_project` on the shared connection.
+    pub(crate) fn clone_for_admitted_call_target(
+        &self,
+        tool_name: &str,
+        arguments: &mut Option<rmcp::model::JsonObject>,
+    ) -> Result<Option<Self>, rmcp::ErrorData> {
+        if self.session_project().is_some() || !self.has_admitted_agent_identity() {
+            return Ok(None);
+        }
+        let invalid = |message| rmcp::ErrorData::invalid_params(message, None);
+        let global_scope = match arguments.as_ref() {
+            Some(args) => crate::session_identity::requested_global_scope(tool_name, args)?,
+            None => false,
+        };
+        let Some(args) = arguments.as_mut() else {
+            return Ok(None);
+        };
+
+        if tool_name == "tachi_staff" {
+            let Some(action) = args.get("action").and_then(serde_json::Value::as_str) else {
+                return Ok(None);
+            };
+            let action_trimmed = action.trim();
+            if action_trimmed.eq_ignore_ascii_case("start")
+                || action_trimmed.eq_ignore_ascii_case("roster")
+            {
+                if let Some(explicit_val) = args.get("project").filter(|v| !v.is_null()).cloned() {
+                    let Some(raw_project) = explicit_val.as_str() else {
+                        return Ok(None);
+                    };
+                    let trimmed = raw_project.trim();
+                    if trimmed.is_empty() {
+                        return Err(invalid("project name cannot be empty".into()));
+                    }
+                    let canonical = if std::path::Path::new(trimmed).is_absolute() {
+                        self.resolve_call_workspace_path(trimmed, true, false)
+                            .map_err(invalid)?
+                    } else {
+                        match self.resolve_server_named_project_binding(trimmed) {
+                            Ok((project, _)) => project,
+                            Err(_) if action_trimmed.eq_ignore_ascii_case("roster") => {
+                                return Ok(None)
+                            }
+                            Err(err) => return Err(invalid(err)),
+                        }
+                    };
+                    args.insert("project".to_string(), serde_json::json!(canonical.clone()));
+                    return Ok(Some(self.with_request_project(canonical)));
+                }
+                if action_trimmed.eq_ignore_ascii_case("start") {
+                    let scope_paths: Vec<&str> = args
+                        .get("declared_file_scope")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect();
+                    if let Some(project) = self
+                        .infer_unambiguous_workspace_from_paths(scope_paths, true)
+                        .map_err(invalid)?
+                    {
+                        return Ok(Some(self.with_request_project(project)));
+                    }
+                }
+                return Ok(None);
+            }
+            if matches!(
+                action_trimmed.to_ascii_lowercase().as_str(),
+                "cancel" | "continue" | "finish" | "result" | "status"
+            ) && args.get("project").filter(|v| !v.is_null()).is_none()
+            {
+                if let Some(dispatch_id) = args
+                    .get("dispatch_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                {
+                    if let Some(project) =
+                        crate::mcp_tasks::owned_project_for_dispatch(self, dispatch_id)
+                    {
+                        return Ok(Some(self.with_request_project(project)));
+                    }
+                }
+            }
+            return Ok(None);
+        }
+
+        if !crate::session_identity::project_defaults_to_bound_project(tool_name, args) {
+            return Ok(None);
+        }
+
+        if let Some(explicit_val) = args.get("project").filter(|v| !v.is_null()).cloned() {
+            let Some(raw_project) = explicit_val.as_str() else {
+                return Ok(None);
+            };
+            let trimmed = raw_project.trim();
+            if trimmed.is_empty() {
+                if crate::session_identity::unbound_explicit_project_read_allowed(tool_name, args) {
+                    return Ok(None);
+                }
+                return Err(invalid("project name cannot be empty".into()));
+            }
+            let canonical = if std::path::Path::new(trimmed).is_absolute() {
+                self.resolve_call_workspace_path(trimmed, true, false)
+                    .map_err(invalid)?
+            } else {
+                match self.resolve_server_named_project_binding(trimmed) {
+                    Ok((project, _)) => project,
+                    Err(_)
+                        if crate::session_identity::unbound_explicit_project_read_allowed(
+                            tool_name, args,
+                        ) =>
+                    {
+                        return Ok(None)
+                    }
+                    Err(err) => return Err(invalid(err)),
+                }
+            };
+            args.insert("project".to_string(), serde_json::json!(canonical.clone()));
+            return Ok(Some(self.with_request_project(canonical)));
+        }
+
+        if global_scope {
+            return Ok(None);
+        }
+
+        let read_only =
+            crate::session_identity::unbound_explicit_project_read_allowed(tool_name, args);
+        let inferred = match tool_name {
+            "tachi_task" | "tachi_verify" => {
+                let paths: Vec<&str> = ["cwd", "worktree_path", "worktree"]
+                    .into_iter()
+                    .filter_map(|key| args.get(key).and_then(serde_json::Value::as_str))
+                    .collect();
+                self.infer_unambiguous_workspace_from_paths(paths, false)
+            }
+            "tachi_memory" | "tachi_save" | "tachi_search" => {
+                let paths: Vec<&str> = ["file_context", "files", "references"]
+                    .into_iter()
+                    .filter_map(|key| args.get(key).and_then(serde_json::Value::as_array))
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect();
+                self.infer_unambiguous_workspace_from_paths(paths, true)
+            }
+            _ => Ok(None),
+        };
+
+        match inferred {
+            Ok(Some(project)) => Ok(Some(self.with_request_project(project))),
+            Ok(None) => Ok(None),
+            Err(_) if read_only => Ok(None),
+            Err(err) => Err(invalid(err)),
+        }
+    }
+
     pub(crate) fn clone_for_mcp_session(&self) -> Self {
         let mut clone = self.clone();
         clone.request_project = None;
