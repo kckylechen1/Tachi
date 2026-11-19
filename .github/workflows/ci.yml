@@ -58,6 +58,7 @@ jobs:
           python3 scripts/check_release_versions.py
           python3 -m unittest scripts.test_check_release_versions
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_ci_affected_crates.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
 
       - name: Validate setup and CI supply-chain policy
@@ -498,12 +499,26 @@ jobs:
       - name: Run workspace tests
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           : "${AUDITED_NEXTEST:?}"
           MEMCORE_TEST_TEMPLATE_DIR="$(mktemp -d)"
           export MEMCORE_TEST_TEMPLATE_DIR
           trap 'rm -rf -- "$MEMCORE_TEST_TEMPLATE_DIR"' EXIT
-          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+            scope_args=()
+            while IFS= read -r arg; do
+              [[ -n "$arg" ]] && scope_args+=("$arg")
+            done < <(python3 .github/scripts/ci_affected_crates.py --nextest-args)
+            if ((${#scope_args[@]} == 0)); then
+              scope_args=(--workspace)
+            fi
+            "${AUDITED_NEXTEST:?}" nextest run "${scope_args[@]}" --locked --profile ci
+          else
+            "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          fi
 
       - name: Diagnose legacy copy failures on the same runner
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.workspace_tests.outcome == 'failure' }}
@@ -535,7 +550,15 @@ jobs:
       - name: Verify portable-kernel feature boundary
         id: portable
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo test -p portable-kernel --features portable-contract-test --locked
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]] || python3 .github/scripts/ci_affected_crates.py --includes portable-kernel; then
+            cargo test -p portable-kernel --features portable-contract-test --locked
+          else
+            echo "Skipping portable-kernel feature boundary: portable-kernel not in affected crate set"
+          fi
 
       - name: Run doc tests
         id: doctests

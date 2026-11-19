@@ -322,6 +322,51 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(calls.exists())
 
+    def test_workspace_step_scopes_pr_or_fails_closed_to_workspace(self):
+        body = self.rust.split("      - name: Run workspace tests\n", 1)[1].split("\n      - ", 1)[0]
+        script = textwrap.dedent(body.split("        run: |\n", 1)[1])
+        portable = self.rust.split("      - name: Verify portable-kernel feature boundary\n", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("python3 .github/scripts/ci_affected_crates.py --includes portable-kernel", portable)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stub = root / 'audited-nextest'
+            calls = root / 'calls.jsonl'
+            stub.write_text(f'#!{sys.executable}\n' + textwrap.dedent('''\
+                import json, os, sys
+                with open(os.environ['CI_FIXTURE_CALLS'], 'a') as output:
+                    output.write(json.dumps(sys.argv[1:]) + '\\n')
+                sys.exit(int(os.environ['CI_FIXTURE_EXIT']))
+            '''))
+            stub.chmod(0o755)
+            # Fail-closed fallback on unproven PR SHAs runs --workspace
+            env = {
+                'PATH': os.environ.get('PATH', ''),
+                'AUDITED_NEXTEST': str(stub),
+                'CI_FIXTURE_CALLS': str(calls),
+                'CI_FIXTURE_EXIT': '0',
+                'GITHUB_EVENT_NAME': 'pull_request',
+                'PR_HEAD_SHA': '',
+                'PR_BASE_SHA': '',
+            }
+            result = subprocess.run(['bash', '-e', '-c', script], cwd=str(ROOT), env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
+                             [['nextest', 'run', '--workspace', '--locked', '--profile', 'ci']])
+            # Scoped PR passes -p <pkg> ... flags cleanly
+            calls.unlink()
+            fake_repo = root / 'repo'
+            (fake_repo / '.github/scripts').mkdir(parents=True)
+            (fake_repo / '.github/scripts/ci_affected_crates.py').write_text(
+                'import sys\nfor a in ("-p", "tachi-contract-tests", "-p", "tachi-server"): print(a)\n'
+            )
+            result = subprocess.run(['bash', '-e', '-c', script], cwd=str(fake_repo), env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
+                             [['nextest', 'run', '-p', 'tachi-contract-tests', '-p', 'tachi-server',
+                               '--locked', '--profile', 'ci']])
+
     def test_success_requires_junit_but_unstarted_tests_do_not(self):
         body = self.rust.split("      - name: Archive nextest JUnit timing report\n", 1)[1].split("\n      - ", 1)[0]
         self.assertIn("steps.workspace_tests.outcome == 'success'", body)
