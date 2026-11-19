@@ -12,7 +12,7 @@ async fn rate_limit_session_windows_stay_bounded_when_all_sessions_are_active() 
             tool_filter: None,
             rate_limit_rpm: Some(100),
             rate_limit_burst: Some(0),
-            registered_at: Utc::now().to_rfc3339(),
+            registered_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
     }
 

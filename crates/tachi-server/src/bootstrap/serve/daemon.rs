@@ -197,8 +197,9 @@ pub(super) async fn serve_http_daemon(
             loop {
                 tokio::time::sleep(tick).await;
                 let last = clock.load(std::sync::atomic::Ordering::Relaxed);
-                let idle_ms = chrono::Utc::now().timestamp_millis() - last;
-                if idle_ms >= idle_timeout.as_millis() as i64 {
+                let idle_ms =
+                    jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) - i128::from(last);
+                if idle_ms >= idle_timeout.as_millis() as i128 {
                     eprintln!(
                         "[idle-reaper] daemon idle {}s (limit {}s); shutting down; a supervisor or operator must restart it for native HTTP clients",
                         idle_ms / 1000,
@@ -333,7 +334,7 @@ pub(super) async fn serve_http_daemon(
         "project_db": project_db_path
             .as_ref()
             .map(|p| p.display().to_string()),
-        "started_at": Utc::now().to_rfc3339(),
+        "started_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "version": crate::build_info::PKG_VERSION,
         "git_sha": crate::build_info::GIT_SHA,
         "internal_proxy_token": internal_proxy_token,

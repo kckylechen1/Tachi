@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -418,7 +417,7 @@ impl NativeAcpConnection {
             "raw_tool_kind": raw_kind,
             "verdict": verdict,
             "authorizer": AUTHORIZER,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
         if self.defer_worker_text {
             self.staged_events.push(NativeAcpStagedEvent {
@@ -507,7 +506,7 @@ impl NativeAcpConnection {
             "agent": self.agent,
             "acp_event": kind,
             "text": text,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
         let target = if event == "acp_native_message" {
             NativeAcpEventTarget::Progress

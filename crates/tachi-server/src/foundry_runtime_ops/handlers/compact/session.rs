@@ -9,7 +9,6 @@ use super::edges::persist_compact_session_import_edges;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CompactSessionMemoryParams;
 use crate::utils::sanitize_safe_path_name;
-use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
 
@@ -89,7 +88,7 @@ pub(crate) async fn handle_compact_session_memory(
             summary,
             text: compacted_text.clone(),
             importance: params.importance.clamp(0.0, 1.0),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "experience".to_string(),
@@ -166,7 +165,7 @@ pub(crate) async fn handle_compact_session_memory(
             summary: signal_text.chars().take(100).collect::<String>(),
             text: signal_text.to_string(),
             importance: params.importance.clamp(0.0, 1.0),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".to_string(),

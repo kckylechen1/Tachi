@@ -2,6 +2,7 @@ use super::*;
 use crate::test_support::EnvRestore;
 use serde_json::json;
 use std::collections::HashSet;
+use std::str::FromStr;
 
 fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
     rows.iter()
@@ -869,4 +870,38 @@ fn model_lanes_report_the_embedding_default_against_the_stored_index_width() {
         lanes["embedding"]["expected_dimension"], lanes["embedding"]["stored_index_dimension"],
         "an operator has to be able to see both numbers and that they agree"
     );
+}
+
+#[test]
+fn rotation_status_honors_a_far_future_cooldown_outside_jiffs_range() {
+    // astra round 3, finding 1: a persisted deadline like 9999-12-31 cannot
+    // become a jiff instant; reading it through an instant conversion would
+    // silently report the key healthy. The civil ordering key must classify
+    // it as rate_limited, agreeing with provider doctor on the same row.
+    use super::rotation::{build_rotation_status, RotationSourceStatus};
+    use memcore::vault::VaultKeyHealth;
+    use std::collections::HashMap;
+
+    let source = RotationSourceStatus {
+        total_keys: 1,
+        current_index: 0,
+        strategy: "round_robin".to_string(),
+        members: vec!["PROVIDER_API_KEY_1".to_string()],
+    };
+    let health = HashMap::from([(
+        "PROVIDER_API_KEY_1".to_string(),
+        VaultKeyHealth {
+            status: "rate_limited".to_string(),
+            cooldown_until: Some("9999-12-31T23:59:59Z".to_string()),
+            ..VaultKeyHealth::default()
+        },
+    )]);
+    let status = build_rotation_status(
+        &source,
+        None,
+        Some(&health),
+        jiff::Timestamp::from_str("2026-11-18T00:00:00Z").unwrap(),
+    );
+    assert_eq!(status.rate_limited_keys, 1, "status: {status:?}");
+    assert_eq!(status.healthy_keys, Some(0), "status: {status:?}");
 }

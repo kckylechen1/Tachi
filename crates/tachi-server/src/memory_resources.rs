@@ -7,7 +7,6 @@
 
 use crate::tool_params::{SearchMemoryParams, TachiSearchParams};
 use crate::MemoryServer;
-use chrono::{DateTime, Utc};
 use memcore::{MemoryEntry, Surface};
 use rmcp::model::{Resource, ResourceContents};
 use sha2::{Digest, Sha256};
@@ -69,10 +68,10 @@ pub(crate) fn eligible_search_entry(entry: &MemoryEntry, params: &SearchMemoryPa
 }
 
 fn is_ordinary_active_entry(entry: &MemoryEntry) -> bool {
-    is_ordinary_active_entry_at(entry, Utc::now())
+    is_ordinary_active_entry_at(entry, jiff::Timestamp::now())
 }
 
-fn is_ordinary_active_entry_at(entry: &MemoryEntry, now: DateTime<Utc>) -> bool {
+fn is_ordinary_active_entry_at(entry: &MemoryEntry, now: jiff::Timestamp) -> bool {
     entry.revision > 0
         && !entry.archived
         && entry_is_current_at(entry, now)
@@ -83,14 +82,9 @@ fn is_ordinary_active_entry_at(entry: &MemoryEntry, now: DateTime<Utc>) -> bool 
         && !memcore::is_eval_entry(entry)
 }
 
-fn entry_is_current_at(entry: &MemoryEntry, now: DateTime<Utc>) -> bool {
-    let parse = |value: &str| {
-        let value = value.trim();
-        DateTime::parse_from_rfc3339(value)
-            .map(|time| time.with_timezone(&Utc))
-            .or_else(|_| value.parse::<DateTime<Utc>>())
-            .ok()
-    };
+fn entry_is_current_at(entry: &MemoryEntry, now: jiff::Timestamp) -> bool {
+    let parse = crate::utils::relaxed_datetime_key;
+    let now = crate::utils::timestamp_key(now);
     // Match the temporal search fallback without guessing when a non-empty
     // bound is malformed. Hashing and returning still use this same row.
     let from = if entry.valid_from.is_empty() {
@@ -897,7 +891,7 @@ mod tests {
 
     #[test]
     fn resource_time_window_has_inclusive_start_and_exclusive_end() {
-        let now: DateTime<Utc> = "2026-09-25T12:00:00Z".parse().unwrap();
+        let now: jiff::Timestamp = "2026-09-25T12:00:00Z".parse().unwrap();
         let mut candidate = entry("resource-exact-time-bound");
         candidate.valid_from = "2026-09-25T13:00:00+01:00".to_string();
         candidate.valid_until = Some("2026-09-25T12:00:00.001Z".to_string());

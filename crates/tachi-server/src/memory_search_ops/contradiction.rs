@@ -214,7 +214,7 @@ pub(crate) fn persist_confirmed_contradiction(
     candidate: &ContradictionCandidate,
     verified: &tachi_llm::Generated<ContradictionVerification>,
 ) -> Result<ConfirmedContradictionOutcome, String> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let model_invocation = serde_json::to_value(&verified.invocation)
         .map_err(|e| format!("serialize contradiction invocation receipt: {e}"))?;
     let metadata = json!({
@@ -605,7 +605,7 @@ mod tests {
             summary: text[..text.len().min(30)].into(),
             text: text.into(),
             importance: 0.7,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".into(),

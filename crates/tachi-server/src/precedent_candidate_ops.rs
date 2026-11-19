@@ -203,12 +203,8 @@ fn normalize_source_ref(raw: &RulingSourceRefParams) -> Result<NormalizedSourceR
     }
     let updated_at = trimmed_opt(&raw.updated_at)
         .map(|value| {
-            chrono::DateTime::parse_from_rfc3339(&value)
-                .map(|timestamp| {
-                    timestamp
-                        .with_timezone(&chrono::Utc)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                })
+            crate::utils::parse_rfc3339(&value)
+                .map(memcore::time_compat::millis_z)
                 .map_err(|_| format!("source_ref has invalid `updated_at` timestamp {value:?}"))
         })
         .transpose()?;

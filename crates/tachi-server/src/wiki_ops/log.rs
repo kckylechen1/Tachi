@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &str) {
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let log_line = format!(
         "## [{}] {} | {}",
         now,

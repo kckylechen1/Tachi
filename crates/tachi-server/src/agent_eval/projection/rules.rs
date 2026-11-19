@@ -179,9 +179,11 @@ fn normalized(ts: &str) -> String {
 /// Shift an RFC3339 timestamp by `delta_secs`, parsed as a real instant —
 /// never by string arithmetic.
 pub(crate) fn shift_iso(ts: &str, delta_secs: i64) -> Option<String> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(ts.trim()).ok()?;
-    let shifted = parsed.with_timezone(&chrono::Utc) + chrono::Duration::seconds(delta_secs);
-    Some(shifted.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    let parsed = crate::utils::parse_rfc3339(ts.trim()).ok()?;
+    let shifted = parsed
+        .checked_add(jiff::SignedDuration::from_secs(delta_secs))
+        .ok()?;
+    Some(memcore::time_compat::millis_z(shifted))
 }
 
 /// Window start for `now - days`.

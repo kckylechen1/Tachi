@@ -10,7 +10,9 @@ async fn board_marks_abandoned_working_run_as_failed() {
     );
     let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create stale run fixture");
-    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120),
+    );
     std::fs::write(
         run_dir.join("status.json"),
         serde_json::to_string(&serde_json::json!({
@@ -110,7 +112,9 @@ async fn board_marks_working_run_with_result_as_stale_after_timeout() {
     );
     let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create result-stale run fixture");
-    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120),
+    );
     std::fs::write(
         run_dir.join("status.json"),
         serde_json::to_string(&serde_json::json!({

@@ -364,7 +364,7 @@ pub(crate) fn producer_preflight(
                             &binding.project,
                             &binding.identity,
                             &binding.connection_id,
-                            &Utc::now().to_rfc3339(),
+                            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         )? && session_claims::work_claim_project(conn, &seal.claim_id)?
                             .as_deref()
                             == Some(&binding.project)
@@ -484,7 +484,7 @@ fn persist_new_flow(
     let _lock = lock.lock().map_err(|_| UNAVAILABLE)?;
     let fence = anchor.acquire_fence()?;
     anchor.require_fresh_directory(&fence)?;
-    let mut status = json!({"ownership":seal,"flow_id":flow_id,"created_at":Utc::now().to_rfc3339(),"state":"incomplete","dispatch_ids":[]});
+    let mut status = json!({"ownership":seal,"flow_id":flow_id,"created_at":memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),"state":"incomplete","dispatch_ids":[]});
     anchor.validate_current_path()?;
     anchor.write_component_atomic(
         "status.json",
@@ -521,7 +521,7 @@ fn persist_new_flow(
     status["automation_plan"] = plan.clone();
     status["doc_paths"] = json!(issue.doc_paths);
     status["spec_paths"] = json!(issue.spec_paths);
-    status["updated_at"] = json!(Utc::now().to_rfc3339());
+    status["updated_at"] = json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
     anchor.validate_current_path()?;
     anchor.write_component_atomic(
         "status.json",
@@ -546,8 +546,8 @@ pub(crate) fn read_owned_status(
         || !claim
             .lease_expires_at
             .as_deref()
-            .and_then(|lease| chrono::DateTime::parse_from_rfc3339(lease).ok())
-            .is_some_and(|lease| lease > Utc::now())
+            .and_then(memcore::time_compat::parse_rfc3339_strict)
+            .is_some_and(|lease| lease > jiff::Timestamp::now())
     {
         return Err(unavailable());
     }

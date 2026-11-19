@@ -1,6 +1,5 @@
 //! R4 — Drop legacy / dead-letter foundry_jobs.
 
-use chrono::{Duration, SecondsFormat, Utc};
 use rusqlite::params;
 use serde_json::json;
 
@@ -30,8 +29,8 @@ fn has_table(ctx: &DbContext, name: &str) -> bool {
         .is_ok()
 }
 
-fn retention_cutoff_iso(days: i64) -> String {
-    (Utc::now() - Duration::days(days)).to_rfc3339_opts(SecondsFormat::Millis, true)
+fn retention_cutoff_iso(days: u64) -> Result<String, RepairError> {
+    super::retention_cutoff(days).map(memcore::time_compat::millis_z)
 }
 
 fn count_jobs_before(
@@ -72,10 +71,10 @@ impl RepairRule for JobsPurge {
         if !has_table(ctx, "foundry_jobs") {
             return Ok(r);
         }
-        let dl_days = self.dead_letter_days.unwrap_or(30) as i64;
-        let cp_days = self.completed_days.unwrap_or(90) as i64;
-        let dl_iso = retention_cutoff_iso(dl_days);
-        let cp_iso = retention_cutoff_iso(cp_days);
+        let dl_days = self.dead_letter_days.unwrap_or(30);
+        let cp_days = self.completed_days.unwrap_or(90);
+        let dl_iso = retention_cutoff_iso(dl_days)?;
+        let cp_iso = retention_cutoff_iso(cp_days)?;
 
         let n_dl = count_jobs_before(&ctx.conn, "dead_letter", &dl_iso)?;
         let n_cp = count_jobs_before(&ctx.conn, "completed", &cp_iso)?;
@@ -92,7 +91,7 @@ impl RepairRule for JobsPurge {
             );
         }
         if let Some(fd_days) = self.failed_days {
-            let fd_iso = retention_cutoff_iso(fd_days as i64);
+            let fd_iso = retention_cutoff_iso(fd_days)?;
             let n_fd = count_jobs_before(&ctx.conn, "failed", &fd_iso)?;
             if n_fd > 0 {
                 r.findings.push(
@@ -109,18 +108,19 @@ impl RepairRule for JobsPurge {
         if !has_table(ctx, "foundry_jobs") {
             return Ok(r);
         }
-        let dl_days = self.dead_letter_days.unwrap_or(30) as i64;
-        let cp_days = self.completed_days.unwrap_or(90) as i64;
-        let dl_iso = retention_cutoff_iso(dl_days);
-        let cp_iso = retention_cutoff_iso(cp_days);
+        // All cutoffs computed BEFORE the transaction opens: an invalid
+        // third argument must fail as a preflight, not surface after two
+        // DELETEs have already run inside the (rolled-back) transaction
+        // (astra round 3, C4).
+        let dl_iso = retention_cutoff_iso(self.dead_letter_days.unwrap_or(30))?;
+        let cp_iso = retention_cutoff_iso(self.completed_days.unwrap_or(90))?;
+        let fd_iso = self.failed_days.map(retention_cutoff_iso).transpose()?;
         let tx = ctx.conn.transaction()?;
         let n_dl = delete_jobs_before(&tx, "dead_letter", &dl_iso)?;
         let n_cp = delete_jobs_before(&tx, "completed", &cp_iso)?;
-        let n_fd = if let Some(fd_days) = self.failed_days {
-            let fd_iso = retention_cutoff_iso(fd_days as i64);
-            delete_jobs_before(&tx, "failed", &fd_iso)?
-        } else {
-            0
+        let n_fd = match &fd_iso {
+            Some(fd_iso) => delete_jobs_before(&tx, "failed", fd_iso)?,
+            None => 0,
         };
         tx.commit()?;
         if n_dl > 0 {

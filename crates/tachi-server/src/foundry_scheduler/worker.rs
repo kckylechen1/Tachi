@@ -336,9 +336,10 @@ mod tests {
     }
 
     fn running_cutoff() -> String {
-        (chrono::Utc::now()
-            - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
-        .to_rfc3339()
+        memcore::time_compat::rfc3339_compat(
+            jiff::Timestamp::now()
+                - jiff::SignedDuration::from_secs(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS),
+        )
     }
 
     /// An unstamped current store with an empty queue, closed, with the
@@ -353,10 +354,12 @@ mod tests {
 
     fn insert_job(db: &Path, id: &str, status: &str, updated_secs_ago: i64, metadata: &str) {
         let store = MemoryStore::open(db.to_str().expect("utf8 db path")).expect("open fixture");
-        let created = (chrono::Utc::now() - chrono::Duration::seconds(updated_secs_ago + 1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let updated = (chrono::Utc::now() - chrono::Duration::seconds(updated_secs_ago))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let created = memcore::time_compat::millis_z(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(updated_secs_ago + 1),
+        );
+        let updated = memcore::time_compat::millis_z(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(updated_secs_ago),
+        );
         store
             .connection()
             .execute(

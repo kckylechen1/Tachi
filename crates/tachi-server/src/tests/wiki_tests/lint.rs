@@ -3,7 +3,9 @@ use super::*;
 #[tokio::test]
 async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
     let server = make_server();
-    let old_ts = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+    let old_ts = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120 * 86_400),
+    );
 
     server
         .with_global_store(|store| {
@@ -48,7 +50,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     summary: "policy a".to_string(),
                     text: "Always use a feature flag for rollout safety.".to_string(),
                     importance: 0.7,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "fact".to_string(),
@@ -79,7 +81,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     summary: "policy b".to_string(),
                     text: "Do not use a feature flag for rollout safety.".to_string(),
                     importance: 0.7,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "fact".to_string(),
@@ -110,7 +112,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     summary: "dirty <think）leak".to_string(),
                     text: "A leaked <think） tag should be reported.".to_string(),
                     importance: 0.7,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "fact".to_string(),
@@ -142,7 +144,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Duplicate token sequence exact match for wiki lint duplicate detection."
                         .to_string(),
                     importance: 0.7,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "fact".to_string(),
@@ -174,7 +176,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Duplicate token sequence exact match for wiki lint duplicate detection."
                         .to_string(),
                     importance: 0.7,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "fact".to_string(),
@@ -206,7 +208,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Follow SOP: inspect logs, isolate failure, add regression test."
                         .to_string(),
                     importance: 0.9,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "decision".to_string(),
@@ -238,7 +240,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Follow SOP: inspect logs, isolate failure, add regression test."
                         .to_string(),
                     importance: 0.9,
-                    timestamp: Utc::now().to_rfc3339(),
+                    timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_until: None,
                     category: "decision".to_string(),
@@ -294,9 +296,11 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                 successes: 3,
                 failures: 0,
                 avg_rating: 0.2,
-                last_used: Some((Utc::now() - chrono::Duration::days(40)).to_rfc3339()),
-                created_at: Utc::now().to_rfc3339(),
-                updated_at: Utc::now().to_rfc3339(),
+                last_used: Some(memcore::time_compat::rfc3339_compat(
+                    jiff::Timestamp::now() - jiff::SignedDuration::from_secs(40 * 86_400),
+                )),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+                updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             };
             let skill_b = HubCapability {
                 id: "skill:merge-b".to_string(),
@@ -324,9 +328,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                 successes: 5,
                 failures: 0,
                 avg_rating: 4.5,
-                last_used: Some(Utc::now().to_rfc3339()),
-                created_at: Utc::now().to_rfc3339(),
-                updated_at: Utc::now().to_rfc3339(),
+                last_used: Some(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+                updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             };
             store.hub_register(&skill_a).map_err(|e| e.to_string())?;
             store.hub_register(&skill_b).map_err(|e| e.to_string())?;
@@ -459,7 +463,7 @@ async fn wiki_lint_explicit_named_store_is_strict_and_reports_store_identity() {
         schema_kind: "tachi".to_string(),
         vec_enabled: true,
         allow_write: true,
-        last_doctor_at: Utc::now().to_rfc3339(),
+        last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         last_classification: "healthy".to_string(),
         scope_hint: "project:named-lint".to_string(),
         notes: String::new(),
@@ -579,7 +583,9 @@ async fn wiki_lint_ignores_operation_log_rows() {
 #[tokio::test]
 async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permanent_entries() {
     let server = make_server();
-    let old_ts = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+    let old_ts = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120 * 86_400),
+    );
     server
         .with_global_store(|store| {
             let mut permanent_contradicted = make_entry("wiki-semantic-stale-permanent");
@@ -619,7 +625,7 @@ async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permane
                 relation: "contradicts".to_string(),
                 weight: 0.9,
                 metadata: json!({"source": "test"}),
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_to: None,
             };
@@ -708,7 +714,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
                 relation: "contradicts".to_string(),
                 weight: 0.9,
                 metadata: json!({"source": "test"}),
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_to: None,
             };
@@ -894,7 +900,7 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
                             relation: "supersedes".to_string(),
                             weight: 0.9,
                             metadata: json!({"source": "test"}),
-                            created_at: Utc::now().to_rfc3339(),
+                            created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                             valid_from: String::new(),
                             valid_to: None,
                         },

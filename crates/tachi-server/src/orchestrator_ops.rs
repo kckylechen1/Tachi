@@ -3,7 +3,6 @@
 //! The existing `orchestrator` hard-state namespace and stored shapes are retained.
 
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 // No TTL/backfill: a TODO list can reopen after all items finish, and handoff
@@ -225,7 +224,7 @@ pub(crate) fn update_todo(
                     OrchestratorTodoList {
                         task_id: task_id.clone(),
                         todos: Vec::new(),
-                        updated_at: Utc::now().to_rfc3339(),
+                        updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     },
                     None,
                 ),
@@ -234,7 +233,7 @@ pub(crate) fn update_todo(
         // snapshot must make the insert/CAS fail and force a fresh merge.
         #[cfg(test)]
         run_todo_update_snapshot_hook(server, &key);
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let status = match params.todo_status.as_deref() {
             Some(raw) => parse_todo_status(raw)?,
             None => list
@@ -324,7 +323,7 @@ pub(crate) fn write_handoff(
     if packet.objective.trim().is_empty() {
         return Err("objective is required for handoff_write".to_string());
     }
-    packet.updated_at = Utc::now().to_rfc3339();
+    packet.updated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     save_json(server, &handoff_key(&packet.task_id), &packet)?;
     Ok(packet)
 }

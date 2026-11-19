@@ -128,7 +128,10 @@ async fn render_one(
         return Ok(());
     }
 
-    println!("tachi status @ {}", chrono::Utc::now().to_rfc3339());
+    println!(
+        "tachi status @ {}",
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
+    );
     println!("  app_home: {}", app_home.display());
     let host_profile = crate::host_profile::runtime_json();
     if let Some(error) = host_profile

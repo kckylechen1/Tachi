@@ -1,4 +1,3 @@
-use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::facade_memory_ops::shape_complete_response;
@@ -912,7 +911,7 @@ fn persist_resolved_completion_receipt_at_with_admission(
             },
             "eval_ledger_id": eval_memory_id,
             "reviewed": reviewed,
-            "recorded_at": Utc::now().to_rfc3339(),
+            "recorded_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
     // A prior lock exhaustion records an explicit recovery marker rather than
@@ -1131,9 +1130,9 @@ pub(crate) async fn handle_tachi_complete(
         .transpose()?
         .flatten();
 
-    let now = Utc::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let now = jiff::Timestamp::now();
+    let date = memcore::time_compat::date_only(now);
+    let ts = memcore::time_compat::compact_basic(now);
 
     // #773 (S2 prep): eval rows carry dispatch_id but almost never issue_ref
     // because the calling agent must manually re-supply it and mostly

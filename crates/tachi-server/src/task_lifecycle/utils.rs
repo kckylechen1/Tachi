@@ -111,7 +111,7 @@ pub(super) fn merge_flow_status(run_dir: &Path, patch: Value) -> Result<Value, S
     }
     deep_merge(&mut status, patch);
     if status.get("created_at").is_none() {
-        status["created_at"] = json!(Utc::now().to_rfc3339());
+        status["created_at"] = json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
     }
     write_json_atomic(&run_dir.join("status.json"), &status)?;
     Ok(status)
@@ -235,7 +235,7 @@ pub(super) fn new_task_flow_id(stage: &str, title: &str) -> String {
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!(
         "flow_{}_{}_{}_{}",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        memcore::time_compat::compact_basic(jiff::Timestamp::now()),
         stage,
         slug,
         suffix

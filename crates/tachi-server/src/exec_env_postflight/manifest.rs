@@ -859,7 +859,7 @@ pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
     let mut manifest = WorkspaceManifest {
         workspace_root: workspace_root.to_string_lossy().to_string(),
         gitdir_root: spec.gitdir_root.map(|p| p.to_string_lossy().to_string()),
-        captured_at: chrono::Utc::now().to_rfc3339(),
+        captured_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         entries: BTreeMap::new(),
         errors: Vec::new(),
         unhashed_roots: Vec::new(),

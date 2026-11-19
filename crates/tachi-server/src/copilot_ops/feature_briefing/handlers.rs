@@ -44,7 +44,7 @@ fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value
             store.connection_mut(),
             &actor,
             A2A_BRIEFING_RESPONSE_LIMIT,
-            &Utc::now().to_rfc3339(),
+            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         )
         .map_err(|error| error.to_string())
     })?;

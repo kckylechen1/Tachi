@@ -14,7 +14,6 @@ use crate::memory_search_ops::rerank_rows_with_outcome;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::{sanitize_safe_path_name, stable_hash};
-use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::json;
 use tachi_foundry::FoundryJobMetadata;
@@ -160,7 +159,7 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
                 })
             })
             .collect::<Vec<_>>();
-        let timestamp = Utc::now().to_rfc3339();
+        let timestamp = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let text = build_recall_cache_text(&query, &reranked);
         let metadata = crate::provenance::inject_provenance(
             server,

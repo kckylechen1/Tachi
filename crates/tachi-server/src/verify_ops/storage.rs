@@ -3,7 +3,7 @@ use crate::shared_defs::valid_status;
 use crate::TachiVerifyCheckItem;
 
 pub(super) fn now() -> String {
-    Utc::now().to_rfc3339()
+    memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
 }
 
 pub(super) fn normalize_status(status: Option<&str>, default: &str) -> Result<String, String> {

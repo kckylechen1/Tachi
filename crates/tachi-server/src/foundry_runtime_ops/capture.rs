@@ -1,6 +1,5 @@
 use super::helpers::{dedup_strings, round3};
 use crate::server_state::{DbScope, MemoryServer};
-use chrono::Utc;
 use memcore::{HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -83,7 +82,7 @@ fn merge_metadata(
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     merge_history.push(json!({
-        "merged_at": Utc::now().to_rfc3339(),
+        "merged_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "incoming_id": incoming_id,
         "similarity": round3(similarity),
         "strategy": "inline_foundry_merge",

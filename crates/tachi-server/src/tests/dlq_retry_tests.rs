@@ -1,7 +1,6 @@
 use super::{call_tool_on_server, make_server};
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::DlqRetryParams;
-use chrono::Utc;
 use memory_server_runtime::AgentProfile;
 use serde_json::json;
 
@@ -260,7 +259,7 @@ async fn dlq_retry_respects_rate_limiter_before_dispatch() {
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: Some(1),
-            registered_at: Utc::now().to_rfc3339(),
+            registered_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
     }
 
@@ -275,7 +274,7 @@ async fn dlq_retry_respects_rate_limiter_before_dispatch() {
         arguments: Some(args),
         error: "original failure".to_string(),
         error_category: "internal".to_string(),
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         retry_count: 0,
         max_retries: 3,
         status: "pending".to_string(),

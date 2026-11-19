@@ -133,6 +133,18 @@ impl From<memcore::MemoryError> for RepairError {
     }
 }
 
+fn retention_cutoff(days: u64) -> Result<jiff::Timestamp, RepairError> {
+    let invalid =
+        || memcore::MemoryError::InvalidArg(format!("retention period out of range: {days} days"));
+    let seconds = days
+        .checked_mul(86_400)
+        .and_then(|n| i64::try_from(n).ok())
+        .ok_or_else(invalid)?;
+    jiff::Timestamp::now()
+        .checked_sub(jiff::SignedDuration::from_secs(seconds))
+        .map_err(|_| invalid().into())
+}
+
 /// Opens a repair connection without initializing or migrating the DB while
 /// registering the default-deny function required by persistent v23 guards.
 pub(crate) fn open_repair_connection(path: impl AsRef<Path>) -> Result<Connection, RepairError> {
@@ -407,7 +419,7 @@ fn resolve_rules(rule_filter: &[String]) -> Vec<String> {
 
 /// Take a consistent SQLite snapshot backup at `{path}.bak.{ts}`.
 pub fn backup_db(path: &Path) -> std::io::Result<PathBuf> {
-    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let ts = memcore::time_compat::backup_stamp(jiff::Timestamp::now());
     let backup = sibling_with_suffix(path, &format!("bak.{ts}"));
     let _ = memcore::db::enable_simple_auto_extension();
     memcore::db::register_sqlite_vec();

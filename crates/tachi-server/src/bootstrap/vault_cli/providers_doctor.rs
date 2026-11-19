@@ -245,17 +245,9 @@ pub(super) fn extract_api_key_value(block: &serde_json::Value) -> Option<&serde_
     obj.get("apiKey")
 }
 
-pub(super) fn age_days_from_updated_at(
-    updated_at: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<u64> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(updated_at).ok()?;
-    let then = parsed.with_timezone(&chrono::Utc);
-    let delta = now.signed_duration_since(then);
-    if delta.num_seconds() < 0 {
-        return Some(0);
-    }
-    Some(delta.num_days().max(0) as u64)
+pub(super) fn age_days_from_updated_at(updated_at: &str, now: jiff::Timestamp) -> Option<u64> {
+    let then = crate::utils::Rfc3339Stamp::parse(updated_at)?;
+    Some((then.whole_seconds_until(now).max(0) / 86_400) as u64)
 }
 
 /// Load and validate OpenCode config; return provider name → block map sorted.
@@ -315,7 +307,7 @@ pub(super) fn build_provider_rows(
     providers: &BTreeMap<String, serde_json::Value>,
     admitted: &HashSet<String>,
     vault_updated_at: &HashMap<String, String>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Vec<ProviderDoctorRow> {
     build_provider_rows_with_sources(
         providers,
@@ -343,7 +335,7 @@ pub(super) fn build_provider_rows_with_sources(
     env_values: &HashMap<String, String>,
     vault_values: &HashMap<String, String>,
     vault_access: ProviderVaultAccess,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<Vec<ProviderDoctorRow>, String> {
     let evidence = ProviderVaultReportEvidence::exact_only(vault_updated_at, vault_values);
     build_provider_rows_with_evidence(
@@ -362,7 +354,7 @@ fn build_provider_rows_with_evidence(
     env_values: &HashMap<String, String>,
     evidence: &ProviderVaultReportEvidence,
     vault_access: ProviderVaultAccess,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<Vec<ProviderDoctorRow>, String> {
     providers
         .iter()
@@ -701,10 +693,7 @@ fn decrypt_vault_values_for_report(
     Ok(ReportSecretValues(values))
 }
 
-fn provider_health_is_unusable(
-    health: Option<&VaultKeyHealth>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
+fn provider_health_is_unusable(health: Option<&VaultKeyHealth>, now: jiff::Timestamp) -> bool {
     let Some(health) = health else {
         return false;
     };
@@ -716,19 +705,19 @@ fn provider_health_is_unusable(
         "rate_limited" | "cooldown" => health
             .cooldown_until
             .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|until| until.with_timezone(&chrono::Utc) > now),
+            .and_then(crate::utils::Rfc3339Stamp::parse)
+            .is_some_and(|until| until.after(now)),
         _ => false,
     }
 }
 
 fn older_timestamp(current: &Option<String>, candidate: &str) -> Option<String> {
-    let candidate_time = chrono::DateTime::parse_from_rfc3339(candidate).ok()?;
+    let candidate_time = crate::utils::Rfc3339Stamp::parse(candidate)?;
     let Some(current) = current else {
         return Some(candidate.to_string());
     };
-    let current_time = chrono::DateTime::parse_from_rfc3339(current).ok()?;
-    if candidate_time < current_time {
+    let current_time = crate::utils::Rfc3339Stamp::parse(current)?;
+    if candidate_time.key < current_time.key {
         Some(candidate.to_string())
     } else {
         Some(current.clone())
@@ -742,7 +731,7 @@ fn collect_provider_vault_evidence(
     store: &MemoryStore,
     key: Option<&[u8; 32]>,
     names: &HashSet<String>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<ProviderVaultReportEvidence, String> {
     let entries = store
         .vault_list_entries()
@@ -955,7 +944,7 @@ pub(super) fn run_providers_doctor(
     let admitted = crate::provider_config::key_registry::admitted_env_secret_names();
     let env_values = collect_referenced_env_values(&providers);
     let lookup_names = collect_vault_lookup_names(&providers, &env_values.0)?;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let evidence = collect_provider_vault_evidence(store, vault_key, &lookup_names, now)?;
     let rows = build_provider_rows_with_evidence(
         &providers,
@@ -985,6 +974,23 @@ mod tests {
         file.write_all(json.as_bytes()).expect("write fixture");
         file.flush().expect("flush");
         file
+    }
+
+    #[test]
+    fn provider_age_handles_historical_leap_and_future_civil_limit() {
+        let now = "2026-11-18T11:30:00Z".parse().unwrap();
+        assert_eq!(
+            age_days_from_updated_at("2026-11-17T11:29:60.9Z", now),
+            Some(1)
+        );
+        assert_eq!(
+            age_days_from_updated_at("2026-11-17T11:30:60Z", now),
+            Some(0)
+        );
+        assert_eq!(
+            age_days_from_updated_at("9999-12-31T23:59:59Z", now),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1058,9 +1064,7 @@ mod tests {
             "OPENAI_API_KEY".to_string(),
             "2026-07-11T00:00:00Z".to_string(),
         );
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = "2026-07-23T00:00:00Z".parse().unwrap();
         let rows = build_provider_rows(&providers, &admitted, &vault, now);
         let lines: Vec<String> = rows.iter().map(|r| r.format_line()).collect();
         let joined = lines.join("\n");
@@ -1225,7 +1229,7 @@ mod tests {
         )]);
         let admitted = HashSet::new();
         let vault = HashMap::new();
-        let rows = build_provider_rows(&providers, &admitted, &vault, chrono::Utc::now());
+        let rows = build_provider_rows(&providers, &admitted, &vault, jiff::Timestamp::now());
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].format_line(),
@@ -1276,9 +1280,7 @@ mod tests {
             ),
             ("OPENAI_API_KEY".to_string(), match_secret.to_string()),
         ]);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = "2026-07-23T00:00:00Z".parse().unwrap();
 
         let rows = build_provider_rows_with_sources(
             &providers,
@@ -1349,9 +1351,7 @@ mod tests {
                 },
             )]),
         };
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = "2026-07-23T00:00:00Z".parse().unwrap();
 
         let rows = build_provider_rows_with_evidence(
             &providers,
@@ -1416,7 +1416,7 @@ mod tests {
             &HashMap::from([("VOYAGE_API_KEY".to_string(), rotation_secret.to_string())]),
             &evidence,
             ProviderVaultAccess::Unlocked,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("exact plus active rotation report");
         let rendered = render_provider_report(&rows);
@@ -1467,7 +1467,7 @@ mod tests {
             &env_values,
             &evidence,
             ProviderVaultAccess::Unlocked,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("alias-to-prefix report");
         let rendered = render_provider_report(&rows);
@@ -1515,7 +1515,7 @@ mod tests {
                 &HashMap::from([("VOYAGE_API_KEY".to_string(), exact_secret.to_string())]),
                 &evidence,
                 ProviderVaultAccess::Unlocked,
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
             )
             .expect("rotation fallback report");
             let rendered = render_provider_report(&rows);
@@ -1562,7 +1562,7 @@ mod tests {
             &HashMap::from([("VOYAGE_API_KEY".to_string(), exact_secret.to_string())]),
             &evidence,
             ProviderVaultAccess::Unlocked,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("rotation refusal report");
         let rendered = render_provider_report(&rows);
@@ -1625,9 +1625,7 @@ mod tests {
             ),
         ]);
         let vault_values = HashMap::from([(alias_target.to_string(), alias_value.to_string())]);
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now = "2026-07-23T00:00:00Z".parse().unwrap();
 
         let unlocked = build_provider_rows_with_sources(
             &providers,
@@ -1714,7 +1712,7 @@ mod tests {
             &env_values,
             &HashMap::new(),
             ProviderVaultAccess::Unlocked,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect_err("malformed alias must fail loudly");
 
@@ -1869,7 +1867,7 @@ mod tests {
             &env_values,
             &values.0,
             ProviderVaultAccess::Unlocked,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("build decrypted report");
         let rendered = render_provider_report(&rows);
@@ -2070,7 +2068,7 @@ mod tests {
         ]);
         // The store owns entry updated_at on upsert, so advance from wall time
         // instead of pretending the fixture-provided timestamp survives.
-        let now = chrono::Utc::now() + chrono::Duration::days(4);
+        let now = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(4 * 86_400);
         let evidence = collect_provider_vault_evidence(&store, Some(key.bytes()), &names, now)
             .expect("collect rotation evidence");
         let env_values = HashMap::from([

@@ -602,7 +602,7 @@ mod tests {
         };
         let cache_write =
             cache_write.map(|()| crate::status_ops::status_health::ProviderProbeCache {
-                last_probe_at: chrono::Utc::now().to_rfc3339(),
+                last_probe_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 ttl_seconds: 60,
                 probes,
                 rotation_groups: Vec::new(),
@@ -910,7 +910,7 @@ async fn run_daily_pipeline_remediation(
                             let _ = std::fs::create_dir_all(parent);
                         }
                         let marker_body = serde_json::json!({
-                            "ts": chrono::Utc::now().to_rfc3339(),
+                            "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                             "groups_distilled": report.groups_distilled,
                             "groups_skipped": report.groups_skipped,
                             "fallback_used": report.fallback_used,
@@ -988,7 +988,7 @@ fn write_distill_failure_marker(
         let _ = std::fs::create_dir_all(parent);
     }
     let marker_body = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
+        "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "error": error,
         "groups_distilled": groups_distilled,
         "groups_skipped": groups_skipped,

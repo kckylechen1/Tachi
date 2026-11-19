@@ -21,9 +21,10 @@ async fn handle_foundry_maintenance_item(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
 ) -> Result<FoundryMaintenanceOutcome, String> {
-    let running_cutoff = (chrono::Utc::now()
-        - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
-    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let running_cutoff = memcore::time_compat::millis_z(
+        jiff::Timestamp::now()
+            - jiff::SignedDuration::from_secs(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS),
+    );
     let lease = with_foundry_store(server, item, |store| {
         memcore::claim_foundry_job_for_run(store.connection(), &item.job.id, &running_cutoff)
             .map_err(|e| format!("Failed to lease foundry job {}: {e}", item.job.id))

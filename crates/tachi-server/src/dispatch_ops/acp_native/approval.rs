@@ -3,7 +3,6 @@
 use crate::claims_ops::{current_run_owner, RunOwner};
 use crate::managed_run_control::{AnchoredRunStatus, StatusMutationFence};
 use crate::MemoryServer;
-use chrono::Utc;
 use rmcp::model::{InputRequest, InputRequests, InputResponses};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -239,7 +238,9 @@ impl NativeAcpApprovalContext {
                 grant_digest: self.grant_digest.clone(),
                 request_digest: digest(&bytes),
                 status_revision: revision,
-                expires_at: (Utc::now() + WAIT_LIMIT).to_rfc3339(),
+                expires_at: memcore::time_compat::rfc3339_compat(
+                    jiff::Timestamp::now() + WAIT_LIMIT,
+                ),
                 input,
                 decision: None,
             };
@@ -440,7 +441,10 @@ fn advance(status: &mut Value) -> Result<u64, String> {
         .as_object_mut()
         .ok_or("permission status is not an object")?;
     crate::managed_run_control::advance_status_revision(object)?;
-    object.insert("updated_at".into(), json!(Utc::now().to_rfc3339()));
+    object.insert(
+        "updated_at".into(),
+        json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+    );
     object["status_revision"]
         .as_u64()
         .ok_or_else(|| "permission revision unavailable".into())
@@ -490,7 +494,7 @@ fn append_decision(
         grant_digest: pending.grant_digest.clone(),
         status_revision: revision,
         approved,
-        decided_at: Utc::now().to_rfc3339(),
+        decided_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     };
     status[FIELD]["decision"] = serde_json::to_value(&decision).map_err(|e| e.to_string())?;
     history.push(decision);

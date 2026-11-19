@@ -1,6 +1,5 @@
 use super::*;
 use crate::manifest::DbRole;
-use chrono::{DateTime, Utc};
 
 fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
     crate::manifest::DbEntry {

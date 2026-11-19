@@ -8,7 +8,11 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
         .temp_home
         .join(".tachi/foundry-runs/.last_distill_run");
     std::fs::create_dir_all(marker_path.parent().unwrap()).expect("marker parent");
-    std::fs::write(&marker_path, Utc::now().to_rfc3339()).expect("write marker");
+    std::fs::write(
+        &marker_path,
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+    )
+    .expect("write marker");
 
     server
         .with_global_store(|store| {
@@ -18,7 +22,7 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
                     "INSERT INTO foundry_jobs
                      (id, kind, lane, status, target_db, path_prefix, memory_ids, metadata, created_at, updated_at)
                      VALUES ('job-completed', 'memory_neighborhood', 'maintenance', 'completed', 'project', '/', '[]', '{}', ?1, ?1)",
-                    rusqlite::params![Utc::now().to_rfc3339()],
+                    rusqlite::params![memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())],
                 )
                 .map_err(|e| e.to_string())?;
             store
@@ -27,7 +31,7 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
                     "INSERT INTO foundry_jobs
                      (id, kind, lane, status, target_db, path_prefix, memory_ids, metadata, created_at, updated_at)
                      VALUES ('job-skipped', 'forget_sweep', 'maintenance', 'skipped', 'project', '/', '[]', '{}', ?1, ?1)",
-                    rusqlite::params![Utc::now().to_rfc3339()],
+                    rusqlite::params![memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())],
                 )
                 .map_err(|e| e.to_string())?;
             Ok(())
@@ -36,7 +40,7 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: server.global_db_path_buf().display().to_string(),
@@ -45,7 +49,7 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),

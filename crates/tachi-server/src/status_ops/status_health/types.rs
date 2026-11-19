@@ -52,10 +52,9 @@ pub(crate) struct DoctorProbeCacheRefresh {
 
 impl ProviderProbeCache {
     pub(crate) fn is_stale(&self) -> bool {
-        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&self.last_probe_at) else {
+        let Ok(ts) = crate::utils::parse_rfc3339(&self.last_probe_at) else {
             return true;
         };
-        let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
-        age.num_seconds() > self.ttl_seconds
+        memcore::time_compat::whole_seconds_between(jiff::Timestamp::now(), ts) > self.ttl_seconds
     }
 }

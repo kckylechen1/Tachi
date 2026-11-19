@@ -34,7 +34,7 @@ pub(super) fn build_rotation_status(
     source: &RotationSourceStatus,
     probe: Option<&ProviderRotationGroupProbe>,
     health_members: Option<&HashMap<String, VaultKeyHealth>>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> ApiKeyRotationStatus {
     let probe_present = probe.is_some();
     let probed_members = probe.map(|probe| {
@@ -80,8 +80,16 @@ pub(super) fn build_rotation_status(
                             if health
                                 .cooldown_until
                                 .as_deref()
-                                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                                .is_some_and(|until| until.with_timezone(&chrono::Utc) > now) =>
+                                // Civil ordering key, NOT an instant
+                                // conversion: a stored deadline outside
+                                // jiff's range (e.g. 9999-12-31T23:59:59Z)
+                                // must still read as an active cooldown —
+                                // dropping it to `.ok()` here would report
+                                // the key healthy while provider doctor
+                                // (same civil key) calls it unusable
+                                // (astra round 3, finding 1).
+                                .and_then(crate::utils::Rfc3339Stamp::parse)
+                                .is_some_and(|until| until.after(now)) =>
                         {
                             "rate_limited"
                         }

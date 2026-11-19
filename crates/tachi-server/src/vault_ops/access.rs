@@ -1,6 +1,5 @@
 use crate::vault_crypto as crypto;
 use crate::vault_ops::ctx::*;
-use chrono::Utc;
 use memcore::vault::{
     api_key_pool_member_index, VaultEntry, VaultKeyRotation, SECRET_TYPE_API_KEY,
 };
@@ -191,7 +190,7 @@ fn select_vault_entry_from_transaction(
                     let new_rotation = VaultKeyRotation {
                         current_index: (rotation.current_index % matching_keys.len() as i64) + 1,
                         total_keys: matching_keys.len() as i64,
-                        updated_at: Utc::now().to_rfc3339(),
+                        updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         ..rotation.clone()
                     };
                     (matching_keys.get(idx).cloned(), Some(new_rotation))
@@ -258,7 +257,7 @@ fn record_successful_vault_access_in_transaction(
             })?;
         let mut updated = current;
         updated.current_index = (member_index as i64 % updated.total_keys) + 1;
-        updated.updated_at = Utc::now().to_rfc3339();
+        updated.updated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         transaction
             .vault_set_rotation(&updated)
             .map_err(|e| format!("Failed to update rotation: {e}"))?;
@@ -605,7 +604,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             );
             after_snapshot();
 
-            let now = Utc::now();
+            let now = jiff::Timestamp::now();
             let requested_rotation_prefix = only_logical_name.and_then(|logical_name| {
                 crate::provider_config::parse_rotation_member_name(logical_name)
                     .map(|(prefix, _)| prefix)
@@ -1109,7 +1108,7 @@ fn lease_authorized_api_key_with_hook(
                 candidates.retain(|(_, entry)| entry.name == requested_name);
             }
 
-            let now = Utc::now();
+            let now = jiff::Timestamp::now();
             let mut selected = None;
             let mut materialized_key_ids = BTreeSet::new();
             for (_, entry) in candidates {
@@ -1201,7 +1200,7 @@ fn lease_authorized_api_key_with_hook(
                     .ok_or_else(|| format!("Selected key '{}' is not in rotation '{}'", entry.name, rotation.prefix))?;
                 let mut updated = rotation.clone();
                 updated.current_index = (member_index as i64 % updated.total_keys) + 1;
-                updated.updated_at = Utc::now().to_rfc3339();
+                updated.updated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 transaction
                     .vault_set_rotation(&updated)
                     .map_err(|e| format!("Failed to advance API-key rotation: {e}"))?;

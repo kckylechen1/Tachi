@@ -1,4 +1,3 @@
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::Value;
 use std::time::SystemTime;
 
@@ -147,13 +146,12 @@ pub(super) fn stale_after_secs(status: &Value) -> i64 {
 pub(super) fn parse_status_updated_at(
     status: &Value,
     status_modified: Option<SystemTime>,
-) -> Option<DateTime<Utc>> {
+) -> Option<jiff::Timestamp> {
     status
         .get("updated_at")
         .and_then(Value::as_str)
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|| status_modified.map(DateTime::<Utc>::from))
+        .and_then(|raw| crate::utils::parse_rfc3339(raw).ok())
+        .or_else(|| status_modified.and_then(|time| jiff::Timestamp::try_from(time).ok()))
 }
 
 fn is_unresolved_exit(status: &Value) -> bool {
@@ -167,8 +165,8 @@ fn is_unresolved_exit(status: &Value) -> bool {
 pub(super) fn is_abandoned_working_run(
     status: &Value,
     result_written: bool,
-    updated_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    updated_at: Option<jiff::Timestamp>,
+    now: jiff::Timestamp,
 ) -> bool {
     if status_state(status, result_written) != "TASK_STATE_WORKING" {
         return false;
@@ -179,10 +177,10 @@ pub(super) fn is_abandoned_working_run(
     let Some(updated_at) = updated_at else {
         return false;
     };
-    now.signed_duration_since(updated_at) > ChronoDuration::seconds(stale_after_secs(status))
+    now.duration_since(updated_at) > jiff::SignedDuration::from_secs(stale_after_secs(status))
 }
 
-pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: DateTime<Utc>) {
+pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: jiff::Timestamp) {
     if task.get("source").and_then(Value::as_str) != Some("kanban") {
         return;
     }
@@ -199,13 +197,12 @@ pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: DateTime<Utc>) {
     let Some(updated_at) = task
         .get("updated_at")
         .and_then(Value::as_str)
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(|raw| crate::utils::parse_rfc3339(raw).ok())
     else {
         return;
     };
     let stale_after = stale_after_secs(task);
-    if now.signed_duration_since(updated_at) <= ChronoDuration::seconds(stale_after) {
+    if now.duration_since(updated_at) <= jiff::SignedDuration::from_secs(stale_after) {
         return;
     }
     let Some(obj) = task.as_object_mut() else {
