@@ -465,6 +465,26 @@ def retired_hub_mcp_proxy_and_virtual_capabilities_are_rejected(ctx: Context) ->
               and not any(item.get("id") in {f"mcp:retired-{ctx.tag}",
                                              f"virtual:retired-{ctx.tag}"} for item in payload), payload)
 
+    exporter = owner("hub_export_skills")
+    export_args = dict(skill_ids=[f"skill:missing-export-{ctx.tag}"], visibility="all", clean=True)
+    export_root = ctx.daemon.home / f"hub-export-{ctx.tag}"
+    ok, payload, raw = exporter.call(
+        "hub_export_skills", agent="generic", output_dir=str(export_root / "generic"), **export_args,
+    )
+    ctx.require("Hub generic export accepts an empty skill selection",
+                ok and isinstance(payload, dict) and payload.get("agent") == "generic"
+                and payload.get("exported") == 0, payload or raw)
+
+    rejected_output = export_root / "openclaw"
+    ok, payload, raw = exporter.call(
+        "hub_export_skills", agent="openclaw", output_dir=str(rejected_output), **export_args,
+    )
+    ctx.check("Hub rejects retired OpenClaw export with an empty skill selection",
+              not ok and "Unsupported agent target 'openclaw'." in raw
+              and "Supported: claude, cursor, generic" in raw, payload or raw)
+    ctx.check("rejected Hub export creates no output directory",
+              not rejected_output.exists(), str(rejected_output))
+
     # Pre-existing legacy MCP/virtual rows in an upgraded store must be hidden
     # from discovery and projected as non-callable in historical detail reads.
     legacy_root = ctx.daemon.home / f"legacy-hub-{ctx.tag}"

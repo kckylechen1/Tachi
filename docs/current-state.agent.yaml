@@ -45,7 +45,6 @@ implemented_now:
       - hub_export_skills
     agents:
       - claude: SKILL.md + symlinks
-      - openclaw: plugin manifest JSON
       - cursor: .mdc rules
       - generic: raw files
     features:

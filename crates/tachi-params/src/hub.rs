@@ -143,7 +143,7 @@ pub struct HubReviewParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ExportSkillsParams {
-    /// Target agent format: "claude", "openclaw", "cursor", "generic"
+    /// Target agent format: "claude", "cursor", "generic"
     /// Defaults to "claude" if omitted.
     #[serde(default = "default_export_agent")]
     pub agent: String,
@@ -159,7 +159,6 @@ pub struct ExportSkillsParams {
 
     /// Override output directory. If omitted, uses agent-specific defaults:
     /// - claude: ~/.tachi/skills/ (with symlinks to ~/.claude/skills/)
-    /// - openclaw: ~/.openclaw/plugins/
     /// - cursor: .cursor/rules/ (relative to cwd)
     /// - generic: ./exported-skills/
     #[serde(default)]

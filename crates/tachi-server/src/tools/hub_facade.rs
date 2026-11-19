@@ -28,7 +28,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Export Hub skills to agent-specific file formats. Targets: claude (SKILL.md + symlinks), openclaw (plugin manifest), cursor (.mdc rules), generic (raw files)."
+        description = "Export Hub skills to agent-specific file formats. Targets: claude (SKILL.md + symlinks), cursor (.mdc rules), generic (raw files)."
     )]
     pub(crate) async fn hub_export_skills(
         &self,
@@ -86,7 +86,9 @@ impl MemoryServer {
         handle_hub_stats(self).await
     }
 
-    #[tool(description = "View audit log of proxy tool calls through the Hub.")]
+    #[tool(
+        description = "View recorded audit entries, including ingestion outcomes. Supports filtering by server."
+    )]
     pub(crate) async fn tachi_audit_log(
         &self,
         Parameters(params): Parameters<AuditLogParams>,
