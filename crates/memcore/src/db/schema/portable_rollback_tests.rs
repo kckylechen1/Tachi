@@ -26,11 +26,7 @@ fn refused(path: &std::path::Path, profile: StoreProfile, newer: bool) {
     } else {
         assert!(matches!(
             error,
-            MemoryError::SchemaMigrationOptInRequired {
-                stored: 36,
-                expected: 39,
-                ..
-            }
+            MemoryError::InvalidArg(ref message) if message.contains("archived binary")
         ));
     }
     assert!(!pre_b_39::transaction_entered());
@@ -63,18 +59,8 @@ fn pre_b_39_existing_portable_opens_in_b_and_b_created_or_migrated_opens_in_pre_
         assert_eq!(take_invocations(), 0);
         assert_eq!(sentinels(&Connection::open(&old_path).unwrap()), before);
         assert!(backups(&old_path).is_empty());
-        for migrated in [false, true] {
+        for _migrated in [false, true] {
             let (_dir, path) = fixture(StoreProfile::PortableKernel);
-            if migrated {
-                stamp_and_mark(&path, 35);
-                drop(
-                    MemoryStore::open_with_context(
-                        path.to_str().unwrap(),
-                        &context(StoreProfile::PortableKernel, true),
-                    )
-                    .unwrap(),
-                );
-            }
             let conn = Connection::open(&path).unwrap();
             assert_eq!(
                 crate::db::migrations::read_schema_version(&conn).unwrap(),
@@ -101,7 +87,7 @@ fn pre_b_39_existing_portable_opens_in_b_and_b_created_or_migrated_opens_in_pre_
 }
 
 #[test]
-fn product_40_new_or_migrated_portable_rolls_back_and_unchanged_36_still_refuses_old_reader() {
+fn product_40_new_or_migrated_portable_rolls_back_and_pre_baseline_36_fails_closed() {
     super::current_store_admission::with_historical_d7(|| {
         for migrated in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -114,7 +100,7 @@ fn product_40_new_or_migrated_portable_rolls_back_and_unchanged_36_still_refuses
                     )
                     .unwrap(),
                 );
-                stamp_and_mark(&path, 35);
+                stamp_and_mark(&path, 39);
             }
             with_future_migration(false, product, || {
                 drop(
@@ -148,13 +134,14 @@ fn product_40_new_or_migrated_portable_rolls_back_and_unchanged_36_still_refuses
         }
         let (_dir, path) = fixture(StoreProfile::PortableKernel);
         stamp_and_mark(&path, 36);
-        drop(
-            MemoryStore::open_with_context(
-                path.to_str().unwrap(),
-                &context(StoreProfile::PortableKernel, false),
-            )
-            .unwrap(),
-        );
+        let err = match MemoryStore::open_with_context(
+            path.to_str().unwrap(),
+            &context(StoreProfile::PortableKernel, false),
+        ) {
+            Ok(_) => panic!("pre-baseline v36 store must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("archived binary"));
         refused(&path, StoreProfile::PortableKernel, false);
         assert_eq!(
             crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
@@ -174,7 +161,7 @@ fn restore(source: &std::path::Path, destination: &std::path::Path) {
 #[test]
 fn product_40_full_migration_refuses_pre_b_and_its_forced_snapshot_restores_prior_version() {
     super::current_store_admission::with_historical_d7(|| {
-        for from in [38, 39] {
+        for from in [39] {
             let (_dir, path) = fixture(StoreProfile::TachiFull);
             stamp_and_mark(&path, from);
             with_future_migration(false, product, || {

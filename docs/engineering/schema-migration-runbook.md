@@ -6,18 +6,49 @@ organize: true
 ---
 # Schema Migration Runbook
 
-Reusable procedure for the next `EXPECTED_SCHEMA_VERSION` bump. Distilled from
-what actually happened during the v26/v24→v28 cycle: the copy rehearsal
-against all real stores (#1560) and the live production migration executed
-from that rehearsal (#1581). Where those threads are silent on a step this
-runbook needs, that is marked `GAP:` rather than invented — fill it in and
-delete the marker the next time this runbook is used for real, don't guess
-now.
+Reusable procedure for `EXPECTED_SCHEMA_VERSION` bumps, schema epoch boundaries,
+and narrow-table evolution rules.
 
 Cross-references: #1119 (the typed `DbOpenContext` migration-authority gate
 this whole procedure is built on top of), #1560 (rehearsal acceptance and the
 owner ruling on kill-mid-migration), #1581 (the live v28 migration record this
-runbook is transcribed from).
+runbook's live-swap procedure was transcribed from).
+
+## 0. v39 Epoch Baseline & Narrow-Table Policy
+
+### v39 Epoch Baseline (`BASELINE_SCHEMA_VERSION = 39`)
+
+- **Squashed baseline:** Historical `v1`–`v38` migrations are squashed into
+  `BASELINE_SCHEMA_VERSION = 39` (`crates/memcore/src/db/migrations.rs`),
+  aligned with `PORTABLE_COMPAT_FLOOR = 39`, `PORTABLE_EXPECTED_SCHEMA_VERSION = 41`,
+  and `EXPECTED_SCHEMA_VERSION = 43`.
+- **Fresh databases (`user_version == 0`):** Initialize the complete baseline
+  schema directly and stamp `43` (Full) or `41` (Portable).
+- **Upgrades from `v39+`:** Active migrations `v39`–`v43` remain intact in
+  `crates/memcore/src/db/migrations/catalogue.rs` and upgrade cleanly under
+  explicit `MigrationAuthority::Allow`.
+- **Fail-closed pre-v39 bridge gate:** Opening any existing database with
+  `0 < PRAGMA user_version < 39` fails closed at `check_schema_version_gate`
+  across all open doors (`open`, `open_read_only`, `open_existing_read_write`,
+  `run_data_migrations`, `store_version_status`). Operators must bridge any
+  archived pre-v39 database to `v39+` with an archived pre-squash binary
+  before opening it with a current release.
+
+### Narrow-Table / JSON-Payload Policy
+
+- **Default to versioned JSON for non-indexed metadata:** Non-indexed
+  receipts, diagnostics, provenance metadata, and auxiliary per-record fields
+  live inside existing versioned JSON columns (e.g. `metadata`, `payload_json`,
+  `provenance_json`, `value_json`) using `#[serde(default)]` for backwards- and
+  forwards-tolerant deserialization.
+- **No schema bumps for non-indexed fields:** Do **not** add physical SQLite
+  columns or bump `EXPECTED_SCHEMA_VERSION` solely to carry non-indexed
+  metadata.
+- **When a migration bump IS justified:** Only append a new migration in
+  `catalogue.rs` (and bump `EXPECTED_SCHEMA_VERSION`) when a change requires a
+  SQL-indexed/queried column, a new table or uniqueness constraint, a
+  `CHECK`/trigger invariant enforced by SQLite, or an incompatible storage
+  layout migration.
 
 ## 1. Pre-flight
 

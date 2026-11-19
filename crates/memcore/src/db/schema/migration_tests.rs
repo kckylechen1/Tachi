@@ -1,275 +1,6 @@
 use super::*;
 use rusqlite::params;
 
-#[cfg(unix)]
-#[test]
-fn schema_transaction_kill_child() {
-    let Ok(path) = std::env::var("TACHI_TEST_SCHEMA_TX_CHILD_DB") else {
-        return;
-    };
-    let _store = crate::MemoryStore::open_with_label_and_context(
-        &path,
-        "global",
-        &crate::db::DbOpenContext::open_existing_allow("test:schema-transaction-kill"),
-    )
-    .expect("child must reach the pre-commit pause in a real MemoryStore open");
-    panic!("child migration returned instead of being killed before commit");
-}
-
-#[cfg(unix)]
-#[derive(Debug, PartialEq, Eq)]
-struct CommittedSchemaSnapshot {
-    version: u32,
-    rows: Vec<(String, String)>,
-    edges: i64,
-    sentinels: Vec<(String, String)>,
-    ddl: Vec<(String, String, Option<String>)>,
-}
-
-#[cfg(unix)]
-fn committed_schema_snapshot(path: &Path) -> CommittedSchemaSnapshot {
-    use rusqlite::OpenFlags;
-
-    // Read the actual committed view including WAL frames. immutable=1 would
-    // omit the official v1.9.2 fixture's committed row and is unsafe here.
-    // Match MemoryStore's extension setup: integrity_check visits virtual
-    // tables installed by the genuine v1.9.2 schema.
-    crate::db::enable_simple_auto_extension().expect("register simple tokenizer");
-    crate::db::register_sqlite_vec();
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .expect("read committed schema fixture including WAL");
-    let integrity: String = conn
-        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(integrity, "ok");
-    let rows = conn
-        .prepare("SELECT id, hex(CAST(text AS BLOB)) FROM memories ORDER BY id")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    let sentinels = conn
-        .prepare("SELECT key, value_json FROM hard_state WHERE namespace='migrations' ORDER BY key")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    let ddl = conn
-        .prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    CommittedSchemaSnapshot {
-        version: crate::db::migrations::read_schema_version(&conn).unwrap(),
-        rows,
-        edges: conn
-            .query_row("SELECT count(*) FROM memory_edges", [], |r| r.get(0))
-            .unwrap(),
-        sentinels,
-        ddl,
-    }
-}
-
-/// An explicit fixture-backed release gate, intentionally ignored in routine
-/// suites. Run only with TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL pointing at a
-/// whole owner-controlled v1.9.2 backup directory containing memory.db plus
-/// its committed, nonempty memory.db-wal. Every run uses its own fresh temp
-/// copy; no fixture or binary is checked into the repository. This is a real
-/// SIGKILL inside the production MemoryStore schema transaction, not a
-/// graceful injected error and not the filename-conversion interruption test.
-#[cfg(unix)]
-#[test]
-#[ignore = "requires genuine v1.9.2 schema-28 whole-directory WAL fixture; run explicitly with TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL"]
-fn schema_transaction_kill_rolls_back_stamp_sentinels_ddl_and_data_then_retries() {
-    use sha2::{Digest, Sha256};
-    use std::collections::BTreeMap;
-    use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
-
-    struct KillOnDrop(Child);
-    impl Drop for KillOnDrop {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let source = PathBuf::from(std::env::var("TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL").expect(
-        "set TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL to the genuine schema-28 backup/global directory",
-    ));
-    let source_files = || -> BTreeMap<String, [u8; 32]> {
-        std::fs::read_dir(&source)
-            .expect("read official fixture directory")
-            .map(|entry| {
-                let entry = entry.expect("read source entry");
-                assert!(
-                    entry.file_type().unwrap().is_file(),
-                    "fixture must be a whole regular-file directory"
-                );
-                let name = entry
-                    .file_name()
-                    .into_string()
-                    .expect("fixture ASCII filenames");
-                assert!(
-                    name.starts_with("memory.db"),
-                    "unexpected fixture file {name}"
-                );
-                (
-                    name,
-                    Sha256::digest(std::fs::read(entry.path()).unwrap()).into(),
-                )
-            })
-            .collect()
-    };
-    let original_hashes = source_files();
-    assert!(original_hashes.contains_key("memory.db"));
-    assert!(
-        std::fs::metadata(source.join("memory.db-wal"))
-            .unwrap()
-            .len()
-            > 0,
-        "fixture must have pending committed WAL content"
-    );
-
-    let temp = tempfile::tempdir().expect("isolated schema transaction rehearsal");
-    let global = temp.path().join("global");
-    std::fs::create_dir(&global).unwrap();
-    for name in original_hashes.keys() {
-        // This is ONLY fixture setup: renaming the whole disconnected copy's
-        // main+sidecar names together, before opening SQLite. The converter
-        // is not exercised here; the child starts with a canonical filename.
-        std::fs::copy(source.join(name), global.join(format!("tachi-{name}"))).unwrap();
-    }
-    let db = global.join("tachi-memory.db");
-    assert!(db.is_file());
-    assert!(
-        !global.join("memory.db").exists(),
-        "filename conversion must not be part of this gate"
-    );
-    let before = committed_schema_snapshot(&db);
-    assert_eq!(
-        before.version, 28,
-        "a modern DB restamped 28 is not this gate's fixture"
-    );
-    assert_eq!(
-        before.rows.len(),
-        1,
-        "official fixture's committed WAL row is required"
-    );
-    assert_eq!(before.edges, 0);
-    assert!(!before
-        .sentinels
-        .iter()
-        .any(|(key, _)| key == "v39_mirror_eval_identity"));
-    assert!(!before
-        .ddl
-        .iter()
-        .any(|(_, name, _)| name == "memory_outbox_events"));
-
-    let marker = temp.path().join("inside-uncommitted-schema-transaction");
-    let mut child = KillOnDrop(
-        Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "db::schema::migration_tests::schema_transaction_kill_child",
-                "--nocapture",
-            ])
-            .env("TACHI_TEST_SCHEMA_TX_CHILD_DB", &db)
-            .env("TACHI_TEST_SCHEMA_TX_PAUSE_MARKER", &marker)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start production MemoryStore open in test child"),
-    );
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while !marker.exists() {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            panic!("child exited before the post-stamp/pre-commit marker: {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "child never reached post-stamp/pre-commit; drop kills it"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        std::fs::read(&marker).unwrap(),
-        b"schema=39;v39_sentinel=1;v29_ddl=1;before_outer_commit"
-    );
-    assert!(
-        child.0.try_wait().unwrap().is_none(),
-        "child must still own the transaction"
-    );
-
-    // A separate connection sees the old committed schema while the child
-    // holds the uncommitted v39 stamp, sentinel and DDL in BEGIN IMMEDIATE.
-    assert_eq!(committed_schema_snapshot(&db), before);
-    let contender = Connection::open(&db).unwrap();
-    contender.busy_timeout(Duration::from_millis(100)).unwrap();
-    let busy = contender
-        .execute_batch("BEGIN IMMEDIATE")
-        .expect_err("child must still hold SQLite's write transaction at the marker");
-    assert!(
-        matches!(&busy, rusqlite::Error::SqliteFailure(error, _)
-        if error.code == rusqlite::ErrorCode::DatabaseBusy),
-        "{busy}"
-    );
-    drop(contender);
-
-    child.0.kill().expect("SIGKILL child inside transaction");
-    let status = child.0.wait().expect("reap killed child");
-    use std::os::unix::process::ExitStatusExt;
-    assert_eq!(
-        status.signal(),
-        Some(libc::SIGKILL),
-        "child must die from SIGKILL, not a graceful error"
-    );
-
-    let recovered = committed_schema_snapshot(&db);
-    assert_eq!(
-        recovered, before,
-        "version 28, all old sentinel rows, DDL and committed content must roll back together"
-    );
-    let reopened = crate::MemoryStore::open_with_label_and_context(
-        db.to_str().unwrap(),
-        "global",
-        &crate::db::DbOpenContext::open_existing_allow("test:schema-transaction-retry"),
-    )
-    .expect("retry must complete real migration with typed authority");
-    drop(reopened);
-    let after = committed_schema_snapshot(&db);
-    assert_eq!(
-        after.version,
-        crate::db::migrations::EXPECTED_SCHEMA_VERSION
-    );
-    assert_eq!(
-        after.rows, before.rows,
-        "committed memory IDs and content bytes must survive retry"
-    );
-    assert_eq!(after.edges, before.edges);
-    assert!(after
-        .sentinels
-        .iter()
-        .any(|(key, _)| key == "v39_mirror_eval_identity"));
-    assert!(after
-        .ddl
-        .iter()
-        .any(|(_, name, _)| name == "memory_outbox_events"));
-    assert_eq!(
-        source_files(),
-        original_hashes,
-        "the official fixture must remain untouched"
-    );
-    eprintln!(
-        "schema transaction SIGKILL confirmed: signal={}, recovered_version={}, retried_version={}, committed_rows={}",
-        status.signal().unwrap(), recovered.version, after.version, after.rows.len()
-    );
-}
-
 #[test]
 fn schema_identifier_helpers_reject_dynamic_sql_identifiers() {
     let conn = Connection::open_in_memory().unwrap();
@@ -308,9 +39,7 @@ fn open_with_legacy_row(
                 category     TEXT NOT NULL DEFAULT 'fact',
                 topic        TEXT NOT NULL DEFAULT '',
                 keywords     TEXT NOT NULL DEFAULT '[]',
-                persons      TEXT NOT NULL DEFAULT '[]',
                 entities     TEXT NOT NULL DEFAULT '[]',
-                location     TEXT NOT NULL DEFAULT '',
                 source       TEXT NOT NULL DEFAULT 'manual',
                 scope        TEXT NOT NULL DEFAULT 'general',
                 archived     INTEGER NOT NULL DEFAULT 0,
@@ -333,167 +62,17 @@ fn open_with_legacy_row(
     conn.execute(
         r#"INSERT INTO memories
                 (id, path, summary, text, importance, timestamp, category, topic,
-                 keywords, persons, entities, location, source, scope, archived,
+                 keywords, entities, source, scope, archived,
                  created_at, updated_at, access_count, last_access, revision,
                  metadata, retention_policy, domain)
                VALUES (?1, ?2, '', 'hello', 0.5, '2026-04-30T00:00:00Z', ?3, '',
-                       '[]','[]','[]','', ?4, ?5, 0,
+                       '[]','[]', ?4, ?5, 0,
                        '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
                        ?6, ?7, NULL)"#,
         params!["row1", path, category, source, scope, metadata, retention],
     )
     .unwrap();
     conn
-}
-
-fn open_with_hypertachi_shape() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        r#"
-            CREATE TABLE memories (
-                id           TEXT PRIMARY KEY,
-                path         TEXT NOT NULL DEFAULT '/',
-                summary      TEXT NOT NULL DEFAULT '',
-                text         TEXT NOT NULL DEFAULT '',
-                importance   REAL NOT NULL DEFAULT 0.7,
-                timestamp    TEXT NOT NULL,
-                valid_from   TEXT NOT NULL DEFAULT '',
-                valid_until  TEXT,
-                category     TEXT NOT NULL DEFAULT 'fact',
-                topic        TEXT NOT NULL DEFAULT '',
-                keywords     TEXT NOT NULL DEFAULT '[]',
-                indexed_tags TEXT NOT NULL DEFAULT '[]',
-                entities     TEXT NOT NULL DEFAULT '[]',
-                domain_key   TEXT NOT NULL DEFAULT '',
-                source       TEXT NOT NULL DEFAULT 'manual',
-                scope        TEXT NOT NULL DEFAULT 'general',
-                archived     INTEGER NOT NULL DEFAULT 0,
-                created_at   TEXT NOT NULL DEFAULT '',
-                updated_at   TEXT NOT NULL DEFAULT '',
-                access_count INTEGER NOT NULL DEFAULT 0,
-                last_access  TEXT,
-                revision     INTEGER NOT NULL DEFAULT 1,
-                metadata     TEXT NOT NULL DEFAULT '{}',
-                retention_policy TEXT,
-                domain       TEXT,
-                superseded_by  TEXT
-            );
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                id UNINDEXED, path, summary, text, keywords, entities,
-                tokenize = 'unicode61'
-            );
-            "#,
-    )
-    .unwrap();
-    conn.execute(
-        r#"INSERT INTO memories
-                (id, path, text, importance, timestamp, indexed_tags, domain_key)
-               VALUES ('hypertachi-1', '/wiki/test', 'hypertachi bridge row', 0.7,
-                       '2026-04-30T00:00:00Z', '["alice"]', 'finance')"#,
-        [],
-    )
-    .unwrap();
-    conn
-}
-
-#[test]
-fn bridge_repairs_mistaken_domain_in_location() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        r#"
-            CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL DEFAULT '/',
-                summary TEXT NOT NULL DEFAULT '',
-                text TEXT NOT NULL DEFAULT '',
-                importance REAL NOT NULL DEFAULT 0.7,
-                timestamp TEXT NOT NULL,
-                valid_from TEXT NOT NULL DEFAULT '',
-                valid_until TEXT,
-                category TEXT NOT NULL DEFAULT 'fact',
-                topic TEXT NOT NULL DEFAULT '',
-                keywords TEXT NOT NULL DEFAULT '[]',
-                persons TEXT NOT NULL DEFAULT '[]',
-                entities TEXT NOT NULL DEFAULT '[]',
-                location TEXT NOT NULL DEFAULT 'finance',
-                source TEXT NOT NULL DEFAULT 'manual',
-                scope TEXT NOT NULL DEFAULT 'general',
-                archived INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL DEFAULT '',
-                access_count INTEGER NOT NULL DEFAULT 0,
-                last_access TEXT,
-                revision INTEGER NOT NULL DEFAULT 1,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                retention_policy TEXT,
-                domain TEXT,
-                superseded_by TEXT,
-                CHECK (source IN ('manual','extraction','migration','auto','foundry_distill',
-                    'foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
-                    OR source LIKE 'external:%'),
-                CHECK (category IN ('fact','decision','experience','preference','entity',
-                    'other','kanban','handoff','ghost','wiki','guide','eval')),
-                CHECK (scope IN ('user','project','general'))
-            );
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                id UNINDEXED, path, summary, text, keywords, entities,
-                tokenize = 'unicode61'
-            );
-            "#,
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memories (id, path, text, importance, timestamp)
-             VALUES ('repair-1', '/trading', 'row', 0.7, '2026-04-30T00:00:00Z')",
-        [],
-    )
-    .unwrap();
-    init_schema(&conn).expect("bridge should move mistaken domain out of location");
-    let domain: Option<String> = conn
-        .query_row("SELECT domain FROM memories WHERE id='repair-1'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(domain.as_deref(), Some("finance"));
-    let has_location_column: bool = conn
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='location' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    assert!(!has_location_column);
-}
-
-#[test]
-fn bridge_hypertachi_columns_before_enum_migration() {
-    let conn = open_with_hypertachi_shape();
-    init_schema(&conn).expect("init_schema should bridge hypertachi columns");
-    let has_persons_column: bool = conn
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    assert!(!has_persons_column);
-    let (keywords, domain): (String, Option<String>) = conn
-        .query_row(
-            "SELECT keywords, domain FROM memories WHERE id='hypertachi-1'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(keywords, r#"["alice"]"#);
-    assert_eq!(domain.as_deref(), Some("finance"));
-    let has_location_column: bool = conn
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='location' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    assert!(!has_location_column);
 }
 
 #[test]
@@ -948,80 +527,60 @@ fn migration_repairs_partial_fts_drift() {
 }
 
 // --- #984 F1 round 3: compatibility transaction widened to cover
-// init_schema_inner's legacy v6/v8/v9 work -----------------------------
+// init_schema_inner's dirty-row normalization + v39 -> v43 upgrades ----------
 
-/// Build a real (file-backed, not in-memory) legacy-shape DB carrying BOTH a
-/// non-empty `persons` column (drives the standalone v6 fold + v8 drop inside
-/// `init_schema_inner`, via `fold_and_drop_legacy_persons_column`) and a
-/// non-empty `location` column (drives the standalone v9 relocate + drop),
-/// so the fault-injection test below has real, observable legacy work to
-/// roll back — not a no-op.
-fn open_legacy_db_with_persons_and_location() -> (tempfile::NamedTempFile, std::path::PathBuf) {
+/// Build a real file-backed `v39` DB carrying a dirty `memories` row
+/// (blank `created_at`/`updated_at`/`valid_from` and `revision = 0`), so the
+/// fault-injection test below exercises both `init_schema_inner`'s dirty-row
+/// normalization and `v40..=v43` upgrades inside one transaction.
+fn open_v39_db_with_dirty_row() -> (tempfile::NamedTempFile, std::path::PathBuf) {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let path = tmp.path().to_path_buf();
-    let conn = Connection::open(&path).expect("open");
-    conn.execute_batch(
-        r#"
-            CREATE TABLE memories (
-                id           TEXT PRIMARY KEY,
-                path         TEXT NOT NULL DEFAULT '/',
-                summary      TEXT NOT NULL DEFAULT '',
-                text         TEXT NOT NULL DEFAULT '',
-                importance   REAL NOT NULL DEFAULT 0.7,
-                timestamp    TEXT NOT NULL,
-                category     TEXT NOT NULL DEFAULT 'fact',
-                topic        TEXT NOT NULL DEFAULT '',
-                keywords     TEXT NOT NULL DEFAULT '[]',
-                persons      TEXT NOT NULL DEFAULT '[]',
-                entities     TEXT NOT NULL DEFAULT '[]',
-                location     TEXT NOT NULL DEFAULT '',
-                source       TEXT NOT NULL DEFAULT 'manual',
-                scope        TEXT NOT NULL DEFAULT 'general',
-                archived     INTEGER NOT NULL DEFAULT 0,
-                created_at   TEXT NOT NULL DEFAULT '',
-                updated_at   TEXT NOT NULL DEFAULT '',
-                access_count INTEGER NOT NULL DEFAULT 0,
-                last_access  TEXT,
-                revision     INTEGER NOT NULL DEFAULT 1,
-                metadata     TEXT NOT NULL DEFAULT '{}',
-                retention_policy TEXT,
-                domain       TEXT
-            );
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                id UNINDEXED, path, summary, text, keywords, entities,
-                tokenize = 'unicode61'
-            );
-            "#,
-    )
-    .unwrap();
+    let _ = crate::db::enable_simple_auto_extension();
+    crate::db::register_sqlite_vec();
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        let mut conn = Connection::open(&path).expect("open");
+        let _ = crate::db::try_load_sqlite_vec(&conn);
+        let reference_guard = crate::db::register_reserved_reference_write_guard(&conn)
+            .expect("register reference guard");
+        crate::db::install_reserved_reference_authorizer(&conn, Some(&reference_guard))
+            .expect("install authorizer");
+        let migration_authorization =
+            crate::db::authorize_schema_migration(&reference_guard).expect("authorize test init");
+        super::init_schema_with_label_mut(
+            &mut conn,
+            "global",
+            &path,
+            &crate::db::DbOpenContext::create_fresh(),
+        )
+        .expect("provision v39 fixture");
+        drop(migration_authorization);
+    });
+    let conn = Connection::open(&path).expect("open for dirty seed");
     conn.execute(
         r#"INSERT INTO memories
-                (id, path, summary, text, importance, timestamp, category, topic,
-                 keywords, persons, entities, location, source, scope, archived,
-                 created_at, updated_at, access_count, last_access, revision,
-                 metadata, retention_policy, domain)
-               VALUES ('row1', '/notes/x', '', 'hello', 0.5, '2026-04-30T00:00:00Z',
-                       'fact', '', '[]', ?1, '[]', ?2, 'manual', 'general', 0,
-                       '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
-                       '{}', NULL, NULL)"#,
-        params![r#"["Kyle"]"#, "/scratch/legacy-location"],
+                (id, path, summary, text, importance, timestamp, valid_from,
+                 category, topic, keywords, entities, source, scope, archived,
+                 created_at, updated_at, access_count, last_access, revision, metadata)
+               VALUES ('row1', '/notes/x', '', 'hello', 0.5, '2026-04-30T00:00:00Z', '',
+                       'fact', '', '[]', '[]', 'manual', 'general', 0,
+                       '', '', 0, NULL, 0, '{}')"#,
+        [],
     )
     .unwrap();
     drop(conn);
     (tmp, path)
 }
 
-/// Fault-injection proof (#984 F1 round 3, the bug codex found in round 2):
+/// Fault-injection proof (#984 F1 round 3):
 /// arm the `init_schema_with_label_mut` test hook to fail right after
-/// `init_schema_inner` (DDL + the standalone v6/v8/v9 legacy-column work)
-/// completes but before `run_data_migrations_in_tx` and the version stamp
-/// run. Assert the legacy schema/data — `persons` column, `location` column,
-/// and the row's un-relocated `location` value — are ALL still there
-/// (rolled back), the sentinel migrations never ran, and `user_version` is
-/// unchanged. Then a real (unarmed) run must apply and stamp cleanly.
+/// `init_schema_inner` (dirty-row normalization) completes but before
+/// `run_data_migrations_in_tx` and the version stamp run. Assert the dirty row,
+/// absent `v40..=v43` sentinels/DDL, and `user_version == 39` are ALL still
+/// intact (rolled back), and that a subsequent unarmed run upgrades cleanly.
 #[test]
-fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
-    let (_tmp, path) = open_legacy_db_with_persons_and_location();
+fn v39_upgrade_and_dirty_row_work_roll_back_with_stamp_on_injected_failure() {
+    let (_tmp, path) = open_v39_db_with_dirty_row();
 
     super::test_hooks::arm_fail_after_legacy_work();
     let mut migration_conn = Connection::open(&path).expect("open migration fixture");
@@ -1035,7 +594,7 @@ fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
         &mut migration_conn,
         "global",
         &path,
-        &crate::db::DbOpenContext::create_fresh(),
+        &crate::db::DbOpenContext::open_existing_allow("test:#984-rollback"),
     )
     .expect_err("armed injection must fail init_schema_with_label_mut");
     drop(migration_authorization);
@@ -1045,83 +604,40 @@ fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
         "unexpected error: {err}"
     );
 
-    // Re-open a raw connection to inspect post-failure state directly
-    // (MemoryStore::open failed, so there's no live handle to reuse).
     let inspect = Connection::open(&path).expect("reopen for inspection");
-
-    // 1. Legacy `persons` column must still exist — v6/v8's standalone drop
-    //    must have rolled back, not just the sentinel-gated migrations.
-    let has_persons: bool = inspect
+    let (created_at, updated_at, valid_from, revision): (String, String, String, i64) = inspect
         .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
+            "SELECT created_at, updated_at, valid_from, revision FROM memories WHERE id='row1'",
             [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    assert!(
-        has_persons,
-        "persons column must still exist after rollback — v6/v8 legacy work leaked outside the tx"
-    );
-    let persons: String = inspect
-        .query_row("SELECT persons FROM memories WHERE id='row1'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        persons, r#"["Kyle"]"#,
-        "persons data must be unfolded (original value) after rollback"
-    );
-
-    // 2. Legacy `location` column must still exist and be un-relocated — v9's
-    //    standalone relocate+drop must have rolled back too.
-    let has_location: bool = inspect
-        .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='location' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    assert!(
-        has_location,
-        "location column must still exist after rollback — v9 legacy work leaked outside the tx"
-    );
-    let (path_col, location): (String, String) = inspect
-        .query_row(
-            "SELECT path, location FROM memories WHERE id='row1'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap();
-    assert_eq!(
-        path_col, "/notes/x",
-        "path must be un-relocated after rollback"
-    );
-    assert_eq!(
-        location, "/scratch/legacy-location",
-        "location value must be intact after rollback"
-    );
+    assert_eq!(created_at, "", "dirty created_at must roll back");
+    assert_eq!(updated_at, "", "dirty updated_at must roll back");
+    assert_eq!(valid_from, "", "dirty valid_from must roll back");
+    assert_eq!(revision, 0, "dirty revision must roll back");
 
-    // 3. Sentinel migrations must never have run (they're chronologically
-    //    after the injection point, but assert explicitly for clarity).
-    let sentinel_count: i64 = inspect
+    assert!(
+        !has_column(&inspect, "session_claims", "canonical_project").unwrap(),
+        "v40 column must remain absent after rollback"
+    );
+    let post_v39_sentinels: i64 = inspect
         .query_row(
-            "SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations'",
+            "SELECT COUNT(*) FROM hard_state
+             WHERE namespace = 'migrations'
+               AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance')",
             [],
             |r| r.get(0),
         )
         .unwrap_or(0);
-    assert_eq!(sentinel_count, 0, "no sentinel migration should have run");
-
-    // 4. `user_version` must be unchanged (still the pre-migration default).
+    assert_eq!(post_v39_sentinels, 0, "no v40+ sentinel should have run");
     assert_eq!(
         crate::db::migrations::read_schema_version(&inspect).unwrap(),
-        0,
-        "user_version must not advance when init_schema_inner's legacy work rolled back"
+        39,
+        "user_version must stay 39 when init_schema_inner's work rolled back"
     );
     drop(inspect);
 
-    // 5. A real (unarmed) run now proceeds cleanly: legacy work applied,
-    //    migrations run, and the DB ends up stamped at the current version.
     let mut migration_conn = Connection::open(&path).expect("reopen migration fixture");
     let reference_guard = crate::db::register_reserved_reference_write_guard(&migration_conn)
         .expect("register reference guard");
@@ -1133,23 +649,25 @@ fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
         &mut migration_conn,
         "global",
         &path,
-        &crate::db::DbOpenContext::create_fresh(),
+        &crate::db::DbOpenContext::open_existing_allow("test:#984-retry"),
     )
     .expect("unarmed run must succeed");
     drop(migration_authorization);
     drop(migration_conn);
+
     let verify = Connection::open(&path).expect("reopen to verify success run");
-    let has_persons_after: bool = verify
+    let (created_at, updated_at, valid_from, revision): (String, String, String, i64) = verify
         .query_row(
-            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
+            "SELECT created_at, updated_at, valid_from, revision FROM memories WHERE id='row1'",
             [],
-            |_| Ok(true),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .unwrap_or(false);
-    assert!(
-        !has_persons_after,
-        "persons column must be dropped after a real run"
-    );
+        .unwrap();
+    assert_eq!(created_at, "2026-04-30T00:00:00Z");
+    assert_eq!(updated_at, "2026-04-30T00:00:00Z");
+    assert_eq!(valid_from, "2026-04-30T00:00:00Z");
+    assert_eq!(revision, 1);
+    assert!(has_column(&verify, "session_claims", "canonical_project").unwrap());
     assert_eq!(
         crate::db::migrations::read_schema_version(&verify).unwrap(),
         crate::db::migrations::EXPECTED_SCHEMA_VERSION,

@@ -44,6 +44,7 @@ fn code(error: &MemoryError) -> &'static str {
         }
         MemoryError::CurrentSchemaIncomplete { .. } => "shape",
         MemoryError::InvalidArg(message) if message.contains("newer than") => "newer",
+        MemoryError::InvalidArg(message) if message.contains("archived binary") => "pre_baseline",
         MemoryError::InvalidArg(message) if message.contains("sentinel") => "sentinel",
         MemoryError::InvalidArg(message)
             if message.contains("store identity stamp") || message.contains("store profile") =>
@@ -72,26 +73,34 @@ fn expected(
     old: bool,
 ) -> Outcome {
     use Variant::*;
+    if (1..39).contains(&stamp) {
+        return Outcome {
+            code: "pre_baseline",
+            transaction: false,
+            backups: 0,
+            stamp,
+        };
+    }
     let pending = stamp != 0
         && stamp
             < if old || profile == StoreProfile::TachiFull || variant == Profile {
-                39
+                43
             } else {
-                36
+                41
             };
-    let error = if stamp > 39 {
+    let error = if stamp > 43 {
         "newer"
     } else if pending && !allow {
         "opt_in"
-    } else if (stamp == 39 || (!old && profile == StoreProfile::PortableKernel && stamp >= 36))
+    } else if (stamp == 43 || (!old && profile == StoreProfile::PortableKernel && stamp >= 41))
         && variant == Sentinel
     {
         "sentinel"
-    } else if (stamp == 39 || (!old && profile == StoreProfile::PortableKernel && stamp >= 36))
+    } else if (stamp == 43 || (!old && profile == StoreProfile::PortableKernel && stamp >= 41))
         && variant == IntegrityRole
     {
         "delivery"
-    } else if (stamp == 39 || (!old && profile == StoreProfile::PortableKernel && stamp >= 36))
+    } else if (stamp == 43 || (!old && profile == StoreProfile::PortableKernel && stamp >= 41))
         && variant == Outbox
     {
         "outbox"
@@ -111,18 +120,24 @@ fn expected(
         || (error == "outbox"
             && stamp
                 < if old {
-                    39
+                    43
                 } else if profile == StoreProfile::PortableKernel {
-                    36
+                    41
                 } else {
-                    39
+                    43
                 });
     Outcome {
         code: error,
         transaction,
         backups: usize::from(transaction && pending),
-        stamp: if error == "ok" && (old || profile == StoreProfile::TachiFull || stamp < 36) {
-            39
+        stamp: if error == "ok" {
+            if old || profile == StoreProfile::TachiFull {
+                43
+            } else if stamp == 0 || stamp < 41 {
+                41
+            } else {
+                stamp
+            }
         } else {
             stamp
         },
@@ -135,7 +150,7 @@ struct FixtureSnapshot(Vec<(OsString, Vec<u8>)>);
 
 impl FixtureSnapshot {
     fn new(profile: StoreProfile) -> Self {
-        let (_dir, path) = fixture(profile);
+        let (_dir, path) = super::portable_version_tests::shipped_fixture(profile);
         Self::capture(&path)
     }
 
@@ -236,145 +251,139 @@ fn outcome_fixture_snapshot_refuses_uncheckpointed_wal() {
 
 #[test]
 fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
-    super::current_store_admission::with_historical_d7(|| {
-        let portable = FixtureSnapshot::new(StoreProfile::PortableKernel);
-        let full = FixtureSnapshot::new(StoreProfile::TachiFull);
-        for (profile, stamp) in [
-            (StoreProfile::PortableKernel, 40),
-            (StoreProfile::TachiFull, 38),
-            (StoreProfile::PortableKernel, 0),
-            (StoreProfile::PortableKernel, 30),
-            (StoreProfile::PortableKernel, 36),
-            (StoreProfile::PortableKernel, 39),
-        ] {
-            for allow in [false, true] {
-                for &variant in VARIANTS {
-                    for old in [true, false] {
-                        let (_dir, path) = match profile {
-                            StoreProfile::PortableKernel => portable.materialize(),
-                            StoreProfile::TachiFull => full.materialize(),
-                        };
-                        let conn = Connection::open(&path).unwrap();
-                        crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
-                        conn.execute_batch("INSERT INTO memories(id,text,path,source,timestamp,created_at,updated_at,valid_from) VALUES('d7-outcome-row','retained row','/fixture','wiki','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z');").unwrap();
-                        if matches!(
-                            variant,
-                            Variant::Role | Variant::ShapeRole | Variant::IntegrityRole
-                        ) {
-                            conn.execute_batch("INSERT OR REPLACE INTO hard_state(namespace,key,value_json) VALUES('store_identity','role','{\"value\":7}');").unwrap();
-                        }
-                        if variant == Variant::Profile {
-                            conn.execute_batch("UPDATE hard_state SET value_json='{\"value\":7}' WHERE namespace='store_identity' AND key='profile';").unwrap();
-                        }
-                        if variant == Variant::Sentinel {
-                            conn.execute_batch("DELETE FROM hard_state WHERE namespace='migrations' AND key='v3_handoff_path_standardize';").unwrap();
-                        }
-                        if matches!(variant, Variant::Shape | Variant::ShapeRole) {
-                            conn.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0;").unwrap();
-                        }
-                        if variant == Variant::IntegrityRole {
-                            conn.execute_batch("DROP INDEX idx_delivery_events_delivery;")
-                                .unwrap();
-                        }
-                        if variant == Variant::Outbox {
-                            conn.execute_batch(
-                                "DROP INDEX idx_memory_outbox_events_state_created;",
-                            )
+    let portable = FixtureSnapshot::new(StoreProfile::PortableKernel);
+    let full = FixtureSnapshot::new(StoreProfile::TachiFull);
+    for (profile, stamp) in [
+        (StoreProfile::PortableKernel, 44),
+        (StoreProfile::TachiFull, 40),
+        (StoreProfile::PortableKernel, 0),
+        (StoreProfile::PortableKernel, 36),
+        (StoreProfile::PortableKernel, 39),
+        (StoreProfile::PortableKernel, 41),
+        (StoreProfile::PortableKernel, 43),
+    ] {
+        for allow in [false, true] {
+            for &variant in VARIANTS {
+                for old in [true, false] {
+                    let (_dir, path) = match profile {
+                        StoreProfile::PortableKernel => portable.materialize(),
+                        StoreProfile::TachiFull => full.materialize(),
+                    };
+                    let conn = Connection::open(&path).unwrap();
+                    crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
+                    conn.execute_batch("INSERT INTO memories(id,text,path,source,timestamp,created_at,updated_at,valid_from) VALUES('d7-outcome-row','retained row','/fixture','wiki','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z');").unwrap();
+                    if matches!(
+                        variant,
+                        Variant::Role | Variant::ShapeRole | Variant::IntegrityRole
+                    ) {
+                        conn.execute_batch("INSERT OR REPLACE INTO hard_state(namespace,key,value_json) VALUES('store_identity','role','{\"value\":7}');").unwrap();
+                    }
+                    if variant == Variant::Profile {
+                        conn.execute_batch("UPDATE hard_state SET value_json='{\"value\":7}' WHERE namespace='store_identity' AND key='profile';").unwrap();
+                    }
+                    if variant == Variant::Sentinel {
+                        conn.execute_batch("DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity';").unwrap();
+                    }
+                    if matches!(variant, Variant::Shape | Variant::ShapeRole) {
+                        conn.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0;").unwrap();
+                    }
+                    if variant == Variant::IntegrityRole {
+                        conn.execute_batch("DROP INDEX idx_delivery_events_delivery;")
                             .unwrap();
-                        }
-                        drop(conn);
-                        stamp_and_mark(&path, stamp);
-                        let conn = Connection::open(&path).unwrap();
-                        let schema = query_rows(
-                            &conn,
-                            "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name",
+                    }
+                    if variant == Variant::Outbox {
+                        conn.execute_batch("DROP INDEX idx_memory_outbox_events_state_created;")
+                            .unwrap();
+                    }
+                    drop(conn);
+                    stamp_and_mark(&path, stamp);
+                    let conn = Connection::open(&path).unwrap();
+                    let schema = query_rows(
+                        &conn,
+                        "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name",
+                    );
+                    let before_sentinels = sentinels(&conn);
+                    let rows = query_rows(&conn, "SELECT * FROM memories ORDER BY id");
+                    let cookie = query_rows(&conn, "PRAGMA schema_version");
+                    drop(conn);
+                    let mut ctx = context(profile, allow);
+                    if variant == Variant::Requirement {
+                        ctx.required_profile = StoreProfile::TachiFull.into();
+                    }
+                    let entered = Rc::new(Cell::new(false));
+                    let receipt = Rc::clone(&entered);
+                    if !old {
+                        test_hooks::arm_window_hook(
+                            test_hooks::Window::BeforeSchemaTransaction,
+                            move |_| receipt.set(true),
                         );
-                        let before_sentinels = sentinels(&conn);
-                        let rows = query_rows(&conn, "SELECT * FROM memories ORDER BY id");
-                        let cookie = query_rows(&conn, "PRAGMA schema_version");
-                        drop(conn);
-                        let mut ctx = context(profile, allow);
-                        if variant == Variant::Requirement {
-                            ctx.required_profile = StoreProfile::TachiFull.into();
-                        }
-                        let entered = Rc::new(Cell::new(false));
-                        let receipt = Rc::clone(&entered);
-                        if !old {
-                            test_hooks::arm_window_hook(
-                                test_hooks::Window::BeforeSchemaTransaction,
-                                move |_| receipt.set(true),
-                            );
-                        }
-                        let open =
-                            || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
-                                Ok(store) => {
-                                    drop(store);
-                                    "ok"
-                                }
-                                Err(error) => code(&error),
-                            };
-                        let result = if old {
-                            pre_b_39::with_policy(39, open)
-                        } else {
-                            // Replay a pre-B binary: the shipped head carries v40,
-                            // but this probe's outcome matrix is pinned at the
-                            // 39-catalogue behaviour (#2161 pre-B fixtures).
-                            crate::db::migrations::catalogue::test_support::with_prefix(39, open)
+                    }
+                    let open =
+                        || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
+                            Ok(store) => {
+                                drop(store);
+                                "ok"
+                            }
+                            Err(error) => code(&error),
                         };
-                        let transaction = if old {
-                            pre_b_39::transaction_entered()
-                        } else {
-                            entered.get()
-                        };
-                        test_hooks::disarm_window_hooks();
-                        let conn = Connection::open(&path).unwrap();
-                        let actual = Outcome {
-                            code: result,
-                            transaction,
-                            backups: backups(&path).len(),
-                            stamp: crate::db::migrations::read_schema_version(&conn).unwrap(),
-                        };
+                    let result = if old {
+                        pre_b_39::with_policy(43, open)
+                    } else {
+                        open()
+                    };
+                    let transaction = if old {
+                        pre_b_39::transaction_entered()
+                    } else {
+                        entered.get()
+                    };
+                    test_hooks::disarm_window_hooks();
+                    let conn = Connection::open(&path).unwrap();
+                    let actual = Outcome {
+                        code: result,
+                        transaction,
+                        backups: backups(&path).len(),
+                        stamp: crate::db::migrations::read_schema_version(&conn).unwrap(),
+                    };
+                    assert_eq!(
+                        actual,
+                        expected(profile, stamp, allow, variant, old),
+                        "{profile:?}@{stamp} allow={allow} {variant:?} old={old}"
+                    );
+                    assert_eq!(
+                        query_rows(&conn, "SELECT * FROM memories ORDER BY id"),
+                        rows,
+                        "retained populated rows"
+                    );
+                    if result != "ok" {
                         assert_eq!(
-                            actual,
-                            expected(profile, stamp, allow, variant, old),
-                            "{profile:?}@{stamp} allow={allow} {variant:?} old={old}"
+                            sentinels(&conn),
+                            before_sentinels,
+                            "refusal cannot change sentinels"
                         );
+                        assert_eq!(query_rows(&conn,"SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name"),schema,"refusal must roll back schema");
                         assert_eq!(
-                            query_rows(&conn, "SELECT * FROM memories ORDER BY id"),
-                            rows,
-                            "retained populated rows"
+                            query_rows(&conn, "PRAGMA schema_version"),
+                            cookie,
+                            "refusal must roll back DDL cookie"
                         );
-                        if result != "ok" {
-                            assert_eq!(
-                                sentinels(&conn),
-                                before_sentinels,
-                                "refusal cannot change sentinels"
-                            );
-                            assert_eq!(query_rows(&conn,"SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name"),schema,"refusal must roll back schema");
-                            assert_eq!(
-                                query_rows(&conn, "PRAGMA schema_version"),
-                                cookie,
-                                "refusal must roll back DDL cookie"
-                            );
-                        } else if stamp >= 36 && !old && profile == StoreProfile::PortableKernel {
-                            assert_eq!(
-                                sentinels(&conn),
-                                before_sentinels,
-                                "band must not enter sentinel runner"
-                            );
-                        } else if variant == Variant::Sentinel {
-                            assert_ne!(
-                                sentinels(&conn),
-                                before_sentinels,
-                                "old/pending successful migration repairs missing v3"
-                            );
-                            assert_eq!(conn.query_row::<u32,_,_>("SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v3_handoff_path_standardize'",[],|r|r.get(0)).unwrap(),1);
-                        }
+                    } else if stamp >= 41 && !old && profile == StoreProfile::PortableKernel {
+                        assert_eq!(
+                            sentinels(&conn),
+                            before_sentinels,
+                            "band must not enter sentinel runner"
+                        );
+                    } else if variant == Variant::Sentinel {
+                        assert_ne!(
+                            sentinels(&conn),
+                            before_sentinels,
+                            "old/pending successful migration repairs missing v39"
+                        );
+                        assert_eq!(conn.query_row::<u32,_,_>("SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity'",[],|r|r.get(0)).unwrap(),1);
                     }
                 }
             }
         }
-    });
+    }
 }
 
 #[test]

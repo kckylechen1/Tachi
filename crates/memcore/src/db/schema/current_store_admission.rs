@@ -695,7 +695,7 @@ mod shape_tests {
             future.portable_shapes.keys().collect::<Vec<_>>(),
             shipped.portable_shapes.keys().collect::<Vec<_>>()
         );
-        let prefix = with_prefix(30, || build_shipped_inventory(StoreProfile::PortableKernel))
+        let prefix = with_prefix(40, || build_shipped_inventory(StoreProfile::PortableKernel))
             .expect("a shortened caller catalogue cannot break the shipped reference");
         assert_eq!(
             prefix.portable_shapes.keys().collect::<Vec<_>>(),

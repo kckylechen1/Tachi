@@ -67,8 +67,13 @@ fn init_schema_for_profile(
     validate_memory_outbox_schema(&tx)?;
     validate_memory_outbox_destination_apply_schema(&tx)?;
     validate_harness_session_attachments_schema(&tx)?;
+    validate_harness_session_spine_schema(&tx)?;
+    validate_delivery_spine_schema(&tx)?;
     if profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
+        validate_mirror_eval_identity_schema(&tx)?;
+        crate::db::verified_admissions::validate_verified_admission_schema(&tx)?;
+        validate_current_truth_schema(&tx)?;
         if crate::db::migrations::supported_schema_version() >= 43 {
             crate::db::adjudication_provenance::validate_adjudication_provenance_schema(&tx)?;
         }
@@ -2033,16 +2038,28 @@ fn init_schema_inner(
     // columns exist on legacy databases that were created without them.
     execute_schema_chunks(conn, ddl::MIGRATED_INDEXES_CHUNKS, profile)?;
 
+    // Install v39-baseline ledgers and spines directly on init (squashed
+    // from v25-v38). Every installer is idempotent (`IF NOT EXISTS` /
+    // presence-checked) so v39+ upgrades never disturb existing rows.
+    install_recall_impression_ledger_schema(conn)?;
+    install_typo_fallback_attribution_schema(conn)?;
+    install_wiki_recovery_ledgers_schema(conn)?;
+    install_memory_outbox_schema(conn)?;
+    install_memory_outbox_destination_apply_schema(conn)?;
+    install_harness_session_attachments_schema(conn)?;
+    install_harness_session_spine_schema(conn)?;
+    install_delivery_spine_schema(conn)?;
+    if profile.includes_product() {
+        install_a2a_mailbox_v32_schema(conn)?;
+        crate::db::verified_admissions::install_verified_admission_schema(conn)?;
+        install_current_truth_schema(conn)?;
+    }
+
     // Repair historical rows during provisioning or an admitted upgrade.
     // Current snapshots retain their raw lifecycle values on every reopen.
     if repair_legacy_rows {
         legacy_rows::normalize_legacy_memory_rows(conn, normalize_memory_validity_columns)?;
     }
-
-    bridge_hypertachi_memory_columns(conn)?;
-    crate::db::migrations::fold_and_drop_legacy_persons_column(conn)?;
-    // Relocate legacy location before enum rebuild copies rows without that column.
-    let _ = crate::db::migrations::migrate_v9_relocate_and_drop_location(conn)?;
 
     // Install the authority before any projection-only drift repair. File-backed
     // opens run this whole block inside BEGIN IMMEDIATE, so repaired FTS rows and
@@ -2059,6 +2076,9 @@ fn init_schema_inner(
     // triggers during that migration. The trigger is the cross-process cache
     // authority; drift is an open failure, never a silently stale cache hit.
     crate::db::search_generation::ensure_search_generation_schema(conn)?;
+    if crate::db::migrations::read_schema_version(conn)? == 0 {
+        install_reserved_reference_guard(conn)?;
+    }
     ensure_optimization_indexes(conn);
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
@@ -2135,16 +2155,67 @@ fn init_product_schema_columns(conn: &Connection) -> Result<(), MemoryError> {
     // #1289: collapse any pre-existing duplicate *modeless* active claims for
     // the same identity triple BEFORE MIGRATED_INDEXES_CHUNKS builds the partial
     // UNIQUE index `idx_session_claims_identity_active` (WHERE state = 'active'
-    // AND mode IS NULL). A legacy DB written by the pre-#1001-round-2 kernel can
-    // carry such duplicates; without this the CREATE UNIQUE INDEX below crashes
-    // init on that DB (a crash previously masked by the mode-column ordering
-    // bug fixed above). Reuses the v12 migration's dedup logic (single source),
-    // scoped to `mode IS NULL` to match the index predicate exactly — v21
-    // WorkClaims carrying a non-null mode legitimately share an identity and are
-    // never deduped. No-op on a fresh/empty table and idempotent on every
-    // subsequent startup (the index then prevents any new duplicate).
-    crate::db::migrations::dedupe_session_claims_identity_conflicts(conn)?;
+    // AND mode IS NULL).
+    dedupe_session_claims_identity_conflicts(conn)?;
     Ok(())
+}
+
+fn install_a2a_mailbox_v32_schema(conn: &Connection) -> Result<(), MemoryError> {
+    let sql = ddl::A2A_MAILBOX_V32_SQL
+        .replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+        .replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ");
+    execute_batch_retry(conn, &sql)
+}
+
+fn dedupe_session_claims_identity_conflicts(conn: &Connection) -> Result<usize, MemoryError> {
+    let table_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'session_claims'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_exists == 0 {
+        return Ok(0);
+    }
+    let mode_scoped = has_column(conn, "session_claims", "mode")?;
+    let s1_mode = if mode_scoped { " AND mode IS NULL" } else { "" };
+    let s2_mode = if mode_scoped {
+        " AND s2.mode IS NULL"
+    } else {
+        ""
+    };
+    let select_sql = format!(
+        "SELECT claim_id FROM session_claims s1
+         WHERE state = 'active'{s1_mode}
+           AND EXISTS (
+             SELECT 1 FROM session_claims s2
+             WHERE s2.state = 'active'{s2_mode}
+               AND COALESCE(s2.session_client, '') = COALESCE(s1.session_client, '')
+               AND COALESCE(s2.issue_ref, '') = COALESCE(s1.issue_ref, '')
+               AND COALESCE(s2.flow_id, '') = COALESCE(s1.flow_id, '')
+               AND (
+                 s2.heartbeat_at > s1.heartbeat_at
+                 OR (s2.heartbeat_at = s1.heartbeat_at AND s2.claim_id > s1.claim_id)
+               )
+           )"
+    );
+    let mut stmt = conn.prepare(&select_sql)?;
+    let stale_claim_ids: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let now = super::common::now_utc_iso();
+    let update_sql = format!(
+        "UPDATE session_claims SET state = 'released', released_at = ?2, \
+         release_reason = 'superseded-by-unique-identity-migration' \
+         WHERE claim_id = ?1 AND state = 'active'{s1_mode}"
+    );
+    let mut released = 0usize;
+    for claim_id in stale_claim_ids {
+        conn.execute(&update_sql, params![claim_id, now])?;
+        released += 1;
+    }
+    Ok(released)
 }
 
 /// Keep the scorer-only diagnostic column total for legacy databases.
@@ -2163,64 +2234,7 @@ pub(crate) fn install_recall_impression_ledger_schema(
     execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V26_SQL)
 }
 
-/// Install the historical v25 schema only as a step in the in-order migration
-/// runner. New provisioning reaches v26 in the same transaction immediately
-/// afterward; no current database is left at this shape by this binary.
-pub(crate) fn install_v25_recall_impression_ledger_schema(
-    conn: &Connection,
-) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::RECALL_IMPRESSION_LEDGER_V25_SQL)
-}
-
-/// Upgrade the v25 group table without inventing query fingerprints or replay
-/// policy for rows whose source query and historical algorithm are unavailable.
-pub(crate) fn migrate_recall_impression_ledger_to_v26(
-    conn: &Connection,
-) -> Result<(), MemoryError> {
-    if !has_column(conn, "recall_impression_groups", "query_hash")? {
-        return Err(MemoryError::InvalidArg(
-            "incomplete v25 recall impression ledger: query_hash is missing".to_string(),
-        ));
-    }
-
-    // Rebuild both tables rather than merely adding nullable columns. That
-    // preserves the v26 all-or-none policy CHECK for future writes while
-    // retaining each historical v25 group as an explicitly unversioned row.
-    // The caller's outer migration transaction makes this table swap atomic.
-    execute_batch_retry(
-        conn,
-        "ALTER TABLE recall_impressions RENAME TO recall_impressions_v25;
-         ALTER TABLE recall_impression_groups RENAME TO recall_impression_groups_v25;
-         DROP INDEX idx_recall_impression_groups_created;
-         DROP INDEX idx_recall_impression_groups_query_hash;
-         DROP INDEX idx_recall_impressions_memory;
-         DROP INDEX idx_recall_impressions_group_final_rank;",
-    )?;
-    install_recall_impression_ledger_schema(conn)?;
-    // NULL is the only honest migration value: v25 did not persist query text
-    // or replay-policy provenance, so neither can be reconstructed now.
-    conn.execute(
-        "INSERT INTO recall_impression_groups (group_id, created_at, legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count)
-         SELECT group_id, created_at, query_hash, NULL, NULL, NULL, NULL, NULL, NULL, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count, replay_count
-         FROM recall_impression_groups_v25",
-        [],
-    )?;
-    conn.execute(
-        "INSERT INTO recall_impressions (group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall)
-         SELECT group_id, memory_id, vector_score, fts_score, symbolic_score, decay_score, vec_rank, fts_rank, sym_rank, merge_adjustment, pre_boost_score, pre_boost_rank, tie_break_epoch_millis, final_score, final_rank, scored, scored_returned, access_count_at_recall
-         FROM recall_impressions_v25",
-        [],
-    )?;
-    execute_batch_retry(
-        conn,
-        "DROP TABLE recall_impressions_v25;
-         DROP TABLE recall_impression_groups_v25;",
-    )?;
-    validate_recall_impression_ledger_schema(conn)
-}
-
-/// Canonical v27 installer. Production callers reach this only through the
-/// sentinel-gated migration runner, after the typed migration-authority gate.
+/// Canonical v27 installer. Production callers reach this via the v39 baseline.
 pub(crate) fn install_typo_fallback_attribution_schema(
     conn: &Connection,
 ) -> Result<(), MemoryError> {
@@ -2779,50 +2793,6 @@ fn is_duplicate_column_error(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(_, Some(message))
             if message.contains("duplicate column name")
     )
-}
-
-/// Align HyperTachi-shaped legacy DBs (`indexed_tags`, `domain_key`) with Sigil's
-/// canonical columns before enum/CHECK migrations run.
-fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError> {
-    ensure_column(conn, "memories", "domain", "TEXT")?;
-
-    if has_column(conn, "memories", "indexed_tags")? {
-        conn.execute(
-            "UPDATE memories
-             SET keywords = indexed_tags
-             WHERE (keywords IS NULL OR trim(keywords) IN ('', '[]'))
-               AND indexed_tags IS NOT NULL
-               AND trim(indexed_tags) NOT IN ('', '[]')",
-            [],
-        )?;
-    }
-
-    if has_column(conn, "memories", "domain_key")? {
-        conn.execute(
-            "UPDATE memories
-             SET domain = domain_key
-             WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
-               AND domain_key IS NOT NULL
-               AND trim(domain_key) <> ''",
-            [],
-        )?;
-    }
-
-    // Undo mistaken v1 bridge that copied domain_key into location (pre-v9 DBs only).
-    if has_column(conn, "memories", "location")? {
-        conn.execute(
-            "UPDATE memories
-         SET domain = location, location = ''
-         WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
-           AND trim(location) <> ''
-           AND location NOT GLOB '/*'
-           AND location NOT LIKE '%/%'
-           AND location NOT LIKE '% %'",
-            [],
-        )?;
-    }
-
-    Ok(())
 }
 
 /// Called from inside `init_schema_inner`, which itself runs either

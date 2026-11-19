@@ -1,77 +1,24 @@
-//! One-shot, idempotent data migrations for legacy memory DBs.
+//! One-shot, idempotent schema/data migrations for memory DBs.
 //!
 //! Each migration is gated by a sentinel row in `hard_state`
 //! (namespace='migrations', key=<migration_id>). Once written, the migration
 //! is skipped on subsequent runs.
 //!
-//! See docs/audit-2026-04-30.md (PR-3) for the bugs each migration fixes:
-//! - v1: H1 path normalization
-//! - v2: H4 scope normalization (defense-in-depth on top of PR-1's enum migration)
-//! - v3: H6 handoff path standardization
-//! - v4: B4/B11 cross-DB pollution quarantine
-//! - v5: drop HyperTachi legacy columns (`indexed_tags`, `domain_key`) after bridge
-//! - v6: fold non-empty `persons` JSON into `entities`, then clear `persons`
-//! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `location`)
-//! - v8: drop the legacy physical `persons` column after folding it into `entities`
-//! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
-//! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
-//! - v11: drop retired `domains` registry table (#757)
-//! - v12: `session_claims` identity-triple UNIQUE index (#1001 round 2)
-//! - v13: add `idx_hard_state_ns_updated` on `hard_state(namespace, updated_at
-//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack;
-//!   numbered after #1007's v12, see #1017)
-//! - v14: `dispatch_outcomes.reported_outcome` column (#773 Layer-2 ②) —
-//!   dual-truth: raw self-report vs machine-resolved verdict.
-//! - v15: `exec_envs.env_class` column (#894 S2c) — provisioning policy class
-//!   (edit-only | build-ticketed | build-private); legacy rows land on the
-//!   fail-safe `edit-only`.
-//! - v16: `dispatch_outcomes.identity_receipt` column (#1065) — frozen
-//!   requested/effective identity copied from the dispatch receipt.
-//! - v17: `dispatch_outcomes.identity_attribution_basis` column (#1065 D) —
-//!   frozen evidence class of the flat identity columns, back-filled from
-//!   each row's receipt.
-//! - v18: `dispatch_adjudications` + `dispatch_adjudication_signatures`
-//!   tables (#1035) — append-only leader terminal-judgment events linked
-//!   to a dispatch outcome by `outcome_id`.
-//! - v19: `memories.idless_identity` column + unique partial index (#1115) —
-//!   reserves a DB-level identity for new id-less saves only.
-//! - v20: `mirror_eval_runs` + `mirror_eval_observations` +
-//!   `mirror_eval_adjudications` tables (#1066) — first-class mirror eval
-//!   intake for harness-native subagents (register/observe/adjudicate/get).
-//! - v21: AgentIdentity / WorkClaim holder-evidence spine (#1253).
-//! - v22: `memories_symbolic_fts` trigram projection create + full rebuild
-//!   (#1331) — versioned so stamped-v21 DBs cannot silently acquire the
-//!   table via idempotent init DDL without a migration stamp/authority gate.
-//! - v23: canonical reserved evidence-reference guard triggers — versioned so
-//!   a legitimate v22 DB upgrades under migration authority while a damaged
-//!   v23 inventory is refused rather than silently repaired.
-//! - v24: `memories.scored_count` scorer-only diagnostic counter (#1459).
-//! - v25: sampled recall-impression ledger tables and indexes (#1447).
-//! - v26: SHA-256 query fingerprints and complete replay-policy identity for
-//!   recall impressions; v25 groups remain honestly unversioned (#1447).
-//! - v27: content-free typo-fallback attribution columns on the v26 ledger (#1506).
-//! - v28: Wiki REM source-claim and exact-dedupe apply-lineage recovery ledgers (#1542).
-//! - v29: `memory_outbox_events` durable outbox for outbound memory mutations
-//!   (#1643 / #1630 A1).
-//! - v30: destination-side outbox apply/readback receipts (#1718).
-//! - v31: Product-only local A2A envelope and delivery-receipt ledger (#1751).
-//!   Both are NEW TABLE migrations, so a bump is unavoidable: the v22 and v28
-//!   precedents both state why a table may not arrive through idempotent init
-//!   DDL — a stamped-older database would silently acquire a new write surface
-//!   without migration authority or a matching stamp.
-//! - v32: rebuild the Product A2A table pair so terminal envelope bodies can
-//!   be scrubbed after their bounded retention window while immutable digests
-//!   and delivery receipts remain (#1751).
-//! - v33: host-owned ACP session attachment admission receipts (#1733).
-//! - v34: attached-session receipt spine: events, canonical state, interventions, capability advertisements (#1678).
-//!   Renumbered from the PR's original v31 slot in the 2026-08-16 merge
-//!   resolution: main had already taken v31/v32 for the A2A mailbox pair.
-//! - v35: rebuild the shipped v34 intervention and capability-advertisement
-//!   tables with persisted capability provenance and a closed JSON boundary.
-//! - v36: durable delivery intent and append-only delivery event spine (#1679).
-//! - v37: immutable, secret-negative verified AgentIdentity admission receipts (#1938).
-//! - v38: canonical CurrentTruth assertion, projection, and refresh inventory (#1696).
+//! ## Schema v39 epoch baseline
+//!
+//! Historical migrations `v1` through `v38` were squashed into
+//! [`BASELINE_SCHEMA_VERSION`] (`39`), matching [`PORTABLE_COMPAT_FLOOR`].
+//! Databases stamped with `0 < PRAGMA user_version < 39` fail closed at
+//! [`check_schema_version_gate`] and must be bridged to `v39+` using an
+//! archived pre-squash binary. Fresh empty databases (`user_version == 0`)
+//! initialize the complete baseline schema directly and stamp
+//! [`EXPECTED_SCHEMA_VERSION`] (`43`, or `41` for Portable).
+//!
+//! Active shipped migrations:
 //! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
+//! - v40: `session_claims.canonical_project` WorkClaim project binding.
+//! - v41: host-owned `typed_records` and `typed_record_supersessions` tables (Portable).
+//! - v42: `coordination/v1` scoped A2A mailbox (`canonical_project` on `identity_admissions` and `a2a_envelopes`).
 //! - v43: adjudication provenance receipt & attribution basis columns +
 //!   append-only trigger triples on `dispatch_adjudications` and
 //!   `mirror_eval_adjudications` (#2012).
@@ -79,31 +26,15 @@
 //! ## Schema version stamp (#984)
 //!
 //! In addition to the sentinel-row idempotency above, the DB carries an
-//! integer version stamp in `PRAGMA user_version` (SQLite's canonical slot
-//! for this; unused anywhere else in this codebase prior to #984). This is a
-//! *coarse* hard-fail gate, orthogonal to the fine-grained sentinel
-//! migrations: it exists so a downstream reader (e.g. HyperMem) opening a DB
-//! written by a newer kernel fails loudly instead of silently proceeding
-//! against data/columns it doesn't understand yet.
+//! integer version stamp in `PRAGMA user_version`. This is a *coarse*
+//! hard-fail gate, orthogonal to the fine-grained sentinel migrations: it
+//! ensures both that a reader opening a DB written by a newer kernel fails
+//! loudly and that pre-baseline (`< v39`) DBs are rejected rather than
+//! silently half-migrated.
 //!
 //! [`EXPECTED_SCHEMA_VERSION`] and [`PORTABLE_EXPECTED_SCHEMA_VERSION`] are
 //! derived from the single shipped catalogue. Append each new migration there
 //! with its immutable scope, sentinel and body (and a `vN` doc line above).
-//!
-//! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
-//!
-//! The `BEGIN IMMEDIATE`/stamp boundary described above was originally scoped
-//! to just this module's sentinel migrations. That left a hole:
-//! `schema::init_schema_with_label_mut` called `schema::init_schema_inner`
-//! (DDL + `bridge_hypertachi_memory_columns` + the standalone v6/v8/v9
-//! legacy-column work in `legacy_columns.rs`) BEFORE opening this module's
-//! transaction — so a crash between that legacy work committing and this
-//! module's stamp being written left newer schema/data on disk under an old
-//! or zero `user_version`, exactly what the gate exists to prevent. Round 3
-//! fixes this by having `init_schema_with_label_mut` open ONE outer
-//! transaction that covers `init_schema_inner` AND
-//! [`run_data_migrations_in_tx`] AND the final stamp — see that function's
-//! doc comment in `schema.rs`.
 
 use std::path::Path;
 
@@ -112,7 +43,12 @@ use rusqlite::Connection;
 use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
-use super::common::now_utc_iso;
+/// Minimum existing `PRAGMA user_version` supported by this kernel.
+///
+/// Migrations `v1-v38` are squashed into the `v39` epoch baseline; existing DBs
+/// with `0 < user_version < 39` fail closed at [`check_schema_version_gate`]
+/// and must be bridged via an archived pre-squash binary.
+pub const BASELINE_SCHEMA_VERSION: u32 = 39;
 
 /// Current schema version stamp, persisted via `PRAGMA user_version`.
 ///
@@ -136,63 +72,16 @@ pub(crate) fn portable_schema_version() -> u32 {
     catalogue::portable_version(&catalogue::entries())
 }
 
-mod a2a_body_retention;
-mod basic;
-mod cross_db;
-mod current_truth;
-mod delivery_spine;
-mod dispatch_adjudications;
-mod dispatch_outcomes_attribution_basis;
-mod dispatch_outcomes_identity_receipt;
-mod dispatch_outcomes_reported;
-mod domain_retire;
-mod exec_env_class;
-mod hard_state_index;
-mod harness_session_attachments;
-mod harness_session_events;
 mod identity_workclaim_spine;
-mod idless_identity;
-mod legacy_columns;
-mod mirror_eval;
 mod mirror_eval_identity;
-mod pack_retire;
 mod sentinel;
-mod session_claims_identity;
 mod symbolic_fts;
-mod verified_admissions;
 
-use a2a_body_retention::*;
-use basic::*;
-use cross_db::*;
-use current_truth::*;
-use delivery_spine::*;
-use dispatch_adjudications::*;
-use dispatch_outcomes_attribution_basis::*;
-use dispatch_outcomes_identity_receipt::*;
-use dispatch_outcomes_reported::*;
-use domain_retire::*;
-use exec_env_class::*;
-use hard_state_index::*;
-use harness_session_attachments::*;
-use harness_session_events::*;
-use identity_workclaim_spine::*;
-use idless_identity::*;
-use legacy_columns::*;
-pub use legacy_columns::{
-    fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
-};
-use mirror_eval::*;
 use mirror_eval_identity::*;
-use pack_retire::*;
 use sentinel::*;
-pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
-use session_claims_identity::*;
 pub use symbolic_fts::rebuild_memories_symbolic_fts;
-use symbolic_fts::*;
-use verified_admissions::*;
 
 const MIGRATION_NS: &str = "migrations";
-const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
 
 /// Canonical sentinel inventory for a database stamped at
 /// [`EXPECTED_SCHEMA_VERSION`]. A current stamp is a claim that every
@@ -202,71 +91,8 @@ pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = catalogue::SENTINELS;
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MigrationReport {
-    pub paths_normalized: usize,
-    pub scopes_fixed: usize,
-    pub handoff_paths_standardized: usize,
-    pub quarantined: usize,
-    pub quarantine_skipped_sanity_guard: bool,
-    pub hypertachi_legacy_columns_dropped: usize,
-    pub persons_folded_into_entities: usize,
-    pub legacy_columns_reconciled: usize,
-    pub persons_columns_dropped: usize,
-    pub locations_relocated: usize,
-    pub location_columns_dropped: usize,
-    pub pack_tables_dropped: usize,
-    pub domains_table_dropped: usize,
-    pub session_claims_duplicates_deduped: usize,
-    pub hard_state_index_added: usize,
-    pub dispatch_outcomes_reported_outcome_added: usize,
-    pub exec_envs_env_class_added: usize,
-    pub dispatch_outcomes_identity_receipt_added: usize,
-    pub dispatch_outcomes_attribution_basis_backfilled: usize,
-    pub dispatch_adjudications_created: usize,
-    pub idless_identity_constraint_added: usize,
-    pub mirror_eval_tables_created: usize,
-    pub identity_workclaim_columns_added: usize,
-    pub memories_symbolic_fts_rows: usize,
-    pub reserved_reference_guards_installed: usize,
-    pub scored_count_column_added: usize,
-    pub recall_impression_schema_objects_created: usize,
-    pub recall_impression_replay_identity_columns_added: usize,
-    pub typo_fallback_attribution_columns_added: usize,
-    pub wiki_recovery_schema_objects_created: usize,
-    pub delivery_spine_schema_objects_created: usize,
-    pub current_truth_schema_objects_created: usize,
-    pub memory_outbox_schema_objects_created: usize,
-    pub memory_outbox_destination_apply_schema_objects_created: usize,
-    pub a2a_mailbox_schema_objects_created: usize,
-    pub a2a_body_retention_schema_objects_rebuilt: usize,
-    pub harness_session_attachments_schema_objects_created: usize,
-    pub harness_session_spine_schema_objects_created: usize,
-    pub harness_session_spine_receipt_tables_rebuilt: usize,
-    pub verified_admission_schema_objects_created: usize,
     pub mirror_eval_identity_columns_added: usize,
-}
-
-#[cfg(test)]
-pub(crate) mod test_hooks {
-    use crate::error::MemoryError;
-    use std::cell::Cell;
-
-    thread_local! {
-        static FAIL_AFTER_V23_GUARD_INSTALL: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub(crate) fn arm_fail_after_v23_guard_install() {
-        FAIL_AFTER_V23_GUARD_INSTALL.with(|flag| flag.set(true));
-    }
-
-    pub(super) fn fail_after_v23_guard_install() -> Result<(), MemoryError> {
-        let armed = FAIL_AFTER_V23_GUARD_INSTALL.with(|flag| flag.replace(false));
-        if armed {
-            return Err(MemoryError::InvalidArg(
-                "test_hooks: injected failure after v23 guard install".to_string(),
-            ));
-        }
-        Ok(())
-    }
+    pub identity_workclaim_columns_added: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -276,9 +102,7 @@ pub fn read_schema_version(conn: &Connection) -> Result<u32, MemoryError> {
     Ok(version.max(0) as u32)
 }
 
-/// Inspect a database's version without creating or mutating it. Runtime
-/// write routers use this only to recognize the one narrowly authorized
-/// v22-to-v23 evidence-guard upgrade before opening a named project store.
+/// Inspect a database's version without creating or mutating it.
 pub fn read_schema_version_at_path(db_path: &Path) -> Result<u32, MemoryError> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     read_schema_version(&conn)
@@ -295,31 +119,35 @@ pub(crate) fn write_schema_version(conn: &Connection, version: u32) -> Result<()
 }
 
 /// Stamp the current [`EXPECTED_SCHEMA_VERSION`]. Exposed to `schema.rs` so
-/// `init_schema_with_label_mut` can write the final stamp itself, inside the
-/// SAME outer transaction it opened for `init_schema_inner`'s legacy work —
-/// see that function's doc comment (#984 F1 round 3) for why the stamp can no
-/// longer be delegated to the public [`run_data_migrations`] wrapper (that
-/// wrapper opens its OWN transaction, which would either double-BEGIN or
-/// leave `init_schema_inner`'s earlier legacy mutations outside the window
-/// this stamp is meant to cover).
+/// `init_schema_with_label_mut` can write the final stamp itself inside the
+/// SAME outer transaction it opened for `init_schema_inner` and
+/// [`run_data_migrations_in_tx`].
 pub(crate) fn write_schema_version_stamp(conn: &Connection) -> Result<(), MemoryError> {
     write_schema_version(conn, supported_schema_version())
 }
 
-/// Hard-fail gate: refuse to open/operate on a DB stamped with a schema
-/// version newer than this kernel supports. Called at the top of
-/// [`run_data_migrations`] (i.e. from `init_schema_with_label_mut`'s entry
-/// path), before any migration touches the DB.
+/// Hard-fail gate: refuse to open/operate on a DB stamped newer than this
+/// kernel supports OR below [`BASELINE_SCHEMA_VERSION`] (`39`). Called at the
+/// top of [`run_data_migrations`] and all DB open doors before any migration
+/// or schema work touches the DB.
 ///
-/// - stamped version > `EXPECTED_SCHEMA_VERSION` → hard error, never proceed.
-/// - stamped version <= `EXPECTED_SCHEMA_VERSION` (including the `0` fresh/
-///   absent case) → caller proceeds to run migrations and re-stamp.
+/// - `stored > EXPECTED_SCHEMA_VERSION` → hard error, never proceed.
+/// - `0 < stored < BASELINE_SCHEMA_VERSION` → hard error instructing the
+///   operator to bridge via an archived pre-squash binary.
+/// - `stored == 0` or `BASELINE_SCHEMA_VERSION <= stored <= EXPECTED_SCHEMA_VERSION`
+///   → caller proceeds through admission / migration / re-stamp.
 pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
     let stored = read_schema_version(conn)?;
     let expected = supported_schema_version();
     if stored > expected {
         return Err(MemoryError::InvalidArg(format!(
             "db schema version {stored} newer than supported {expected}"
+        )));
+    }
+    if (1..BASELINE_SCHEMA_VERSION).contains(&stored) {
+        return Err(MemoryError::InvalidArg(format!(
+            "db schema version {stored} is below minimum supported baseline {BASELINE_SCHEMA_VERSION}; \
+             bridge it to v{BASELINE_SCHEMA_VERSION}+ with an archived binary before opening with this version"
         )));
     }
     Ok(())
@@ -410,41 +238,12 @@ fn validate_current_schema_objects(conn: &Connection) -> Result<(), MemoryError>
 
 /// #1119 typed schema-migration gate. Runs at the DB-open funnel
 /// (`schema::init_schema_with_label_mut`), AFTER [`check_schema_version_gate`]
-/// (which owns the `stored > EXPECTED` refusal and is called first by every
-/// entry point) and BEFORE any DDL / data migration / version stamp mutates
-/// the DB. Decides purely from the caller's typed [`DbOpenContext`] and the
-/// stored `PRAGMA user_version` and the read-only profile stamp probe — never
-/// inferred from table contents or process env. This is the choke point that closes the #1119
-/// incident: an unauthorized process can no longer forward-migrate a live DB
-/// a deployed daemon still depends on.
-///
-/// Decision table (`stored > EXPECTED` already refused upstream):
-///
-/// | intent        | stored == 0 | 1 ≤ stored < EXPECTED       | stored == EXPECTED |
-/// |---------------|-------------|-----------------------------|--------------------|
-/// | `CreateFresh` | build (Ok)  | refuse: create-on-existing  | refuse: create-on-existing |
-/// | `OpenExisting`| build (Ok)  | Deny→refuse / Allow→migrate  | Ok (current)       |
-///
-/// The table uses this profile's projection: E for today's policy, the last
-/// Portable migration for a valid Portable stamp. Its current band extends
-/// from that projection through E; newer is always refused upstream.
-///
-/// `CreateFresh` succeeds ONLY on an unstamped (`stored == 0`) file — even one
-/// whose tables `init_schema` already built (owner ruling A: that product IS
-/// fresh; the discriminator is the version stamp, never DB content). Any
-/// *stamped* DB (`stored >= 1`, older or current) is a pre-existing
-/// operational DB, not a create target, and is refused with
-/// [`MemoryError::DbCreateTargetExists`].
-///
-/// `stored == 0` is a *build*, not a *migration*, under both intents: the
-/// #1119 incident was a **stamped** older DB (17 → 18); an unstamped
-/// (`user_version == 0`) file has no deployed daemon depending on a prior
-/// stamp, so building schema onto it strands nobody. Crucially, this decision
-/// reads only the version stamp — it does NOT inspect `sqlite_master` to guess
-/// "fresh vs legacy" (the reverted wrong-layer discriminator: `init_schema`
-/// produces a full-table DB that still reads `user_version == 0`, so content
-/// cannot distinguish the two). The `1 ≤ stored < EXPECTED` band is the only
-/// place authority matters, and it is exactly the accident's shape.
+/// (which owns the `stored > EXPECTED` and `0 < stored < BASELINE` refusals
+/// and is called first by every entry point) and BEFORE any DDL / data
+/// migration / version stamp mutates the DB. Decides purely from the caller's
+/// typed [`DbOpenContext`] and the stored `PRAGMA user_version` and the
+/// read-only profile stamp probe — never inferred from table contents or
+/// process env.
 pub fn check_db_open_context_gate(
     conn: &Connection,
     db_path: &Path,
@@ -468,7 +267,7 @@ pub(crate) enum OpenContextDecision {
     Build,
     /// `OpenExisting` of a `stored == EXPECTED` database.
     Current,
-    /// `OpenExisting + Allow` of a `1 ≤ stored < EXPECTED` database.
+    /// `OpenExisting + Allow` of a `BASELINE_SCHEMA_VERSION <= stored < EXPECTED` database.
     AuthorizedMigration { stored: u32 },
 }
 
@@ -487,10 +286,6 @@ pub(crate) fn evaluate_db_open_context_gate(
     let stored = header.stored;
     match ctx.intent {
         OpenIntent::CreateFresh => {
-            // Provisioning succeeds ONLY on an unstamped file (build fresh, no
-            // authority). Any stamped DB (older OR current) is a pre-existing
-            // operational DB, not a create target — refuse. Use OpenExisting
-            // (with authority) to open/migrate an existing DB.
             if stored == 0 {
                 Ok(OpenContextDecision::Build)
             } else {
@@ -506,10 +301,10 @@ pub(crate) fn evaluate_db_open_context_gate(
                 return Ok(OpenContextDecision::Current);
             }
             if stored == 0 {
-                // No stamp: a build, not a migration — see the doc comment.
+                // No stamp: a build, not a migration.
                 return Ok(OpenContextDecision::Build);
             }
-            // 1 ≤ stored < EXPECTED: a real older DB. THE migration decision.
+            // BASELINE <= stored < EXPECTED: a real older DB.
             match &ctx.migration {
                 MigrationAuthority::Allow { .. } => {
                     Ok(OpenContextDecision::AuthorizedMigration { stored })
@@ -532,13 +327,6 @@ pub(crate) fn evaluate_db_open_context_gate(
 
 /// Emit the #1119 audit line for an authorized migration decision; a no-op for
 /// every other decision.
-///
-/// The open funnel calls this from its in-transaction admission, i.e. BEFORE
-/// the migration runs and commits. The line therefore records an **authorized
-/// migration attempt**, not a committed migration: a later refusal in the
-/// same transaction (identity, DDL, validation) or a failed commit rolls the
-/// migration back after the line was written. Commit success is evidenced by
-/// the stamped `user_version` and the `.migration-marker`, not by this line.
 pub(crate) fn log_authorized_migration(
     decision: OpenContextDecision,
     db_path: &Path,
@@ -562,16 +350,6 @@ pub(crate) fn log_authorized_migration(
     }
 }
 
-/// The audit log line the #1119 incident report asked for when an authorized
-/// migration is ATTEMPTED: who authorized it (`approved_by`) plus this
-/// binary's own version + pid (so an operator grepping logs after the fact
-/// can tell which process attempted the migration), from/to version, and the
-/// DB path. It is logged before the migration commits and can therefore
-/// appear for a migration that then rolls back; see
-/// [`log_authorized_migration`]. The wording ("migrating") is kept as-is for
-/// operators' existing log searches.
-/// Factored out of the `eprintln!` call site so it is directly unit-testable
-/// without capturing real stderr.
 fn schema_migration_success_log_line(stored: u32, db_path: &Path, approved_by: &str) -> String {
     schema_migration_log_line_for_target(stored, supported_schema_version(), db_path, approved_by)
 }
@@ -590,11 +368,7 @@ fn schema_migration_log_line_for_target(
     )
 }
 
-/// Build the typed [`MemoryError::SchemaMigrationOptInRequired`] refusal. The
-/// backup/marker hints name THIS db's actual sibling paths (not a `<db>`
-/// template) — the marker path is exact (deterministic naming); the backup
-/// path's timestamp suffix is the one component genuinely unknown until a real
-/// migration attempt runs (see `schema::maybe_backup_before_migration`).
+/// Build the typed [`MemoryError::SchemaMigrationOptInRequired`] refusal.
 fn schema_migration_opt_in_required_error(stored: u32, db_path: &Path) -> MemoryError {
     schema_migration_opt_in_required_error_for_target(stored, db_path, supported_schema_version())
 }
@@ -616,47 +390,8 @@ fn schema_migration_opt_in_required_error_for_target(
 
 /// Run all data-fix migrations in order. Idempotent.
 ///
-/// `db_label` is the manifest role/project label for this DB ("global",
-/// "wiki", a project name, or "unknown"). `current_db_path` is the canonical
-/// filesystem path to this DB file (used by v4 to detect rows whose
-/// `metadata.provenance.db_path` points elsewhere).
-///
-/// Enforces the [`EXPECTED_SCHEMA_VERSION`] hard-fail gate on entry (a stored
-/// version newer than this kernel supports errors out before any migration
-/// runs) and stamps the current version on successful exit — fresh DBs
-/// (version 0/absent), DBs at an older version, and DBs already at the
-/// current version all end this call stamped at `EXPECTED_SCHEMA_VERSION`.
-///
-/// This function is `pub` (downstream callers may invoke it directly, outside
-/// `init_schema_with_label_mut`), so it is unconditionally transactional on
-/// its own: it opens its own `BEGIN IMMEDIATE` here and commits only after
-/// every migration and the version stamp have succeeded, exactly as it did
-/// before #984 F1 round 3. What changed in round 3 is the PUBLIC ENTRY POINT
-/// (`init_schema_with_label_mut`): that function no longer calls this
-/// function. It calls [`run_data_migrations_in_tx`] directly against its OWN
-/// outer transaction — one that also covers `init_schema_inner`'s legacy
-/// v6/v8/v9 work, which used to commit standalone before this transaction
-/// even opened (the original compatibility hole this round fixes). Called
-/// standalone (this function), the boundary here still only covers the
-/// sentinel migrations, not `init_schema_inner`'s DDL/legacy work — exactly
-/// as before; the difference is that `init_schema_with_label_mut` no longer
-/// takes this path.
-/// Its output is subject to current-store admission at the next covered open;
-/// stamping the version alone does not establish a complete required schema.
-///
-/// ## Transactional compatibility boundary (#984 F1)
-///
-/// The migration effects (sentinel writes and the final `user_version` stamp
-/// included) all run inside a single `BEGIN IMMEDIATE` transaction opened
-/// here and committed only after every migration and the version stamp have
-/// succeeded. A crash or error partway through rolls the *entire* call back
-/// — there is no window where the DB is left partially migrated but still
-/// carrying an old/zero version stamp (which would let an older kernel pass
-/// [`check_schema_version_gate`] against data it doesn't understand).
-/// `PRAGMA user_version` is a page in the database header and is journaled
-/// like any other write, so it participates in the same rollback as the
-/// schema/data changes (see `stamp_and_migration_effects_roll_back_together`
-/// in the test module for a fault-injection proof).
+/// Enforces the [`EXPECTED_SCHEMA_VERSION`] and [`BASELINE_SCHEMA_VERSION`]
+/// hard-fail gate on entry and stamps the current version on successful exit.
 pub fn run_data_migrations(
     conn: &mut Connection,
     db_label: &str,
@@ -666,12 +401,7 @@ pub fn run_data_migrations(
 }
 
 /// [`run_data_migrations`] for a caller that knows the store's effective
-/// profile (#1585 D3). This standalone API retains today's version policy and
-/// stamps the full expected version, including after a product-only bump.
-/// Portable consumers needing D7 rollback compatibility must use the store
-/// admission funnel instead. `run_data_migrations` itself is the standalone/legacy
-/// entry point and assumes the full product profile — the shape every database
-/// written before #1585 has.
+/// profile (#1585 D3).
 pub fn run_data_migrations_with_profile(
     conn: &mut Connection,
     db_label: &str,
@@ -690,14 +420,6 @@ pub fn run_data_migrations_with_profile(
 }
 
 /// The actual migration sequence, run against an already-open transaction.
-/// Split out from [`run_data_migrations`] so tests can inject a failure
-/// between individual migration steps and the final stamp while still
-/// exercising the real transaction boundary.
-///
-/// Also called directly by `schema.rs`'s `init_schema_with_label_mut` (#984
-/// F1 round 3), which opens its OWN outer `BEGIN IMMEDIATE` covering
-/// `init_schema_inner`'s legacy work as well, and drives this + the final
-/// stamp against that same transaction — see that function's doc comment.
 pub(crate) fn run_data_migrations_in_tx(
     conn: &Connection,
     db_label: &str,
@@ -708,8 +430,7 @@ pub(crate) fn run_data_migrations_in_tx(
 }
 
 /// D7's open funnel runs only Portable bodies, with Product sentinels at or
-/// below the frozen rollback floor recorded vacuously. The standalone public
-/// migration API deliberately keeps the full catalogue/today policy.
+/// below the frozen rollback floor recorded vacuously.
 pub(crate) fn run_projected_migrations_in_tx(
     conn: &Connection,
     db_label: &str,
@@ -754,74 +475,9 @@ fn run_migration_catalogue(
     Ok(report)
 }
 
-fn migrate_v23_reserved_reference_guards(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_reserved_reference_guard(conn)?;
-    #[cfg(test)]
-    test_hooks::fail_after_v23_guard_install()?;
-    crate::db::validate_persistent_trigger_inventory(conn, true)?;
-    Ok(2)
-}
-
-fn migrate_v24_memories_scored_count(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::ensure_memories_scored_count(conn)?;
-    Ok(1)
-}
-
-fn migrate_v25_recall_impression_ledger(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_v25_recall_impression_ledger_schema(conn)?;
-    Ok(6)
-}
-
-fn migrate_v26_recall_impression_replay_identity(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::migrate_recall_impression_ledger_to_v26(conn)?;
-    Ok(7)
-}
-
-fn migrate_v27_typo_fallback_attribution(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_typo_fallback_attribution_schema(conn)?;
-    crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
-    Ok(7)
-}
-
-fn migrate_v28_wiki_recovery_ledgers(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_wiki_recovery_ledgers_schema(conn)?;
-    crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
-    Ok(3)
-}
-
-/// One table plus its three indexes (#1643).
-fn migrate_v29_memory_outbox(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_memory_outbox_schema(conn)?;
-    crate::db::schema::validate_memory_outbox_schema(conn)?;
-    Ok(4)
-}
-
-/// One destination receipt table plus its object lookup index (#1718).
-fn migrate_v30_memory_outbox_destination_apply(conn: &Connection) -> Result<usize, MemoryError> {
-    crate::db::schema::install_memory_outbox_destination_apply_schema(conn)?;
-    crate::db::schema::validate_memory_outbox_destination_apply_schema(conn)?;
-    Ok(2)
-}
-
-fn migrate_v31_a2a_mailbox(conn: &Connection, profile: StoreProfile) -> Result<usize, MemoryError> {
-    if !profile.includes_product() {
-        return Ok(0);
-    }
-    crate::db::schema::install_a2a_mailbox_schema(conn)?;
-    crate::db::schema::validate_a2a_mailbox_v31_schema(conn)?;
-    Ok(5)
-}
-
 /// Run a single sentinel-gated migration: skip if `key`'s sentinel is
 /// already set, otherwise run `migrate`, and — only on success — mark the
-/// sentinel run. Returns `Ok(None)` when skipped (already run), `Ok(Some(_))`
-/// with the migration's result when it actually ran.
-///
-/// This is the REAL caller-gating code path (#978): a test driving a
-/// failing `migrate` closure through this helper exercises the same
-/// "propagate the error, do not mark the sentinel" logic that
-/// `run_data_migrations` relies on for every versioned migration, rather
-/// than a parallel reimplementation of the gate.
+/// sentinel run.
 fn apply_versioned_migration<T>(
     conn: &Connection,
     key: &str,
@@ -838,9 +494,8 @@ fn apply_versioned_migration<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec};
+    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, DbOpenContext};
     use rusqlite::{params, Connection};
-    use serde_json::json;
 
     fn open_test_db() -> (Connection, tempfile::NamedTempFile) {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -853,757 +508,45 @@ mod tests {
         (conn, tmp)
     }
 
-    #[test]
-    fn migration_table_has_column_rejects_dynamic_sql_identifiers() {
-        let conn = Connection::open_in_memory().expect("open");
-        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)", [])
-            .expect("create minimal table");
-
-        let err = table_has_column(&conn, "memories'); DROP TABLE memories; --", "id")
-            .expect_err("dynamic table identifier should be rejected");
-
-        assert!(err.to_string().contains("invalid SQL identifier"));
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![name],
+            |_| Ok(()),
+        )
+        .is_ok()
     }
 
-    fn insert_row(conn: &Connection, id: &str, path: &str, scope: &str, metadata: &str) {
-        if table_has_column(conn, "memories", "location").unwrap() {
-            conn.execute(
-                "INSERT INTO memories
-              (id, path, summary, text, importance, timestamp, category, topic,
-               keywords, entities, location, source, scope, archived,
-               created_at, updated_at, access_count, last_access, revision,
-               metadata, retention_policy, domain)
-             VALUES (?1, ?2, '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
-                     '[]', '[]', '', 'manual', ?3, 0,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
-                     ?4, NULL, NULL)",
-                params![id, path, scope, metadata],
-            )
-            .unwrap();
-        } else {
-            conn.execute(
-                "INSERT INTO memories
-              (id, path, summary, text, importance, timestamp, category, topic,
-               keywords, entities, source, scope, archived,
-               created_at, updated_at, access_count, last_access, revision,
-               metadata, retention_policy, domain)
-             VALUES (?1, ?2, '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
-                     '[]', '[]', 'manual', ?3, 0,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
-                     ?4, NULL, NULL)",
-                params![id, path, scope, metadata],
-            )
-            .unwrap();
-        }
+    fn trigger_present(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            params![name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        let found = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .iter()
+            .any(|name| name == column);
+        found
     }
 
     #[test]
     fn was_run_mark_run_roundtrip() {
         let (conn, _tmp) = open_test_db();
-        assert!(!was_run(&conn, "v1_test").unwrap());
-        mark_run(&conn, "v1_test").unwrap();
-        assert!(was_run(&conn, "v1_test").unwrap());
-        // Idempotent re-mark.
-        mark_run(&conn, "v1_test").unwrap();
-        assert!(was_run(&conn, "v1_test").unwrap());
+        assert!(!was_run(&conn, "v39_test").unwrap());
+        mark_run(&conn, "v39_test").unwrap();
+        assert!(was_run(&conn, "v39_test").unwrap());
+        mark_run(&conn, "v39_test").unwrap();
+        assert!(was_run(&conn, "v39_test").unwrap());
     }
-
-    /// RED for #1751 v32: a real stamped-v31 Product pair, including its
-    /// immutable receipt row, must survive the FK-pair rebuild with only the
-    /// body nullability contract changing. The current v31 kernel leaves the
-    /// stamp and body shape unchanged, so this assertion is intentionally
-    /// failing until the v32 migration is installed.
-    #[test]
-    fn v31_a2a_mailbox_upgrades_to_v32_without_losing_rows_or_receipts() {
-        let (mut conn, tmp) = open_test_db();
-        // Build the complete pre-existing migration inventory first. Then
-        // deliberately downgrade only the A2A pair and stamp to v31, so this
-        // fixture remains valid under both the pre-v32 and post-v32 kernels.
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("build complete v31 fixture");
-        conn.execute_batch(
-            "DROP TABLE a2a_delivery_receipts;
-             DROP TABLE a2a_envelopes;
-             DELETE FROM hard_state WHERE namespace='migrations' AND key IN ('v32_a2a_body_retention','v42_coordination_mailbox');
-             ALTER TABLE identity_admissions DROP COLUMN canonical_project;
-             PRAGMA user_version=31;",
-        )
-        .expect("downgrade pair to v31");
-        crate::db::schema::install_a2a_mailbox_schema(&conn).expect("install v31 pair");
-        conn.execute_batch(
-            "INSERT INTO agent_identities(agent_identity_id,created_at)
-                 VALUES ('a2a-v32-issuer','2026-08-01T00:00:00.000Z'),
-                        ('a2a-v32-recipient','2026-08-01T00:00:00.000Z');
-             INSERT INTO identity_admissions(admission_id,agent_identity_id,connection_id,state,created_at)
-                 VALUES ('a2a-v32-issuer-admission','a2a-v32-issuer','a2a-v32-issuer-connection','self_asserted','2026-08-01T00:00:00.000Z'),
-                        ('a2a-v32-recipient-admission','a2a-v32-recipient','a2a-v32-recipient-connection','self_asserted','2026-08-01T00:00:00.000Z');
-             INSERT INTO a2a_envelopes
-                 (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
-                  recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
-                  body_digest,issuer_identity_assurance,recipient_identity_assurance,
-                  issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
-                  recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
-             VALUES ('a2a-v32-envelope','turn_response/v1','a2a-v32-issuer','a2a-v32-issuer-admission',
-                     'a2a-v32-recipient','a2a-v32-recipient-admission','peer_publication:v32',
-                     'immutable body','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     'self_asserted','self_asserted','same_host','same_host',
-                     'current_local_connection','historical_local_admission','a2a-v32-key',
-                     '2026-08-01T00:00:00.000Z','2026-08-08T00:00:00.000Z','consumed',3);
-             INSERT INTO a2a_delivery_receipts
-                 (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
-                  actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
-             VALUES ('a2a-v32-envelope:received:1','a2a-v32-envelope',1,'received',
-                     'a2a-v32-issuer','a2a-v32-issuer-admission','self_asserted','same_host',
-                     'current_local_connection','2026-08-01T00:00:00.000Z'),
-                    ('a2a-v32-envelope:consumed:3','a2a-v32-envelope',3,'consumed',
-                     'a2a-v32-recipient','a2a-v32-recipient-admission','self_asserted','same_host',
-                     'current_local_connection','2026-08-02T00:00:00.000Z');",
-        )
-        .expect("seed v31 row and receipts");
-        run_data_migrations_with_profile(&mut conn, "global", tmp.path(), StoreProfile::TachiFull)
-            .expect("v31 fixture must migrate");
-
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        let body: Option<String> = conn
-            .query_row(
-                "SELECT body FROM a2a_envelopes WHERE envelope_id='a2a-v32-envelope'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(body.as_deref(), Some("immutable body"));
-        let receipt_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM a2a_delivery_receipts WHERE envelope_id='a2a-v32-envelope'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(receipt_count, 2);
-    }
-
-    #[test]
-    fn v1_normalizes_legacy_paths() {
-        let (mut conn, tmp) = open_test_db();
-        insert_row(&conn, "a", "/Wiki//foo//", "general", "{}");
-        insert_row(&conn, "b", "wiki/Bar", "general", "{}");
-        insert_row(&conn, "c", "/handoff/agent", "general", "{}");
-
-        let report = run_data_migrations(&mut conn, "wiki", tmp.path()).unwrap();
-        assert_eq!(report.paths_normalized, 2);
-
-        let pa: String = conn
-            .query_row("SELECT path FROM memories WHERE id='a'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(pa, "/wiki/foo");
-        let pb: String = conn
-            .query_row("SELECT path FROM memories WHERE id='b'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(pb, "/wiki/Bar");
-
-        // Idempotent on second run.
-        let report2 = run_data_migrations(&mut conn, "wiki", tmp.path()).unwrap();
-        assert_eq!(report2.paths_normalized, 0);
-    }
-
-    #[test]
-    fn v3_standardizes_bare_handoff() {
-        let (mut conn, tmp) = open_test_db();
-        // PR-1 migration runs on init_schema; it normalizes scope. We insert
-        // POST-migration so we satisfy CHECK constraints.
-        insert_row(&conn, "h1", "/handoff", "general", "{}");
-        insert_row(&conn, "h2", "/handoff/agent-x", "general", "{}");
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.handoff_paths_standardized, 1);
-        let p1: String = conn
-            .query_row("SELECT path FROM memories WHERE id='h1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(p1, "/handoff/unknown");
-    }
-
-    #[test]
-    fn v4_quarantines_cross_db_rows() {
-        let (mut conn, tmp) = open_test_db();
-        // Row whose provenance.db_path points elsewhere → quarantined.
-        let other_meta = serde_json::json!({
-            "provenance": { "db_path": "/some/other/db.sqlite" }
-        })
-        .to_string();
-        insert_row(&conn, "x", "/hapi/foo", "general", &other_meta);
-        // Row with provenance pointing at this DB → kept.
-        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
-        let self_meta = serde_json::json!({
-            "provenance": { "db_path": canonical.display().to_string() }
-        })
-        .to_string();
-        insert_row(&conn, "y", "/hapi/bar", "general", &self_meta);
-        // Pad with extra clean rows so the bad row is <50% of total.
-        for i in 0..5 {
-            insert_row(&conn, &format!("z{i}"), "/hapi/clean", "general", "{}");
-        }
-
-        let report = run_data_migrations(&mut conn, "hapi", tmp.path()).unwrap();
-        assert_eq!(report.quarantined, 1);
-        assert!(!report.quarantine_skipped_sanity_guard);
-
-        let px: String = conn
-            .query_row("SELECT path FROM memories WHERE id='x'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(px, "/_quarantine/cross-db/hapi/foo");
-        let qmeta: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='x'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&qmeta).unwrap();
-        assert_eq!(v["quarantine"]["reason"], "cross_db_pollution");
-        assert_eq!(v["quarantine"]["original_path"], "/hapi/foo");
-    }
-
-    #[test]
-    fn v4_sanity_guard_aborts_when_majority_would_move() {
-        let (mut conn, tmp) = open_test_db();
-        let bad_meta = serde_json::json!({
-            "provenance": { "db_path": "/elsewhere.db" }
-        })
-        .to_string();
-        // 3 polluted rows, 1 clean → would move 75% → guard aborts.
-        for i in 0..3 {
-            insert_row(&conn, &format!("p{i}"), "/proj/foo", "general", &bad_meta);
-        }
-        insert_row(&conn, "ok", "/proj/clean", "general", "{}");
-        let report = run_data_migrations(&mut conn, "proj", tmp.path()).unwrap();
-        assert_eq!(report.quarantined, 0);
-        assert!(report.quarantine_skipped_sanity_guard);
-        // Migration is still marked run so we don't retry every startup.
-        assert!(was_run(&conn, "v4_quarantine_cross_db_rows").unwrap());
-    }
-
-    #[test]
-    fn v12_dedupes_pre_v21_legacy_db_via_standalone_run_data_migrations() {
-        // #1289 Claim5, end-to-end through the PUBLIC entry point: the
-        // standalone `run_data_migrations` path (NOT `init_schema_inner`, which
-        // pre-ensures `mode`) runs v12 BEFORE v21 adds `session_claims.mode`.
-        // On a legacy DB carrying duplicate active claims, v12's dedup must not
-        // reference `mode` or it crashes with `no such column: mode`, rolling
-        // the whole migration back. We reconstruct that on-disk state by
-        // downgrading a freshly-inited DB to its pre-v21 shape — drop the
-        // mode-scoped identity index, drop the `mode` column, and clear the
-        // v12/v21 sentinels so both replay — then re-drive the public entry.
-        let (mut conn, tmp) = open_test_db();
-
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_session_claims_identity_active;
-             ALTER TABLE session_claims DROP COLUMN mode;",
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM hard_state WHERE namespace = 'migrations' \
-             AND key IN ('v12_session_claims_unique_identity', \
-                         'v21_identity_workclaim_spine')",
-            [],
-        )
-        .unwrap();
-        assert!(
-            !table_has_column(&conn, "session_claims", "mode").unwrap(),
-            "fixture precondition: the mode column must be absent (pre-v21 shape)"
-        );
-
-        // Two duplicate active claims for one identity; the index is gone so the
-        // mode-less inserts are not blocked.
-        for (id, hb) in [
-            ("old-dup", "2026-07-11T00:00:00Z"),
-            ("new-dup", "2026-07-11T00:10:00Z"),
-        ] {
-            conn.execute(
-                "INSERT INTO session_claims
-                 (claim_id, session_client, issue_ref, flow_id, branch, state, created_at, heartbeat_at)
-                 VALUES (?1, 'claude-code', 'org/repo#1289', 'flow-1', 'feat/x', 'active', ?2, ?2)",
-                params![id, hb],
-            )
-            .unwrap();
-        }
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).expect(
-            "standalone run_data_migrations must not crash on a pre-v21 legacy DB (#1289 Claim5)",
-        );
-        assert_eq!(
-            report.session_claims_duplicates_deduped, 1,
-            "v12 must release exactly the older modeless duplicate"
-        );
-
-        // Convergence: v21 re-added `mode` and rebuilt the mode-scoped index; the
-        // newest heartbeat survived active, the older is released.
-        assert!(
-            table_has_column(&conn, "session_claims", "mode").unwrap(),
-            "v21 must re-add the mode column after v12"
-        );
-        let old_state: String = conn
-            .query_row(
-                "SELECT state FROM session_claims WHERE claim_id = 'old-dup'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(old_state, "released");
-        let new_state: String = conn
-            .query_row(
-                "SELECT state FROM session_claims WHERE claim_id = 'new-dup'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(new_state, "active");
-        let idx: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
-                 AND name='idx_session_claims_identity_active'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            idx, 1,
-            "the identity index must be rebuilt after convergence"
-        );
-    }
-
-    #[test]
-    fn v7_reconciles_indexed_tags_after_v5_sentinel() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                keywords TEXT NOT NULL DEFAULT '[]',
-                indexed_tags TEXT NOT NULL DEFAULT '[]',
-                entities TEXT NOT NULL DEFAULT '[]',
-                domain TEXT,
-                domain_key TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE hard_state (
-                namespace TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value_json TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (namespace, key)
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, keywords, indexed_tags, entities) VALUES ('m1', '[]', '[\"rust\"]', '[]')",
-            [],
-        )
-        .unwrap();
-        mark_run(&conn, "v5_drop_hypertachi_legacy_columns").unwrap();
-
-        let actions = migrate_v7_reconcile_legacy_memory_columns(&conn).unwrap();
-        assert!(actions > 0);
-        assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
-        assert!(!table_has_column(&conn, "memories", "persons").unwrap());
-
-        let keywords: String = conn
-            .query_row("SELECT keywords FROM memories WHERE id='m1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert!(keywords.contains("rust"));
-    }
-
-    #[test]
-    fn v6_folds_persons_into_entities() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                persons TEXT NOT NULL DEFAULT '[]',
-                entities TEXT NOT NULL DEFAULT '[]'
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, persons, entities) VALUES (?1, ?2, ?3)",
-            params!["m1", r#"["Kyle"]"#, r#"["Sigil"]"#],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, persons, entities) VALUES ('m2', '[]', '[]')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, persons, entities) VALUES (?1, ?2, ?3)",
-            params!["m3", r#"["sigil"]"#, r#"["Sigil"]"#],
-        )
-        .unwrap();
-
-        let folded = migrate_v6_fold_persons_into_entities(&conn).unwrap();
-        assert_eq!(folded, 2);
-
-        let (persons, entities): (String, String) = conn
-            .query_row(
-                "SELECT persons, entities FROM memories WHERE id='m1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(persons, "[]");
-        let ents: Vec<String> = serde_json::from_str(&entities).unwrap();
-        assert!(ents.iter().any(|e| e == "Kyle"));
-        assert!(ents.iter().any(|e| e == "user"));
-        assert!(ents.iter().any(|e| e == "Sigil"));
-
-        let duplicate_persons: String = conn
-            .query_row("SELECT persons FROM memories WHERE id='m3'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(duplicate_persons, "[]");
-    }
-
-    #[test]
-    fn v5_drops_hypertachi_legacy_columns() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                indexed_tags TEXT NOT NULL DEFAULT '[]',
-                domain_key TEXT NOT NULL DEFAULT ''
-            );",
-        )
-        .unwrap();
-        let dropped = migrate_v5_drop_hypertachi_legacy_columns(&conn).unwrap();
-        assert_eq!(dropped, 2);
-        assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
-        assert!(!table_has_column(&conn, "memories", "domain_key").unwrap());
-        assert_eq!(migrate_v5_drop_hypertachi_legacy_columns(&conn).unwrap(), 0);
-    }
-
-    #[test]
-    fn v9_relocates_path_like_location_and_drops_column() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL DEFAULT '/',
-                location TEXT NOT NULL DEFAULT '',
-                metadata TEXT NOT NULL DEFAULT '{}'
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params!["m1", "/", "/scratch/hyperion", "{}"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params!["m2", "/notes/x", "/code-review/sigil", "{}"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params!["m3", "/facts/y", "Shanghai", "{}"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params!["m4", "/facts/z", "Paris", r#"["legacy"]"#],
-        )
-        .unwrap();
-
-        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(&conn).unwrap();
-        assert_eq!(relocated, 4);
-        assert_eq!(dropped, 1);
-        assert!(!table_has_column(&conn, "memories", "location").unwrap());
-
-        let path: String = conn
-            .query_row("SELECT path FROM memories WHERE id='m1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(path, "/scratch/hyperion");
-
-        let metadata: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='m2'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-        assert_eq!(meta["context_path"], "/code-review/sigil");
-
-        let metadata: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='m3'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-        assert_eq!(meta["geo"], "Shanghai");
-
-        let metadata: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='m4'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-        assert_eq!(meta["geo"], "Paris");
-        assert_eq!(meta["legacy_metadata"], json!(["legacy"]));
-    }
-
-    #[test]
-    fn v9_relocates_many_location_rows_in_batches() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL DEFAULT '/',
-                location TEXT NOT NULL DEFAULT '',
-                metadata TEXT NOT NULL DEFAULT '{}'
-            );",
-        )
-        .unwrap();
-
-        let batch = conn.transaction().unwrap();
-        {
-            let mut stmt = batch
-                .prepare(
-                    "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, '{}')",
-                )
-                .unwrap();
-            for i in 0..1200 {
-                let id = format!("row-{i:04}");
-                stmt.execute(params![id, "/", format!("/scratch/batch-{i}")])
-                    .unwrap();
-            }
-        }
-        batch.commit().unwrap();
-
-        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(&conn).unwrap();
-        assert_eq!(relocated, 1200);
-        assert_eq!(dropped, 1);
-        assert!(!table_has_column(&conn, "memories", "location").unwrap());
-
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE trim(path) = '/'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining, 0);
-    }
-
-    #[test]
-    fn v9_relocate_location_rows_handles_empty_batch() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL DEFAULT '/',
-                location TEXT NOT NULL DEFAULT '',
-                metadata TEXT NOT NULL DEFAULT '{}'
-            );",
-        )
-        .unwrap();
-
-        let relocated = relocate_location_rows(&conn).unwrap();
-        assert_eq!(relocated, 0);
-    }
-
-    fn table_present(conn: &Connection, name: &str) -> bool {
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                rusqlite::params![name],
-                |row| row.get(0),
-            )
-            .unwrap();
-        n > 0
-    }
-
-    #[test]
-    fn v10_drops_legacy_pack_tables() {
-        let (mut conn, tmp) = open_test_db();
-        // init_schema no longer creates the pack tables; emulate a legacy DB
-        // that still carries them by creating them manually.
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, name TEXT);
-             CREATE TABLE IF NOT EXISTS agent_projections (agent TEXT, pack_id TEXT);",
-        )
-        .unwrap();
-        assert!(table_present(&conn, "packs"));
-        assert!(table_present(&conn, "agent_projections"));
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.pack_tables_dropped, 2);
-        assert!(!table_present(&conn, "packs"));
-        assert!(!table_present(&conn, "agent_projections"));
-
-        // Idempotent: re-running is a no-op (sentinel guards it).
-        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report2.pack_tables_dropped, 0);
-    }
-
-    #[test]
-    fn v10_is_a_noop_on_db_without_pack_tables() {
-        let (mut conn, tmp) = open_test_db();
-        assert!(!table_present(&conn, "packs"));
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.pack_tables_dropped, 0);
-        assert!(!table_present(&conn, "packs"));
-    }
-
-    #[test]
-    fn v11_drops_legacy_domains_table() {
-        let (mut conn, tmp) = open_test_db();
-        // init_schema no longer creates the `domains` registry table; emulate
-        // a legacy DB that still carries it (and a row) by creating it
-        // manually.
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS domains (
-                name TEXT PRIMARY KEY,
-                description TEXT NOT NULL DEFAULT ''
-            );
-            INSERT INTO domains (name, description) VALUES ('legacy', 'old registry row');",
-        )
-        .unwrap();
-        assert!(table_present(&conn, "domains"));
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.domains_table_dropped, 1);
-        assert!(!table_present(&conn, "domains"));
-
-        // The live free-text `memories.domain` column is untouched.
-        assert!(table_has_column(&conn, "memories", "domain").unwrap());
-
-        // Idempotent: re-running is a no-op (sentinel guards it).
-        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report2.domains_table_dropped, 0);
-    }
-
-    #[test]
-    fn v11_is_a_noop_on_db_without_domains_table() {
-        let (mut conn, tmp) = open_test_db();
-        assert!(!table_present(&conn, "domains"));
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.domains_table_dropped, 0);
-        assert!(!table_present(&conn, "domains"));
-    }
-
-    #[test]
-    fn v13_adds_hard_state_namespace_updated_index() {
-        let (mut conn, tmp) = open_test_db();
-        // #1289 ruling A: `init_schema`'s product IS the complete current
-        // schema, so a freshly built DB already carries this index (it now
-        // lives in ddl.rs's MIGRATED_INDEXES_SQL, not only in the v13 sentinel
-        // migration). The v13 migration is therefore an idempotent no-op on a
-        // fresh DB and only does real creation work on a legacy DB predating
-        // the index — exercised explicitly at the end of this test.
-        assert!(
-            index_present(&conn, "idx_hard_state_ns_updated"),
-            "init_schema must carry idx_hard_state_ns_updated (#1289 ruling A)"
-        );
-
-        // init_schema runs DDL only, not run_data_migrations, so the v13
-        // sentinel is unset and the migration still runs — as an
-        // IF NOT EXISTS no-op — reporting it ran once. The index stays.
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.hard_state_index_added, 1);
-        assert!(index_present(&conn, "idx_hard_state_ns_updated"));
-
-        // The query plan for list_state's WHERE+ORDER BY now uses the new
-        // index instead of falling back to a temp B-tree sort.
-        let plan = query_plan(
-            &conn,
-            "SELECT key, value_json, version, updated_at FROM hard_state \
-             WHERE namespace = 'orchestrator' ORDER BY updated_at DESC, key ASC",
-        );
-        assert!(
-            plan.iter()
-                .any(|line| line.contains("idx_hard_state_ns_updated")),
-            "expected plan to use idx_hard_state_ns_updated, got: {plan:?}"
-        );
-        // The index provides updated_at DESC order directly, so SQLite no
-        // longer needs a full sort of the result set — at most a tiny
-        // "LAST TERM OF ORDER BY" tie-break sort among rows sharing the same
-        // updated_at (the secondary `key ASC` term). A full/bare
-        // "USE TEMP B-TREE FOR ORDER BY" (sorting on every term) would mean
-        // the index isn't actually satisfying the primary sort key.
-        assert!(
-            !plan
-                .iter()
-                .any(|line| line == "USE TEMP B-TREE FOR ORDER BY"),
-            "expected no full temp B-tree sort once indexed, got: {plan:?}"
-        );
-
-        // Idempotent: re-running is a no-op (sentinel guards it), index stays.
-        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report2.hard_state_index_added, 0);
-        assert!(index_present(&conn, "idx_hard_state_ns_updated"));
-
-        // v13's creation behavior on a GENUINELY pre-v13 legacy DB, through the
-        // REAL sentinel-gated `run_data_migrations` path — NOT the migration
-        // helper in isolation (#1289 Claim4). Calling the helper directly proves
-        // only its `CREATE INDEX IF NOT EXISTS`; it bypasses the sentinel gate,
-        // so it never shows that the migration, as invoked in production, fires
-        // on an index-absent DB. And `hard_state_index_added == 1` above is not
-        // creation evidence: `migrate_v13_add_hard_state_index` returns a
-        // constant 1 whenever it runs, and there the index already existed.
-        //
-        // Reconstruct the real pre-v13 state — index absent AND v13 sentinel
-        // unset — then drive the public entry. Only if the gate actually re-runs
-        // v13 does the index reappear.
-        conn.execute_batch("DROP INDEX IF EXISTS idx_hard_state_ns_updated;")
-            .unwrap();
-        conn.execute(
-            "DELETE FROM hard_state WHERE namespace = 'migrations' \
-             AND key = 'v13_hard_state_ns_updated_index'",
-            [],
-        )
-        .unwrap();
-        write_schema_version(&conn, 12).unwrap();
-        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
-        assert!(
-            !was_run(&conn, "v13_hard_state_ns_updated_index").unwrap(),
-            "fixture precondition: v13 sentinel cleared so the gate re-runs it"
-        );
-
-        let report3 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(
-            report3.hard_state_index_added, 1,
-            "the sentinel-gated v13 migration must fire on a pre-v13 (index-absent) DB"
-        );
-        assert!(
-            index_present(&conn, "idx_hard_state_ns_updated"),
-            "v13 must create the index on a legacy DB that lacks it"
-        );
-    }
-
-    fn index_present(conn: &Connection, name: &str) -> bool {
-        conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
-            params![name],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false)
-    }
-
-    fn trigger_present(conn: &Connection, name: &str) -> bool {
-        conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name = ?1",
-            params![name],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false)
-    }
-
-    fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
-        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-        let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
-        rows.collect::<Result<Vec<_>, _>>().unwrap()
-    }
-
-    // --- #984: schema version stamp / hard-fail gate ---------------------
 
     #[test]
     fn schema_version_gate_errors_on_db_stamped_newer_than_supported() {
@@ -1623,6 +566,86 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_gate_and_all_open_doors_refuse_pre_baseline_versions() {
+        for legacy_version in [1_u32, 22, 28, 36, 38] {
+            let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+            let path = tmp.path().to_path_buf();
+            let path_str = path.to_str().expect("utf8 path");
+            {
+                let store =
+                    crate::MemoryStore::open_with_context(path_str, &DbOpenContext::create_fresh())
+                        .expect("provision fixture");
+                drop(store);
+                let conn = Connection::open(&path).expect("open offline");
+                write_schema_version(&conn, legacy_version).unwrap();
+            }
+            let before = std::fs::read(&path).unwrap();
+
+            let conn = Connection::open(&path).unwrap();
+            let err = check_schema_version_gate(&conn)
+                .expect_err("pre-baseline version must fail closed");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("db schema version {legacy_version} is below minimum supported baseline {BASELINE_SCHEMA_VERSION}"))
+                    && msg.contains("archived binary"),
+                "pre-baseline error must guide operator to bridge via archived binary: {msg}"
+            );
+            drop(conn);
+
+            for ctx in [
+                DbOpenContext::open_existing_deny(),
+                DbOpenContext::open_existing_allow("test:pre-baseline-refusal"),
+                DbOpenContext::create_fresh(),
+            ] {
+                let err = match crate::MemoryStore::open_with_context(path_str, &ctx) {
+                    Ok(_) => panic!("open_with_context must refuse v{legacy_version}"),
+                    Err(err) => err,
+                };
+                assert!(
+                    err.to_string().contains("archived binary"),
+                    "open_with_context refusal for v{legacy_version}: {err}"
+                );
+            }
+
+            let ro_err = match crate::MemoryStore::open_read_only(path_str) {
+                Ok(_) => panic!("open_read_only must refuse v{legacy_version}"),
+                Err(err) => err,
+            };
+            assert!(
+                ro_err.to_string().contains("archived binary"),
+                "open_read_only refusal for v{legacy_version}: {ro_err}"
+            );
+
+            let rw_err = match crate::MemoryStore::open_existing_read_write(path_str) {
+                Ok(_) => panic!("open_existing_read_write must refuse v{legacy_version}"),
+                Err(err) => err,
+            };
+            assert!(
+                rw_err.to_string().contains("archived binary"),
+                "open_existing_read_write refusal for v{legacy_version}: {rw_err}"
+            );
+
+            assert!(matches!(
+                crate::store_version_status(&path, StoreProfile::default().into()),
+                crate::StoreVersionStatus::Refused(MemoryError::InvalidArg(ref m))
+                    if m.contains("archived binary")
+            ));
+
+            let mut mut_conn = Connection::open(&path).unwrap();
+            let mig_err = run_data_migrations(&mut mut_conn, "global", &path)
+                .expect_err("run_data_migrations must refuse pre-baseline");
+            assert!(mig_err.to_string().contains("archived binary"));
+            drop(mut_conn);
+
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "refused pre-baseline open must leave v{legacy_version} bytes untouched"
+            );
+        }
+    }
+
+    #[test]
     fn fresh_db_migrates_and_ends_stamped_at_expected_version() {
         let (mut conn, tmp) = open_test_db();
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
@@ -1633,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn private_fresh_init_installs_v25_through_v35_migrations_once() {
+    fn fresh_init_installs_baseline_and_v39_through_v43_sentinels_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1649,243 +672,96 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(sentinel_version("v25_recall_impression_ledger"), 1);
-        assert_eq!(sentinel_version("v26_recall_impression_replay_identity"), 1);
-        assert_eq!(sentinel_version("v27_typo_fallback_attribution"), 1);
-        assert_eq!(sentinel_version("v28_wiki_recovery_ledgers"), 1);
-        assert_eq!(sentinel_version("v29_memory_outbox"), 1);
-        assert_eq!(sentinel_version("v30_memory_outbox_destination_apply"), 1);
-        assert_eq!(sentinel_version("v31_a2a_mailbox"), 1);
-        assert_eq!(sentinel_version("v32_a2a_body_retention"), 1);
-        assert_eq!(sentinel_version("v33_harness_session_attachments"), 1);
-        assert_eq!(sentinel_version("v34_harness_session_spine"), 1);
-        assert_eq!(sentinel_version("v35_harness_session_spine_receipts"), 1);
+        for key in MIGRATION_SENTINEL_KEYS {
+            assert_eq!(sentinel_version(key), 1, "sentinel {key} must be written");
+        }
         crate::db::schema::validate_recall_impression_ledger_schema(&conn).unwrap();
         crate::db::schema::validate_typo_fallback_attribution_schema(&conn).unwrap();
         crate::db::schema::validate_wiki_recovery_ledgers_schema(&conn).unwrap();
         crate::db::schema::validate_memory_outbox_schema(&conn).unwrap();
         crate::db::schema::validate_memory_outbox_destination_apply_schema(&conn).unwrap();
+        crate::db::schema::validate_harness_session_attachments_schema(&conn).unwrap();
+        crate::db::schema::validate_harness_session_spine_schema(&conn).unwrap();
+        crate::db::schema::validate_delivery_spine_schema(&conn).unwrap();
         crate::db::schema::validate_a2a_mailbox_schema(&conn).unwrap();
+        crate::db::schema::validate_mirror_eval_identity_schema(&conn).unwrap();
+        crate::db::verified_admissions::validate_verified_admission_schema(&conn).unwrap();
+        crate::db::schema::validate_current_truth_schema(&conn).unwrap();
+        crate::db::adjudication_provenance::validate_adjudication_provenance_schema(&conn).unwrap();
 
-        init_schema(&conn).expect("valid current private schema reopens idempotently");
-        assert_eq!(
-            sentinel_version("v25_recall_impression_ledger"),
-            1,
-            "v25 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v26_recall_impression_replay_identity"),
-            1,
-            "v26 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v27_typo_fallback_attribution"),
-            1,
-            "v27 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v28_wiki_recovery_ledgers"),
-            1,
-            "v28 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v29_memory_outbox"),
-            1,
-            "v29 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v30_memory_outbox_destination_apply"),
-            1,
-            "v30 migration must run once"
-        );
-        assert_eq!(
-            sentinel_version("v31_a2a_mailbox"),
-            1,
-            "v31 migration must run once"
-        );
+        init_schema(&conn).expect("valid current schema reopens idempotently");
+        for key in MIGRATION_SENTINEL_KEYS {
+            assert_eq!(sentinel_version(key), 1, "{key} must run once");
+        }
     }
 
     #[test]
     fn older_stamped_db_migrates_forward_and_re_stamps() {
         let (mut conn, tmp) = open_test_db();
-        // A DB with an explicit older-than-current stamp (but no legacy data
-        // and no sentinels — see `unstamped_db_with_existing_sentinels_skips_and_restamps`
-        // below for the genuine "already migrated by an older kernel" case)
-        // must still migrate forward (no-op, nothing to touch) and re-stamp.
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
 
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
 
-        // No legacy tables/rows to touch on a freshly-initialized DB, so the
-        // report is all-zero; the assertion under test is the re-stamp.
-        assert_eq!(report.domains_table_dropped, 0);
+        assert_eq!(report.mirror_eval_identity_columns_added, 0);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
     }
 
     #[test]
-    fn stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history() {
-        let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
-        conn.execute_batch(
-            "DROP TABLE current_truth_assertions;
-             DROP TABLE current_truth_projection;
-             DROP TABLE current_truth_refresh;
-             DROP TABLE identity_admission_verification_revocations;
-             DROP TABLE identity_admission_verification_receipts;
-             DROP INDEX idx_identity_admissions_verified_binding;
-             DROP TRIGGER identity_verified_admissions_no_replace;
-             DROP TRIGGER identity_verified_admissions_no_update;
-             DROP TRIGGER identity_verified_admissions_no_delete;
-             DELETE FROM hard_state
-              WHERE namespace = 'migrations' AND key IN ('v37_verified_agent_admissions', 'v38_current_truth');
-             INSERT INTO agent_identities (agent_identity_id, display_name, created_at)
-              VALUES ('agent-before-v37', 'legacy self assertion', '2026-09-18T00:00:00Z');
-             INSERT INTO identity_admissions
-              (admission_id, agent_identity_id, connection_id, state, created_at)
-              VALUES ('admission-before-v37', 'agent-before-v37', 'connection-before-v37',
-                      'self_asserted', '2026-09-18T00:00:00Z');",
-        )
-        .unwrap();
-        write_schema_version(&conn, 36).unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path())
-            .expect("a stamped v36 database must receive v37");
-
-        assert_eq!(report.verified_admission_schema_objects_created, 14);
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        let preserved: (String, String, String) = conn
-            .query_row(
-                "SELECT admission_id, state, created_at FROM identity_admissions
-                 WHERE agent_identity_id = 'agent-before-v37'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+    fn v39_to_current_upgrades_cleanly_preserving_data() {
+        let v39_dir = tempfile::tempdir().unwrap();
+        let v39_path = v39_dir.path().join("v39.db");
+        let v39_str = v39_path.to_str().unwrap();
+        catalogue::test_support::with_prefix(39, || {
+            let mut store =
+                crate::MemoryStore::open_with_context(v39_str, &DbOpenContext::create_fresh())
+                    .unwrap();
+            let entry: crate::MemoryEntry = serde_json::from_value(serde_json::json!({
+                "id": "v39-note",
+                "text": "preserved across v39 to v43",
+                "timestamp": "2026-10-01T00:00:00Z"
+            }))
             .unwrap();
-        assert_eq!(
-            preserved,
-            (
-                "admission-before-v37".to_string(),
-                "self_asserted".to_string(),
-                "2026-09-18T00:00:00Z".to_string(),
-            )
+            store.upsert(&entry).unwrap();
+            assert_eq!(read_schema_version(store.connection()).unwrap(), 39);
+        });
+
+        let denied = crate::MemoryStore::open_with_context(
+            v39_str,
+            &DbOpenContext::open_existing_deny(),
         );
-        assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
-        assert_eq!(report.current_truth_schema_objects_created, 5);
-        assert!(was_run(&conn, "v38_current_truth").unwrap());
-        crate::db::schema::validate_current_truth_schema(&conn).unwrap();
-        validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
-    }
+        assert!(matches!(
+            denied,
+            Err(MemoryError::SchemaMigrationOptInRequired {
+                stored: 39,
+                expected,
+                ..
+            }) if expected == EXPECTED_SCHEMA_VERSION
+        ));
 
-    #[cfg(feature = "admin")]
-    #[test]
-    fn stamped_v38_product_adds_mirror_identity_without_backfilling_history() {
-        let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        let run = crate::db::mirror_eval::register_mirror_eval_run(
-            &conn,
-            &crate::db::mirror_eval::NewMirrorEvalRun {
-                frozen_contract_ref: "legacy-v38".into(),
-                execution_origin: "host_native_subagent".into(),
-                lifecycle_owner: "host".into(),
-                native_child_id: Some("legacy-v38-child".into()),
-                ..Default::default()
-            },
+        let upgraded = crate::MemoryStore::open_with_context(
+            v39_str,
+            &DbOpenContext::open_existing_allow("test:v39-to-current"),
         )
-        .unwrap();
-        conn.execute_batch(
-            "ALTER TABLE mirror_eval_runs DROP COLUMN requested_task_type;
-             ALTER TABLE mirror_eval_runs DROP COLUMN requested_role;
-             ALTER TABLE mirror_eval_observations DROP COLUMN effective_role;
-             ALTER TABLE mirror_eval_observations DROP COLUMN effective_model_revision;
-             DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity';
-             PRAGMA user_version=38;",
-        )
-        .unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report.mirror_eval_identity_columns_added, 4);
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        assert!(was_run(&conn, "v39_mirror_eval_identity").unwrap());
-        let row = crate::db::mirror_eval::get_run_by_id(&conn, &run.eval_run_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.requested_task_type, None);
-        assert_eq!(row.requested_role, None);
-        validate_current_schema_integrity(&conn).unwrap();
-    }
-
-    #[test]
-    fn stamped_v30_db_migrates_the_v33_attachment_ledger_before_restamping() {
-        let (mut conn, tmp) = open_test_db();
-        write_schema_version(&conn, 30).unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path())
-            .expect("a stamped v30 database must receive v33");
-
-        assert_eq!(report.harness_session_attachments_schema_objects_created, 3);
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        assert!(table_exists(&conn, "harness_session_attachments").unwrap());
-        assert!(was_run(&conn, "v33_harness_session_attachments").unwrap());
-        validate_current_schema_integrity(&conn).expect("the completed v33 shape is valid");
-    }
-
-    #[test]
-    fn stamped_v33_db_receives_the_v34_spine_before_restamping() {
-        let (mut conn, tmp) = open_test_db();
-        write_schema_version(&conn, 33).unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path())
-            .expect("a stamped v33 database must receive v34");
-
-        assert_eq!(report.harness_session_spine_schema_objects_created, 7);
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        for table in [
-            "harness_session_events",
-            "harness_session_state",
-            "harness_session_interventions",
-            "harness_session_intervention_results",
-            "harness_session_capability_advertisements",
-        ] {
-            assert!(table_exists(&conn, table).unwrap(), "{table} missing");
-        }
-        assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
-        validate_current_schema_integrity(&conn).expect("the completed v34 shape is valid");
-    }
-
-    #[test]
-    fn shipped_v34_database_reopens_through_v35_receipt_rebuild() {
-        let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("build current fixture");
-        harness_session_events::install_shipped_v34_receipt_tables_for_test(&conn);
-        conn.execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-            params![MIGRATION_NS, "v35_harness_session_spine_receipts"],
-        )
-        .unwrap();
-        write_schema_version(&conn, 34).unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path())
-            .expect("the shipped v34 database must upgrade and reopen");
-
-        assert_eq!(report.harness_session_spine_receipt_tables_rebuilt, 2);
-        // v36/v37/v38 are already current in this fixture: their sentinels
-        // survive, so the reopen re-runs only the v35 rebuild.
-        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-        assert!(was_run(&conn, "v34_harness_session_spine").unwrap());
-        assert!(was_run(&conn, "v35_harness_session_spine_receipts").unwrap());
-        assert!(was_run(&conn, "v36_delivery_spine").unwrap());
-        assert!(was_run(&conn, "v37_verified_agent_admissions").unwrap());
-        assert_eq!(report.delivery_spine_schema_objects_created, 0);
-        assert_eq!(report.verified_admission_schema_objects_created, 0);
-        assert!(was_run(&conn, "v38_current_truth").unwrap());
-        assert_eq!(report.current_truth_schema_objects_created, 0);
-        validate_current_schema_integrity(&conn).expect("the completed v35 shape is valid");
+        .expect("Allow must upgrade v39 -> current");
+        assert_eq!(
+            read_schema_version(upgraded.connection()).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
+        assert_eq!(
+            upgraded.get("v39-note").unwrap().unwrap().text,
+            "preserved across v39 to v43"
+        );
+        assert!(table_has_column(
+            upgraded.connection(),
+            "session_claims",
+            "canonical_project"
+        ));
     }
 
     #[test]
     fn stamped_current_v33_missing_attachment_index_fails_closed_without_repair() {
         let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v33 fixture");
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("current fixture");
         conn.execute("DROP INDEX idx_harness_session_attachments_claim", [])
             .unwrap();
 
@@ -1903,7 +779,7 @@ mod tests {
     #[test]
     fn stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair() {
         let (mut conn, tmp) = open_test_db();
-        run_data_migrations(&mut conn, "global", tmp.path()).expect("current v37 fixture");
+        run_data_migrations(&mut conn, "global", tmp.path()).expect("current fixture");
         conn.execute("DROP TRIGGER identity_verification_receipts_no_update", [])
             .unwrap();
 
@@ -1919,61 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn v19_open_pipeline_preserves_legacy_duplicates_and_adds_identity_constraint() {
-        let (conn, tmp) = open_test_db();
-        conn.execute_batch(
-            "DROP INDEX idx_memories_idless_identity_active;
-             ALTER TABLE memories DROP COLUMN idless_identity;
-             INSERT INTO memories (id, path, text, timestamp)
-             VALUES
-                 ('legacy-idless-a', '/legacy/duplicate', 'same legacy text', '2026-07-16T00:00:00Z'),
-                 ('legacy-idless-b', '/legacy/duplicate', 'same legacy text', '2026-07-16T00:00:00Z');",
-        )
-        .unwrap();
-        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
-        drop(conn);
-
-        let path = tmp.path().to_str().unwrap();
-        let ctx = DbOpenContext::open_existing_allow("test:#1115");
-        let store = crate::MemoryStore::open_with_context(path, &ctx).unwrap();
-
-        assert_eq!(
-            read_schema_version(store.connection()).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(
-            table_has_column(store.connection(), "memories", "idless_identity").unwrap(),
-            "the v19 open pipeline must add the modern identity column"
-        );
-        assert!(
-            index_present(store.connection(), "idx_memories_idless_identity_active"),
-            "the v19 open pipeline must add the modern identity constraint"
-        );
-        let legacy_rows: i64 = store
-            .connection()
-            .query_row(
-                "SELECT COUNT(*) FROM memories
-                 WHERE path = '/legacy/duplicate'
-                   AND text = 'same legacy text'
-                   AND idless_identity IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            legacy_rows, 2,
-            "migration must leave legacy duplicates untouched"
-        );
-    }
-
-    /// #984 F3(a): a genuine fixture for "DB last migrated by an older
-    /// kernel" — sentinel rows actually exist (inserted directly via
-    /// `mark_run`, the same mechanism the migrations themselves use) for
-    /// every migration, and the version stamp is left at 0 (as it would be
-    /// for any real DB written before #984 introduced the stamp). Unlike
-    /// `older_stamped_db_migrates_forward_and_re_stamps`, this proves the
-    /// sentinel-skip path itself, not just "nothing to migrate on a fresh DB".
-    #[test]
     fn unstamped_db_with_existing_sentinels_skips_and_restamps() {
         let (mut conn, tmp) = open_test_db();
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
@@ -1984,26 +805,8 @@ mod tests {
         }
 
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-
-        // Every migration was already marked run, so every counted field is
-        // zero — the sentinels actually skipped the work, not "there was no
-        // work regardless".
-        assert_eq!(report.paths_normalized, 0);
-        assert_eq!(report.scopes_fixed, 0);
-        assert_eq!(report.handoff_paths_standardized, 0);
-        assert_eq!(report.quarantined, 0);
-        assert_eq!(report.hypertachi_legacy_columns_dropped, 0);
-        assert_eq!(report.persons_folded_into_entities, 0);
-        assert_eq!(report.legacy_columns_reconciled, 0);
-        assert_eq!(report.persons_columns_dropped, 0);
-        assert_eq!(report.locations_relocated, 0);
-        assert_eq!(report.location_columns_dropped, 0);
-        assert_eq!(report.pack_tables_dropped, 0);
-        assert_eq!(report.domains_table_dropped, 0);
-        assert_eq!(report.session_claims_duplicates_deduped, 0);
-
-        // Sentinels skipped the data work, but the version stamp — which is
-        // independent of the sentinel mechanism — still advances.
+        assert_eq!(report.mirror_eval_identity_columns_added, 0);
+        assert_eq!(report.identity_workclaim_columns_added, 0);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
     }
 
@@ -2012,12 +815,11 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 5).unwrap();
 
-        // init_schema_with_label_mut (the real entry point) must refuse too.
         let result = crate::db::init_schema_with_label_mut(
             &mut conn,
             "global",
             tmp.path(),
-            &crate::db::DbOpenContext::create_fresh(),
+            &DbOpenContext::create_fresh(),
         );
         assert!(
             result.is_err(),
@@ -2026,8 +828,6 @@ mod tests {
     }
 
     // --- #1119: typed DbOpenContext migration gate ------------------------
-
-    use crate::db::DbOpenContext;
 
     fn is_opt_in_required(result: Result<(), MemoryError>) -> bool {
         matches!(
@@ -2040,23 +840,9 @@ mod tests {
         matches!(result, Err(MemoryError::DbCreateTargetExists { .. }))
     }
 
-    /// Display remediation text for the #1119 refusal is build-form-branched:
-    /// the admin build (this crate's default test build) must keep pointing
-    /// at the tachi-server deploy ritual. The portable branch is pinned in
-    /// `portable-kernel`'s contract test, which resolves memcore without
-    /// `admin` — workspace feature unification makes both assertions
-    /// impossible in one build. 2026-08-16 Hyperion mis-chase: a portable
-    /// shell operator chased this hint for a flag their binary does not have.
     #[cfg(feature = "admin")]
     #[test]
     fn opt_in_required_remediation_text_points_admin_builds_at_tachi_server() {
-        // Tripwire on the compile-time constant, deliberately (same shape as
-        // the post-#1062 tripwire in exec_env_reaper): it states the premise
-        // every assertion below depends on — this build resolved memcore with
-        // `admin` on, so only the admin branch of the remediation text is
-        // pinnable here. `clippy` calls a constant assertion pointless because
-        // a constant cannot surprise you at runtime; that is exactly why it is
-        // here.
         #[allow(clippy::assertions_on_constants)]
         {
             assert!(
@@ -2065,10 +851,10 @@ mod tests {
                  portable-kernel's portable_contract test"
             );
         }
-        let err = schema_migration_opt_in_required_error(21, Path::new("/data/legacy.db"));
+        let err = schema_migration_opt_in_required_error(39, Path::new("/data/legacy.db"));
         let text = err.to_string();
         assert!(
-            text.contains("refusing to migrate db schema 21 -> "),
+            text.contains("refusing to migrate db schema 39 -> "),
             "skeleton must survive the hint split: {text}"
         );
         assert!(
@@ -2089,17 +875,9 @@ mod tests {
         );
     }
 
-    /// The frozen assertion this REPLACES (old route:
-    /// `opt_in_gate_with_is_noop_for_fresh_db`, which inferred "fresh" from a
-    /// `sqlite_master` table count). New semantics: a full-schema DB that still
-    /// reads `user_version == 0` — exactly what the unversioned migration-test
-    /// fixture produces — is a build, not a migration, under `CreateFresh`. Intent
-    /// carries "I am creating", so no authority is needed and DB content is
-    /// never consulted (owner ruling A: `init_schema`'s product IS fresh).
     #[test]
     fn create_fresh_needs_no_authority_regardless_of_db_content() {
         let (conn, tmp) = open_test_db();
-        // Full pre-versioned tables are present but user_version==0.
         assert_eq!(read_schema_version(&conn).unwrap(), 0);
         let ctx = DbOpenContext::create_fresh();
         check_db_open_context_gate(&conn, tmp.path(), &ctx)
@@ -2108,7 +886,6 @@ mod tests {
 
     #[test]
     fn open_existing_deny_allows_fresh_zero_stamped_db() {
-        // stored == 0 is a build, not the incident (which was a stamped 17→18).
         let (conn, tmp) = open_test_db();
         let ctx = DbOpenContext::open_existing_deny();
         check_db_open_context_gate(&conn, tmp.path(), &ctx)
@@ -2117,8 +894,6 @@ mod tests {
 
     #[test]
     fn open_existing_deny_refuses_stamped_older_db() {
-        // The #1119 incident path: a stamped older DB (e.g. 17) opened by an
-        // 18-binary without authority MUST refuse before migrating in place.
         let (conn, tmp) = open_test_db();
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
         let ctx = DbOpenContext::open_existing_deny();
@@ -2139,8 +914,6 @@ mod tests {
 
     #[test]
     fn create_fresh_refuses_stamped_older_db_as_existing() {
-        // A real older operational DB is not a create target — refuse (use
-        // OpenExisting+Allow to migrate it).
         let (conn, tmp) = open_test_db();
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
         let ctx = DbOpenContext::create_fresh();
@@ -2150,12 +923,6 @@ mod tests {
         );
     }
 
-    /// Authorization must NOT travel through the process environment. Even
-    /// with the legacy opt-in env var (`TACHI_ALLOW_SCHEMA_MIGRATION`) set to a
-    /// truthy value, a `Deny` context still refuses a stamped older DB — the
-    /// gate consults only the typed `DbOpenContext`, never the environment.
-    /// Nothing else in the codebase reads this var, so setting it here cannot
-    /// affect any other test.
     #[test]
     fn authority_does_not_travel_through_process_env() {
         let (conn, tmp) = open_test_db();
@@ -2186,8 +953,6 @@ mod tests {
 
     #[test]
     fn create_fresh_refuses_current_version_db_as_existing() {
-        // "遇已存在库 → 拒绝": a current (stamped) operational DB is not a
-        // create target either — only stored == 0 is a fresh build.
         let (conn, tmp) = open_test_db();
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION).unwrap();
         let ctx = DbOpenContext::create_fresh();
@@ -2212,8 +977,6 @@ mod tests {
         }
 
         let path = tmp.path().to_str().expect("utf8 tmp path");
-        // Match rather than expect_err: MemoryStore (the Ok variant) is not Debug,
-        // and we don't want to derive Debug on a struct holding live connections.
         let err = match crate::MemoryStore::open_read_only(path) {
             Ok(_) => panic!("read-only open of a newer-stamped DB must hard-fail"),
             Err(e) => e,
@@ -2278,31 +1041,18 @@ mod tests {
 
     // --- #984 F1: transactional compatibility boundary ---------------------
 
-    /// Fault-injection proof that the migration effects, sentinel writes, and
-    /// final `user_version` stamp are one atomic unit: force a failure after
-    /// several migrations have run (and been marked) but before the final
-    /// stamp, and assert BOTH the schema/data changes and the stamp are
-    /// rolled back together — not just the stamp.
     #[test]
     fn stamp_and_migration_effects_roll_back_together() {
         let (mut conn, tmp) = open_test_db();
-        // Seed a legacy `packs` table so v10 has real, observable work to do
-        // (and roll back) rather than being a no-op.
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, name TEXT);")
-            .unwrap();
-        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+        // Remove v40 column/sentinels so v40 has real DDL work to perform and roll back.
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance')",
+            params![MIGRATION_NS],
+        )
+        .unwrap();
+        write_schema_version(&conn, 39).unwrap();
+        assert!(!table_has_column(&conn, "session_claims", "canonical_project"));
 
-        // Run migrations for real up through a known point, then simulate a
-        // crash by rolling back the outer transaction ourselves instead of
-        // letting `run_data_migrations` commit — this stands in for "the
-        // process dies between the migrations and the final PRAGMA write",
-        // which we cannot deterministically inject through the public API
-        // without a fault-injection connection wrapper. What this proves:
-        // the migration effects (sentinel rows, `packs` table drop) and the
-        // version stamp live in the SAME transaction, so any rollback of
-        // that transaction — crash or otherwise — takes both together. If
-        // they were separate autocommit statements (the pre-fix behavior),
-        // this rollback would be a no-op on already-committed sub-steps.
         {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -2310,60 +1060,32 @@ mod tests {
             let report =
                 run_data_migrations_in_tx(&tx, "global", tmp.path(), StoreProfile::TachiFull)
                     .unwrap();
-            assert_eq!(
-                report.pack_tables_dropped, 1,
-                "v10 should have real work here"
-            );
+            assert_eq!(report.identity_workclaim_columns_added, 1);
             write_schema_version(&tx, EXPECTED_SCHEMA_VERSION).unwrap();
-            // Do NOT commit — roll back instead, simulating the crash.
             tx.rollback().unwrap();
         }
 
-        // Both the data effect (packs table still present) and the sentinel
-        // (v10 not marked run) and the version stamp (still 0) must have
-        // rolled back together.
         assert_eq!(
             read_schema_version(&conn).unwrap(),
-            0,
+            39,
             "version stamp must roll back with the migration effects"
         );
         assert!(
-            !was_run(&conn, "v10_drop_pack_tables").unwrap(),
+            !was_run(&conn, "v40_work_claim_project_binding").unwrap(),
             "sentinel must roll back with the migration effects"
         );
-        let packs_still_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='packs'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            packs_still_present, 1,
-            "packs table drop must roll back with the version stamp"
+        assert!(
+            !table_has_column(&conn, "session_claims", "canonical_project"),
+            "v40 DDL must roll back with the version stamp"
         );
 
-        // And a real run (commit path) now proceeds cleanly from scratch.
         let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert_eq!(report2.pack_tables_dropped, 1);
+        assert_eq!(report2.identity_workclaim_columns_added, 1);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
     }
 
     // --- #984 F3(e): EXPECTED_SCHEMA_VERSION invariant ----------------------
 
-    /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
-    /// *itself* produces — not a hand-maintained duplicate list — by running
-    /// the real `run_data_migrations` against a fresh DB and counting the
-    /// sentinel rows it actually wrote to `hard_state`. Appending a
-    /// `v13_...` migration to `run_data_migrations_in_tx` (with its own
-    /// `mark_run` call, as every migration above does) increases this count
-    /// automatically; forgetting to bump `EXPECTED_SCHEMA_VERSION` to match
-    /// then fails this test — silently under-stamping newly-migrated DBs
-    /// would otherwise defeat the #984 gate for the new migration.
-    ///
-    /// `MIGRATION_SENTINEL_KEYS` is also exercised by current-schema preflight;
-    /// this count check stays independent so runner additions cannot be hidden
-    /// by forgetting to update both the stamp and inventory.
     #[test]
     fn expected_schema_version_matches_migration_count() {
         let (mut conn, tmp) = open_test_db();
@@ -2378,16 +1100,15 @@ mod tests {
             )
             .unwrap();
 
+        let expected_sentinel_count = EXPECTED_SCHEMA_VERSION - BASELINE_SCHEMA_VERSION + 1;
         assert_eq!(
-            sentinel_count, EXPECTED_SCHEMA_VERSION,
-            "EXPECTED_SCHEMA_VERSION ({EXPECTED_SCHEMA_VERSION}) must equal the number of \
-             sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
-             bump the const (and add a vN doc line) when a new migration is appended"
+            sentinel_count, expected_sentinel_count,
+            "EXPECTED_SCHEMA_VERSION ({EXPECTED_SCHEMA_VERSION}) - BASELINE_SCHEMA_VERSION ({BASELINE_SCHEMA_VERSION}) + 1 must equal sentinel count ({sentinel_count})"
         );
         assert_eq!(
             MIGRATION_SENTINEL_KEYS.len(),
-            EXPECTED_SCHEMA_VERSION as usize,
-            "current-schema sentinel inventory must cover every version"
+            expected_sentinel_count as usize,
+            "current-schema sentinel inventory must cover every post-baseline version"
         );
         for key in MIGRATION_SENTINEL_KEYS {
             assert!(
@@ -2395,382 +1116,6 @@ mod tests {
                 "current-schema preflight key '{key}' is not written by the migration runner"
             );
         }
-    }
-
-    /// #1331 BUG 3: stamped-v21 DBs must not silently acquire
-    /// `memories_symbolic_fts` under Deny; Allow must create+backfill v22 and
-    /// continue through the current schema stamp.
-    #[test]
-    fn v21_to_v22_symbolic_fts_requires_authority_and_stamps() {
-        use crate::db::{init_schema_with_label_mut, DbOpenContext};
-
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let _ = crate::db::enable_simple_auto_extension();
-            register_sqlite_vec();
-            let mut conn = Connection::open(&path).expect("open");
-            let _ = try_load_sqlite_vec(&conn);
-            init_schema_with_label_mut(&mut conn, "global", &path, &DbOpenContext::create_fresh())
-                .expect("provision fresh");
-            // Downgrade to a stamped-v21 shape without the symbolic projection.
-            const V22_SENTINEL: &str = "v22_memories_symbolic_fts";
-            conn.execute(
-                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-                params![MIGRATION_NS, V22_SENTINEL],
-            )
-            .unwrap();
-            conn.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")
-                .unwrap();
-            write_schema_version(&conn, 21).unwrap();
-            insert_row(&conn, "legacy-row", "/notes/v21", "general", "{}");
-        }
-
-        // Deny must refuse before DDL recreates the table.
-        let deny_err = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_deny(),
-        ) {
-            Ok(_) => panic!("Deny must refuse stamped-v21 → v22"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(
-                deny_err,
-                MemoryError::SchemaMigrationOptInRequired { stored: 21, .. }
-            ),
-            "unexpected deny error: {deny_err}"
-        );
-        {
-            let inspect = Connection::open(&path).unwrap();
-            let present: bool = inspect
-                .query_row(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories_symbolic_fts'",
-                    [],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-            assert!(
-                !present,
-                "Deny must not silently CREATE memories_symbolic_fts on a stamped-v21 DB"
-            );
-            assert_eq!(read_schema_version(&inspect).unwrap(), 21);
-        }
-
-        let _store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_allow("test:1331-v22"),
-        )
-        .expect("Allow must migrate v21 → v22");
-        let verify = Connection::open(&path).unwrap();
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, "v22_memories_symbolic_fts").unwrap());
-        let rows: i64 = verify
-            .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert!(
-            rows >= 1,
-            "v22 must backfill existing memories into the symbolic projection"
-        );
-    }
-
-    #[test]
-    fn v22_to_current_installs_reserved_reference_guards_and_scored_count() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision legacy fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open legacy fixture");
-            conn.execute(
-                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-                params![MIGRATION_NS, "v23_reserved_reference_guards"],
-            )
-            .unwrap();
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
-                 DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-                 PRAGMA user_version = 22;",
-            )
-            .unwrap();
-        }
-
-        let store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "guide-project",
-            &DbOpenContext::open_existing_allow("test:v23-evidence-guards"),
-        )
-        .expect("authorized v22 migration must install current schema additions");
-        drop(store);
-
-        let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, "v23_reserved_reference_guards").unwrap());
-        assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
-        let trigger_count: i64 = verify
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema
-                 WHERE type = 'trigger'
-                   AND name IN (
-                       'memories_reserved_refs_insert_guard',
-                       'memories_reserved_refs_update_guard'
-                   )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(trigger_count, 2, "v23 canonical guard inventory");
-        let scored_count_column: bool = verify
-            .query_row(
-                "SELECT 1 FROM pragma_table_info('memories') WHERE name = 'scored_count'",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        assert!(
-            scored_count_column,
-            "v24 scored_count column must be present"
-        );
-    }
-
-    #[test]
-    fn v23_to_v24_adds_scored_count_with_default_and_sentinel() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture");
-            conn.execute("ALTER TABLE memories DROP COLUMN scored_count", [])
-                .expect("simulate v23 memories table");
-            conn.execute(
-                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-                params![MIGRATION_NS, "v24_memories_scored_count"],
-            )
-            .unwrap();
-            conn.execute_batch("PRAGMA user_version = 23;").unwrap();
-        }
-
-        let store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "guide-project",
-            &DbOpenContext::open_existing_allow("test:v24-scored-count"),
-        )
-        .expect("authorized v23 migration must add scored_count");
-        drop(store);
-        let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, "v24_memories_scored_count").unwrap());
-        assert!(was_run(&verify, "v25_recall_impression_ledger").unwrap());
-        assert!(was_run(&verify, "v26_recall_impression_replay_identity").unwrap());
-        assert!(was_run(&verify, "v27_typo_fallback_attribution").unwrap());
-        let _reserved_reference_guard = crate::db::register_reserved_reference_write_guard(&verify)
-            .expect("register trigger guard function");
-        let default: i64 = verify
-            .query_row(
-                "INSERT INTO memories (id, timestamp) VALUES ('scored-default', '2026-01-01T00:00:00Z') RETURNING scored_count",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(default, 0);
-    }
-
-    /// #1447: v25 impression groups did not persist a unique fingerprint or a
-    /// replay-policy identity. v26 must be explicitly authorized, retain the
-    /// non-unique FNV bucket only under its legacy name, and leave unknown
-    /// provenance NULL so replay refuses rather than guessing current math.
-    #[test]
-    fn v25_to_v27_recall_impressions_requires_authority_and_preserves_unknowns() {
-        use crate::db::DbOpenContext;
-
-        const V26_SENTINEL: &str = "v26_recall_impression_replay_identity";
-        const V27_SENTINEL: &str = "v27_typo_fallback_attribution";
-        const V26_OBJECTS: &[(&str, &str)] = &[
-            ("table", "recall_impression_groups"),
-            ("table", "recall_impressions"),
-            ("index", "idx_recall_impression_groups_created"),
-            ("index", "idx_recall_impression_groups_fingerprint"),
-            ("index", "idx_recall_impressions_memory"),
-            ("index", "idx_recall_impressions_group_final_rank"),
-        ];
-
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture");
-            assert_eq!(
-                read_schema_version(&conn).unwrap(),
-                EXPECTED_SCHEMA_VERSION,
-                "fresh provisioning must stamp the current schema"
-            );
-            conn.execute(
-                "DELETE FROM hard_state
-                  WHERE namespace = ?1
-                    AND key IN (?2, ?3)",
-                params![MIGRATION_NS, V26_SENTINEL, V27_SENTINEL],
-            )
-            .unwrap();
-            conn.execute_batch(
-                "DROP TABLE recall_impressions;
-                 DROP TABLE recall_impression_groups;",
-            )
-            .unwrap();
-            crate::db::schema::install_v25_recall_impression_ledger_schema(&conn)
-                .expect("build historical v25 ledger fixture");
-            conn.execute(
-                "INSERT INTO recall_impression_groups (group_id, created_at, query_hash, weights_profile, semantic_weight, fts_weight, symbolic_weight, decay_weight, use_rrf, rrf_k, top_k, candidate_count, displayed_count, scored_returned_count)
-                 VALUES ('v25-group', '2026-07-29T00:00:00.000Z', 'deadbeef', 'default', 0.4, 0.3, 0.2, 0.1, 0, 20.0, 10, 0, 0, 0)",
-                [],
-            )
-            .unwrap();
-            conn.execute_batch("PRAGMA user_version = 25;").unwrap();
-        }
-
-        let deny_err = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_deny(),
-        ) {
-            Ok(_) => panic!("Deny must refuse stamped-v25 -> v27"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(
-                deny_err,
-                MemoryError::SchemaMigrationOptInRequired { stored: 25, .. }
-            ),
-            "unexpected deny error: {deny_err}"
-        );
-        {
-            let inspect = Connection::open(&path).expect("inspect denied DB");
-            assert_eq!(read_schema_version(&inspect).unwrap(), 25);
-            assert!(!was_run(&inspect, V26_SENTINEL).unwrap());
-            assert!(!was_run(&inspect, V27_SENTINEL).unwrap());
-            assert!(table_has_column(&inspect, "recall_impression_groups", "query_hash").unwrap());
-            assert!(
-                !table_has_column(&inspect, "recall_impression_groups", "query_fingerprint")
-                    .unwrap()
-            );
-        }
-
-        let store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_allow("test:1447-v27"),
-        )
-        .expect("Allow must migrate v25 -> v27");
-        drop(store);
-
-        let verify = Connection::open(&path).expect("verify migrated DB");
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, V26_SENTINEL).unwrap());
-        assert!(was_run(&verify, V27_SENTINEL).unwrap());
-        for (object_type, name) in V26_OBJECTS {
-            let present: bool = verify
-                .query_row(
-                    "SELECT 1 FROM sqlite_schema WHERE type = ?1 AND name = ?2",
-                    params![object_type, name],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-            assert!(present, "v26 must create {object_type} {name}");
-        }
-        assert!(
-            !table_has_column(&verify, "recall_impression_groups", "query_hash").unwrap(),
-            "v26 must not retain the ambiguous v25 column name"
-        );
-        for column in [
-            "legacy_query_bucket",
-            "query_fingerprint",
-            "fusion_policy_version",
-            "pre_boost_adjustment_version",
-            "tie_break_policy_version",
-            "candidate_policy_version",
-            "schema_identity",
-        ] {
-            assert!(
-                table_has_column(&verify, "recall_impression_groups", column).unwrap(),
-                "v26 group schema must contain {column}"
-            );
-        }
-        type LegacyReplayRow = (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let (legacy_bucket, fingerprint, fusion, adjustment, tie_break, candidate, schema):
-            LegacyReplayRow = verify
-            .query_row(
-                "SELECT legacy_query_bucket, query_fingerprint, fusion_policy_version, pre_boost_adjustment_version, tie_break_policy_version, candidate_policy_version, schema_identity FROM recall_impression_groups WHERE group_id = 'v25-group'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(legacy_bucket, "deadbeef");
-        assert_eq!(
-            (
-                fingerprint,
-                fusion,
-                adjustment,
-                tie_break,
-                candidate,
-                schema
-            ),
-            (None, None, None, None, None, None),
-            "v26 must not fabricate unavailable query or policy provenance"
-        );
-        let error = crate::replay_recall_impression_group(&verify, "v25-group")
-            .expect_err("unversioned v25 group must not run current replay math");
-        assert!(matches!(
-            error,
-            MemoryError::RecallReplayIncompatible {
-                reason: crate::error::RecallReplayCompatibilityReason::LegacyUnversioned,
-                ..
-            }
-        ));
     }
 
     fn current_schema_snapshot(path: &Path) -> (Vec<u8>, Vec<String>, u32, Vec<String>) {
@@ -2826,7 +1171,7 @@ mod tests {
         ]
     }
 
-    fn assert_current_v28_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
+    fn assert_current_corruption_is_not_repaired(corruption_sql: &str, expected: &str) {
         let mut unexpected_acceptances = Vec::new();
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -2837,7 +1182,7 @@ mod tests {
                     &path_str,
                     &DbOpenContext::create_fresh(),
                 )
-                .expect("provision current v28 fixture");
+                .expect("provision current fixture");
                 drop(store);
                 let conn = Connection::open(&path).expect("open fixture for corruption");
                 conn.execute_batch(corruption_sql).expect("corrupt fixture");
@@ -2875,25 +1220,25 @@ mod tests {
         }
         assert!(
             unexpected_acceptances.is_empty(),
-            "stamped-current corrupt v28 DB was accepted by {unexpected_acceptances:?}"
+            "stamped-current corrupt DB was accepted by {unexpected_acceptances:?}"
         );
     }
 
     #[test]
-    fn stamped_current_v28_missing_ledger_table_or_index_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_missing_ledger_table_or_index_is_refused_without_repair() {
+        assert_current_corruption_is_not_repaired(
             "DROP TABLE recall_impressions;",
             "recall_impressions",
         );
-        assert_current_v28_corruption_is_not_repaired(
+        assert_current_corruption_is_not_repaired(
             "DROP INDEX idx_recall_impression_groups_fingerprint;",
             "idx_recall_impression_groups_fingerprint",
         );
     }
 
     #[test]
-    fn stamped_current_v28_malformed_replay_identity_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_malformed_replay_identity_is_refused_without_repair() {
+        assert_current_corruption_is_not_repaired(
             "PRAGMA ignore_check_constraints = ON;
              INSERT INTO recall_impression_groups (
                  group_id, created_at,
@@ -2914,42 +1259,24 @@ mod tests {
     }
 
     #[test]
-    fn stamped_current_v28_missing_v26_sentinel_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
-            "DELETE FROM hard_state
-             WHERE namespace = 'migrations' AND key = 'v26_recall_impression_replay_identity';",
-            "v26_recall_impression_replay_identity",
-        );
-    }
-
-    #[test]
-    fn stamped_current_v28_missing_v27_sentinel_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
-            "DELETE FROM hard_state
-             WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';",
-            "v27_typo_fallback_attribution",
-        );
-    }
-
-    #[test]
-    fn stamped_current_v28_missing_wiki_recovery_objects_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_missing_wiki_recovery_objects_is_refused_without_repair() {
+        assert_current_corruption_is_not_repaired(
             "DROP TABLE rem_source_claims;",
             "rem_source_claims",
         );
-        assert_current_v28_corruption_is_not_repaired(
+        assert_current_corruption_is_not_repaired(
             "DROP INDEX idx_rem_source_claims_draft;",
             "idx_rem_source_claims_draft",
         );
-        assert_current_v28_corruption_is_not_repaired(
+        assert_current_corruption_is_not_repaired(
             "DROP TABLE exact_dedupe_apply_lineage;",
             "exact_dedupe_apply_lineage",
         );
     }
 
     #[test]
-    fn stamped_current_v28_malformed_wiki_recovery_shapes_are_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_malformed_wiki_recovery_shapes_are_refused_without_repair() {
+        assert_current_corruption_is_not_repaired(
             "DROP TABLE rem_source_claims;
              CREATE TABLE rem_source_claims (
                  source_key TEXT PRIMARY KEY NOT NULL,
@@ -2960,7 +1287,7 @@ mod tests {
                  ON rem_source_claims(draft_id);",
             "rem_source_claims' has non-canonical column shape",
         );
-        assert_current_v28_corruption_is_not_repaired(
+        assert_current_corruption_is_not_repaired(
             "DROP TABLE exact_dedupe_apply_lineage;
              CREATE TABLE exact_dedupe_apply_lineage (
                  loser_id TEXT NOT NULL,
@@ -2973,7 +1300,7 @@ mod tests {
              );",
             "exact_dedupe_apply_lineage' has non-canonical column shape",
         );
-        assert_current_v28_corruption_is_not_repaired(
+        assert_current_corruption_is_not_repaired(
             "DROP INDEX idx_rem_source_claims_draft;
              CREATE INDEX idx_rem_source_claims_draft
                  ON rem_source_claims(source_identity);",
@@ -2982,31 +1309,29 @@ mod tests {
     }
 
     #[test]
-    fn stamped_current_v28_missing_v28_sentinel_is_refused_without_repair() {
-        assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_missing_v39_sentinel_is_refused_without_repair() {
+        assert_current_corruption_is_not_repaired(
             "DELETE FROM hard_state
-             WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';",
-            "v28_wiki_recovery_ledgers",
+             WHERE namespace = 'migrations' AND key = 'v39_mirror_eval_identity';",
+            "v39_mirror_eval_identity",
         );
     }
 
-    const V27_COLUMNS: &[(&str, &str)] = &[
-        ("recall_impression_groups", "typo_fallback_activated"),
-        ("recall_impression_groups", "typo_fallback_prefilter_count"),
-        ("recall_impression_groups", "typo_fallback_compared_count"),
-        (
-            "recall_impression_groups",
-            "typo_fallback_token_comparison_count",
-        ),
-        ("recall_impression_groups", "typo_fallback_edit_cell_count"),
-        ("recall_impression_groups", "typo_fallback_candidate_count"),
-        ("recall_impressions", "typo_fallback_candidate"),
-    ];
-
     #[test]
-    fn stamped_current_v28_missing_each_v27_column_is_refused_without_repair() {
-        for (table, column) in V27_COLUMNS {
-            assert_current_v28_corruption_is_not_repaired(
+    fn stamped_current_missing_each_typo_fallback_column_is_refused_without_repair() {
+        for (table, column) in [
+            ("recall_impression_groups", "typo_fallback_activated"),
+            ("recall_impression_groups", "typo_fallback_prefilter_count"),
+            ("recall_impression_groups", "typo_fallback_compared_count"),
+            (
+                "recall_impression_groups",
+                "typo_fallback_token_comparison_count",
+            ),
+            ("recall_impression_groups", "typo_fallback_edit_cell_count"),
+            ("recall_impression_groups", "typo_fallback_candidate_count"),
+            ("recall_impressions", "typo_fallback_candidate"),
+        ] {
+            assert_current_corruption_is_not_repaired(
                 &format!("ALTER TABLE {table} DROP COLUMN {column};"),
                 &format!("{table}.{column}"),
             );
@@ -3014,30 +1339,24 @@ mod tests {
     }
 
     #[test]
-    fn valid_stamped_current_v28_reopens_on_all_existing_surfaces() {
+    fn valid_stamped_current_reopens_on_all_existing_surfaces() {
         for (surface, open) in current_existing_openers() {
             let tmp = tempfile::tempdir().expect("tempdir");
             let path = tmp.path().join(format!("{surface}.db"));
             let path_str = path.to_string_lossy().to_string();
             let store =
                 crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current v28 fixture");
+                    .expect("provision current fixture");
             drop(store);
             let before = current_schema_snapshot(&path);
 
             let reopened = open(&path_str)
-                .unwrap_or_else(|error| panic!("valid current v28 {surface} reopen: {error}"));
+                .unwrap_or_else(|error| panic!("valid current {surface} reopen: {error}"));
             drop(reopened);
 
             let after = current_schema_snapshot(&path);
-            assert_eq!(
-                after.1, before.1,
-                "valid {surface} open must preserve schema"
-            );
-            assert_eq!(
-                after.2, before.2,
-                "valid {surface} open must preserve version"
-            );
+            assert_eq!(after.1, before.1, "valid {surface} open must preserve schema");
+            assert_eq!(after.2, before.2, "valid {surface} open must preserve version");
             assert_eq!(
                 after.3, before.3,
                 "valid {surface} open must preserve migration sentinels"
@@ -3045,330 +1364,8 @@ mod tests {
         }
     }
 
-    /// #1506: persistent typo-fallback attribution is a distinct v27 change.
-    /// Deny must refuse before adding any column; Allow installs all columns,
-    /// records the sentinel, and advances the version atomically.
     #[test]
-    fn v26_to_current_typo_fallback_attribution_requires_authority_and_stamps() {
-        use crate::db::DbOpenContext;
-
-        const V27_SENTINEL: &str = "v27_typo_fallback_attribution";
-        let column_exists = |conn: &Connection, table: &str, column: &str| {
-            let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
-            conn.query_row(&sql, [column], |_| Ok(true))
-                .unwrap_or(false)
-        };
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture");
-            assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
-            assert!(was_run(&conn, V27_SENTINEL).unwrap());
-            for (table, column) in V27_COLUMNS {
-                assert!(column_exists(&conn, table, column));
-            }
-            conn.execute_batch(
-                "ALTER TABLE recall_impressions DROP COLUMN typo_fallback_candidate;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_candidate_count;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_edit_cell_count;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_token_comparison_count;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_compared_count;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_prefilter_count;
-                 ALTER TABLE recall_impression_groups DROP COLUMN typo_fallback_activated;
-                 DELETE FROM hard_state
-                  WHERE namespace = 'migrations' AND key = 'v27_typo_fallback_attribution';
-                 DELETE FROM hard_state
-                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
-                 DROP TABLE exact_dedupe_apply_lineage;
-                 DROP TABLE rem_source_claims;
-                 PRAGMA user_version = 26;",
-            )
-            .expect("simulate stamped v26 ledger");
-        }
-
-        let deny_err = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_deny(),
-        ) {
-            Ok(_) => panic!("Deny must refuse stamped-v26 -> current"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(
-                deny_err,
-                MemoryError::SchemaMigrationOptInRequired { stored: 26, .. }
-            ),
-            "unexpected deny error: {deny_err}"
-        );
-        {
-            let inspect = Connection::open(&path).expect("inspect denied v26 DB");
-            assert_eq!(read_schema_version(&inspect).unwrap(), 26);
-            assert!(!was_run(&inspect, V27_SENTINEL).unwrap());
-            for (table, column) in V27_COLUMNS {
-                assert!(
-                    !column_exists(&inspect, table, column),
-                    "Deny must not add {table}.{column}"
-                );
-            }
-        }
-
-        let store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_allow("test:1506-v27"),
-        )
-        .expect("Allow must migrate v26 -> current");
-        drop(store);
-
-        let verify = Connection::open(&path).expect("verify migrated current DB");
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, V27_SENTINEL).unwrap());
-        for (table, column) in V27_COLUMNS {
-            assert!(
-                column_exists(&verify, table, column),
-                "v27 must add {table}.{column}"
-            );
-        }
-    }
-
-    /// #1542: the recovery ledgers are a distinct v28 change. A stamped-v27
-    /// database must not acquire them without typed migration authority.
-    #[test]
-    fn v27_to_v28_wiki_recovery_ledgers_require_authority_and_stamp() {
-        use crate::db::DbOpenContext;
-
-        const V28_SENTINEL: &str = "v28_wiki_recovery_ledgers";
-        let object_exists = |conn: &Connection, object_type: &str, name: &str| {
-            conn.query_row(
-                "SELECT 1 FROM main.sqlite_schema WHERE type=?1 AND name=?2",
-                params![object_type, name],
-                |_| Ok(true),
-            )
-            .unwrap_or(false)
-        };
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture");
-            conn.execute_batch(
-                "DROP TABLE exact_dedupe_apply_lineage;
-                 DROP TABLE rem_source_claims;
-                 DELETE FROM hard_state
-                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
-                 PRAGMA user_version = 27;",
-            )
-            .expect("simulate stamped v27 database");
-        }
-
-        let deny_error = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_deny(),
-        ) {
-            Ok(_) => panic!("Deny must refuse stamped-v27 -> v28"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(
-                deny_error,
-                MemoryError::SchemaMigrationOptInRequired { stored: 27, .. }
-            ),
-            "unexpected deny error: {deny_error}"
-        );
-        {
-            let inspect = Connection::open(&path).expect("inspect denied v27 database");
-            assert_eq!(read_schema_version(&inspect).unwrap(), 27);
-            assert!(!was_run(&inspect, V28_SENTINEL).unwrap());
-            assert!(!object_exists(&inspect, "table", "rem_source_claims"));
-            assert!(!object_exists(
-                &inspect,
-                "table",
-                "exact_dedupe_apply_lineage"
-            ));
-        }
-
-        let store = crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_allow("test:1542-v28"),
-        )
-        .expect("Allow must migrate v27 -> current");
-        drop(store);
-
-        let verify = Connection::open(&path).expect("verify migrated current database");
-        // The stamp lands at the CURRENT expected version, not at 28: an
-        // authorized open runs every pending migration, so pinning the literal
-        // would make this test fail on the next legitimate bump (the v26 -> v27
-        // test above already uses the constant for exactly this reason).
-        assert_eq!(
-            read_schema_version(&verify).unwrap(),
-            EXPECTED_SCHEMA_VERSION
-        );
-        assert!(was_run(&verify, V28_SENTINEL).unwrap());
-        assert!(object_exists(&verify, "table", "rem_source_claims"));
-        assert!(object_exists(
-            &verify,
-            "index",
-            "idx_rem_source_claims_draft"
-        ));
-        assert!(object_exists(
-            &verify,
-            "table",
-            "exact_dedupe_apply_lineage"
-        ));
-    }
-
-    #[test]
-    fn v27_to_v28_refuses_same_named_malformed_ledgers_without_stamping() {
-        use crate::db::DbOpenContext;
-
-        const V28_SENTINEL: &str = "v28_wiki_recovery_ledgers";
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open fixture");
-            conn.execute_batch(
-                "DROP TABLE rem_source_claims;
-                 CREATE TABLE rem_source_claims (
-                     source_key TEXT PRIMARY KEY NOT NULL,
-                     draft_id TEXT NOT NULL,
-                     claimed_at TEXT NOT NULL
-                 );
-                 CREATE INDEX idx_rem_source_claims_draft
-                     ON rem_source_claims(draft_id);
-                 DROP TABLE exact_dedupe_apply_lineage;
-                 CREATE TABLE exact_dedupe_apply_lineage (
-                     loser_id TEXT PRIMARY KEY NOT NULL,
-                     apply_id TEXT NOT NULL
-                 );
-                 DELETE FROM hard_state
-                  WHERE namespace = 'migrations' AND key = 'v28_wiki_recovery_ledgers';
-                 PRAGMA user_version = 27;",
-            )
-            .expect("simulate malformed stamped v27 database");
-        }
-
-        let error = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "global",
-            &DbOpenContext::open_existing_allow("test:1542-v28-malformed"),
-        ) {
-            Ok(_) => panic!("Allow must not stamp malformed same-named v28 ledgers"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("non-canonical column shape"),
-            "unexpected malformed-ledger error: {error}"
-        );
-
-        let verify = Connection::open(&path).expect("verify refused malformed v27 database");
-        assert_eq!(read_schema_version(&verify).unwrap(), 27);
-        assert!(!was_run(&verify, V28_SENTINEL).unwrap());
-        let rem_columns: i64 = verify
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('rem_source_claims')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let lineage_columns: i64 = verify
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('exact_dedupe_apply_lineage')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            rem_columns, 3,
-            "failed migration must not rebuild caller table"
-        );
-        assert_eq!(
-            lineage_columns, 2,
-            "failed migration must not rebuild caller table"
-        );
-    }
-
-    #[test]
-    fn v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_path_buf();
-        let path_str = path.to_string_lossy().to_string();
-        {
-            let store =
-                crate::MemoryStore::open_with_context(&path_str, &DbOpenContext::create_fresh())
-                    .expect("provision current fixture");
-            drop(store);
-            let conn = Connection::open(&path).expect("open legacy fixture");
-            conn.execute(
-                "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-                params![MIGRATION_NS, "v23_reserved_reference_guards"],
-            )
-            .unwrap();
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
-                 DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-                 PRAGMA user_version = 22;",
-            )
-            .unwrap();
-        }
-
-        test_hooks::arm_fail_after_v23_guard_install();
-        let err = match crate::MemoryStore::open_with_label_and_context(
-            &path_str,
-            "guide-project",
-            &DbOpenContext::open_existing_allow("test:v23-rollback"),
-        ) {
-            Ok(_) => panic!("injected v23 guard failure must abort migration"),
-            Err(error) => error,
-        };
-        assert!(
-            err.to_string()
-                .contains("injected failure after v23 guard install"),
-            "unexpected injected migration error: {err}"
-        );
-
-        let verify = Connection::open(&path).expect("verify rolled-back DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 22);
-        assert!(!was_run(&verify, "v23_reserved_reference_guards").unwrap());
-        let trigger_count: i64 = verify
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema
-                 WHERE type = 'trigger'
-                   AND name IN (
-                       'memories_reserved_refs_insert_guard',
-                       'memories_reserved_refs_update_guard'
-                   )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            trigger_count, 0,
-            "failed migration must roll guard DDL back"
-        );
-    }
-
-    #[test]
-    fn stamped_v23_with_missing_guards_is_refused_even_with_migration_authority() {
+    fn stamped_v39_with_missing_guards_is_refused_even_with_migration_authority() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_path_buf();
         let path_str = path.to_string_lossy().to_string();
@@ -3381,7 +1378,7 @@ mod tests {
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
                  DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-                 PRAGMA user_version = 23;",
+                 PRAGMA user_version = 39;",
             )
             .unwrap();
         }
@@ -3389,20 +1386,20 @@ mod tests {
         let err = match crate::MemoryStore::open_with_label_and_context(
             &path_str,
             "guide-project",
-            &DbOpenContext::open_existing_allow("test:must-not-repair-v23"),
+            &DbOpenContext::open_existing_allow("test:must-not-repair-v39"),
         ) {
-            Ok(_) => panic!("a damaged v23 DB must not be repaired during open"),
+            Ok(_) => panic!("a damaged v39 DB must not be repaired during open"),
             Err(error) => error,
         };
         let message = err.to_string();
         assert!(
             message.contains("unsafe persistent trigger inventory")
                 && message.contains("memories_reserved_refs_insert_guard"),
-            "damaged current DB must fail as unsafe inventory, got: {err}"
+            "damaged v39 DB must fail as unsafe inventory, got: {err}"
         );
 
         let verify = Connection::open(&path).expect("verify refused DB");
-        assert_eq!(read_schema_version(&verify).unwrap(), 23);
+        assert_eq!(read_schema_version(&verify).unwrap(), 39);
         let guard_trigger_count: i64 = verify
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema
@@ -3447,7 +1444,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(guard_trigger_count, 2, "fixture keeps v23 guards intact");
+            assert_eq!(guard_trigger_count, 2, "fixture keeps baseline guards intact");
             conn.execute_batch("DROP TRIGGER memory_search_generation_after_update")
                 .expect("remove exactly one canonical search-generation trigger");
         }
@@ -3483,160 +1480,6 @@ mod tests {
         );
     }
 
-    /// #1331 BUG 4: after a legacy path rewrite in the same upgrade, symbolic
-    /// retrieval must use the post-migration path (v22 full rebuild).
-    #[test]
-    fn v22_rebuild_makes_post_migration_path_symbolically_retrievable() {
-        let (mut conn, tmp) = open_test_db();
-        // Clear path + symbolic sentinels so both replay in order.
-        conn.execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN \
-             ('v3_handoff_path_standardize', 'v22_memories_symbolic_fts')",
-            params![MIGRATION_NS],
-        )
-        .unwrap();
-        write_schema_version(&conn, 21).unwrap();
-
-        conn.execute(
-            "INSERT INTO memories
-              (id, path, summary, text, importance, timestamp, category, topic,
-               keywords, entities, source, scope, archived,
-               created_at, updated_at, access_count, last_access, revision,
-               metadata, retention_policy, domain)
-             VALUES ('handoff-row', '/handoff', 's', 'handoffuniqueterm body', 0.5,
-                     '2026-01-01T00:00:00Z', 'fact', '', '[]', '[]', 'manual', 'general', 0,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
-                     '{}', NULL, NULL)",
-            [],
-        )
-        .unwrap();
-        // Stale pre-rewrite projection (simulates ensure_fts_backfilled-before-v3).
-        conn.execute(
-            "INSERT INTO memories_symbolic_fts
-             (id, path, summary, text, keywords, entities, topic)
-             VALUES ('handoff-row', '/handoff', 's', 'handoffuniqueterm body', '[]', '[]', '')",
-            [],
-        )
-        .unwrap();
-
-        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
-        assert!(
-            report.handoff_paths_standardized >= 1
-                || was_run(&conn, "v3_handoff_path_standardize").unwrap()
-        );
-        assert!(was_run(&conn, "v22_memories_symbolic_fts").unwrap());
-
-        let path: String = conn
-            .query_row(
-                "SELECT path FROM memories_symbolic_fts WHERE id = 'handoff-row'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(path, "/handoff/unknown");
-
-        let hits = crate::db::search_symbolic_candidates(
-            &conn,
-            "handoffuniqueterm",
-            10,
-            false,
-            false,
-            Some("/handoff/unknown"),
-            None,
-            None,
-            false,
-        )
-        .unwrap();
-        assert!(
-            hits.iter().any(|e| e.id == "handoff-row"),
-            "symbolic retrieval must use the post-v3 path; got {:?}",
-            hits.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
-        );
-    }
-    /// A deterministic stand-in for the transient lock/I/O/authorizer
-    /// failure #978 describes: the existence-check QUERY itself errors,
-    /// rather than legitimately finding the table absent.
-    ///
-    /// Two earlier mechanisms were tried and abandoned as non-deterministic
-    /// or infeasible on this codebase:
-    /// - Racing a real `BEGIN EXCLUSIVE` held on a second thread against a
-    ///   `busy_timeout(0)` reader: `SQLITE_BUSY` was not reliably
-    ///   reproducible against the specific `sqlite_master` read the
-    ///   migration performs, and the lock-holder thread's own `.expect()`
-    ///   calls could panic before the test body ran its assertion.
-    /// - Corrupting the DB file's on-disk header bytes and reopening: this
-    ///   codebase's `Connection::open` path auto-loads a SQLite extension
-    ///   that reads the header eagerly, so `Connection::open` itself fails
-    ///   immediately on a corrupted file — there is no window in which a
-    ///   corrupt-but-openable connection exists to call the migration fn on.
-    ///
-    /// This version injects the failure at the QUERY boundary, one level
-    /// below where the previous (refuted) version injected it:
-    /// `exists_with_query` in `pack_retire.rs` / `domain_retire.rs` is real,
-    /// unmodified production code — the `?`-propagation that decides
-    /// "error propagates" vs. "collapses to absent" lives inside it. A test
-    /// substitutes only `exists_with_query`'s `query: impl Fn(&Connection,
-    /// &str) -> Result<i64, rusqlite::Error>` parameter with a closure that
-    /// always errors, so reverting `exists_with_query`'s body to
-    /// `query(conn, name).unwrap_or(0) > 0` flips these tests from green to
-    /// RED (see the discrimination proof in the PR/commit description).
-    fn injected_failing_query(_conn: &Connection, _name: &str) -> Result<i64, rusqlite::Error> {
-        Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some("simulated existence-check query failure (#978)".to_string()),
-        ))
-    }
-
-    #[test]
-    fn v10_propagates_existence_check_error_and_does_not_mark_sentinel() {
-        let (conn, _tmp) = open_test_db();
-        assert!(!was_run(&conn, "v10_drop_pack_tables").unwrap());
-
-        let err = migrate_v10_inner(&conn, injected_failing_query)
-            .expect_err("existence-check error must propagate, not collapse to absent");
-        assert!(
-            matches!(err, MemoryError::Sqlite(_)),
-            "unexpected error shape: {err}"
-        );
-
-        assert!(
-            !was_run(&conn, "v10_drop_pack_tables").unwrap(),
-            "sentinel must stay unset after a failed existence-check so the migration retries"
-        );
-    }
-
-    #[test]
-    fn v11_propagates_existence_check_error_and_does_not_mark_sentinel() {
-        let (conn, _tmp) = open_test_db();
-        assert!(!was_run(&conn, "v11_drop_domains_table").unwrap());
-
-        let err = migrate_v11_inner(&conn, injected_failing_query)
-            .expect_err("existence-check error must propagate, not collapse to absent");
-        assert!(
-            matches!(err, MemoryError::Sqlite(_)),
-            "unexpected error shape: {err}"
-        );
-
-        assert!(
-            !was_run(&conn, "v11_drop_domains_table").unwrap(),
-            "sentinel must stay unset after a failed existence-check so the migration retries"
-        );
-    }
-
-    // The real-path (healthy DB, existence-check succeeds) behavior for
-    // both migrations — success return value, tables actually dropped, and
-    // sentinel written so a second run is a no-op — is already covered by
-    // `v10_drops_legacy_pack_tables` and `v11_drops_legacy_domains_table`
-    // above via the public `run_data_migrations` entry point; not
-    // duplicated here.
-
-    /// Proves `apply_versioned_migration` — the REAL helper
-    /// `run_data_migrations` calls for v10/v11 — is the thing gating the
-    /// sentinel, not a parallel test-only reimplementation of the gate
-    /// (#978). A failing `migrate` closure must propagate the error AND
-    /// leave the sentinel unset (so the migration retries on the next run);
-    /// a subsequent succeeding call through the same helper must write the
-    /// sentinel.
     #[test]
     fn apply_versioned_migration_gates_sentinel_on_real_runner_helper() {
         let (conn, _tmp) = open_test_db();
@@ -3670,9 +1513,6 @@ mod tests {
             "sentinel must be written after apply_versioned_migration's migrate succeeds"
         );
 
-        // Idempotent: a second call with a closure that would panic if
-        // invoked proves the sentinel-already-set path skips `migrate`
-        // entirely.
         let skipped =
             apply_versioned_migration(&conn, key, |_conn| -> Result<usize, MemoryError> {
                 panic!("migrate must not be invoked once the sentinel is already set")

@@ -204,34 +204,11 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/schema/ddl.rs"),
     embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
     embedded_template_source!("/../memcore/src/db/migrations.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/a2a_body_retention.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/basic.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/cross_db.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/dispatch_adjudications.rs"),
-    embedded_template_source!(
-        "/../memcore/src/db/migrations/dispatch_outcomes_attribution_basis.rs"
-    ),
-    embedded_template_source!(
-        "/../memcore/src/db/migrations/dispatch_outcomes_identity_receipt.rs"
-    ),
-    embedded_template_source!("/../memcore/src/db/migrations/delivery_spine.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/dispatch_outcomes_reported.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/domain_retire.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/hard_state_index.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/harness_session_attachments.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/harness_session_events.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/catalogue.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/identity_workclaim_spine.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/mirror_eval.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/pack_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/symbolic_fts.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
 ];
 
 fn extend_template_cache_fingerprint(hash: &mut u64, bytes: &[u8]) {

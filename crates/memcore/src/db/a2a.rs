@@ -1407,28 +1407,44 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v30_product_store_migrates_both_tables_and_stamp() {
+    fn pre_baseline_v30_product_store_is_refused_and_v41_a2a_migrates_to_v43() {
         crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
         crate::db::register_sqlite_vec();
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::init_schema(&connection).expect("build current product fixture");
-        connection
-            .execute_batch(
-                "DROP TABLE a2a_delivery_receipts;
-                 DROP TABLE a2a_envelopes;
-                 DELETE FROM hard_state WHERE namespace='migrations' AND key='v31_a2a_mailbox';
-                 PRAGMA user_version=30;",
-            )
-            .expect("downgrade fixture to exact v30 shape");
 
-        let report = crate::db::migrations::run_data_migrations_with_profile(
+        let mut legacy = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&legacy).expect("build fixture");
+        legacy
+            .execute_batch("PRAGMA user_version=30;")
+            .expect("stamp pre-baseline v30");
+        let err = crate::db::migrations::run_data_migrations_with_profile(
+            &mut legacy,
+            "global",
+            std::path::Path::new(":memory:"),
+            StoreProfile::TachiFull,
+        )
+        .expect_err("pre-baseline v30 store must fail closed");
+        assert!(
+            err.to_string().contains("archived binary"),
+            "unexpected pre-baseline refusal: {err}"
+        );
+
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::catalogue::test_support::with_prefix(41, || {
+            crate::db::init_schema_for_profile(&connection, StoreProfile::TachiFull)
+                .expect("build v41 product fixture");
+        });
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&connection).unwrap(),
+            41
+        );
+
+        crate::db::migrations::run_data_migrations_with_profile(
             &mut connection,
             "global",
             std::path::Path::new(":memory:"),
             StoreProfile::TachiFull,
         )
-        .expect("migrate v30 product store");
-        assert_eq!(report.a2a_mailbox_schema_objects_created, 5);
+        .expect("migrate v41 product store to v43");
         assert_eq!(
             crate::db::migrations::read_schema_version(&connection).unwrap(),
             crate::db::migrations::EXPECTED_SCHEMA_VERSION
@@ -1443,6 +1459,14 @@ mod tests {
                 .unwrap();
             assert_eq!(present, 1, "migrated product table {table}");
         }
+        let has_canonical_project: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('a2a_envelopes') WHERE name = 'canonical_project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_canonical_project, 1, "v42 migration adds canonical_project");
     }
 
     #[test]
