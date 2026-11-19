@@ -156,8 +156,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 107154,
-        "total_tool_definition_bytes": 126261,
+        "total_input_schema_bytes": 107106,
+        "total_tool_definition_bytes": 126222,
         "visible_tool_count": 47,
         "visible_tools": [
           "archive_memory",
