@@ -8,7 +8,6 @@
 //! Fail-closed: capture errors are logged and never surface to the search path.
 //! Off by default: zero behavior change unless the env flag is set.
 
-use chrono::Utc;
 use memcore::{is_eval_entry, MemoryEntry, MemoryStore, SearchResult};
 use serde_json::json;
 use uuid::Uuid;
@@ -123,7 +122,7 @@ fn count_captures_today(store: &MemoryStore) -> Result<u64, String> {
 fn build_capture_entry(query: &str, expected_id: &str, top_k: usize) -> MemoryEntry {
     let short_id = Uuid::new_v4().simple().to_string();
     let short_id = &short_id[..8];
-    let date = Utc::now().format("%Y-%m-%d");
+    let date = memcore::time_compat::date_only(jiff::Timestamp::now());
     let path = format!("{PATH_PREFIX}/{date}-{short_id}");
     let id = format!("eval-recall-{date}-{short_id}");
     // Unique placeholder text (ids only) so Jaccard write-dedup does not collapse cases.
@@ -140,7 +139,7 @@ fn build_capture_entry(query: &str, expected_id: &str, top_k: usize) -> MemoryEn
         "auto-captured recall eval case id={id} expected_id={expected_id} (query+ids only; no body)"
     );
     let summary = format!("auto-captured recall case for {expected_id}");
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
 
     MemoryEntry {
         id,
@@ -289,7 +288,7 @@ mod tests {
     }
 
     fn seed_fact(store: &mut MemoryStore, id: &str, text: &str) {
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let entry = MemoryEntry {
             id: id.to_string(),
             path: format!("/notes/{id}"),
@@ -325,7 +324,7 @@ mod tests {
     }
 
     fn seed_eval_row(store: &mut MemoryStore, id: &str, text: &str) {
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let entry = MemoryEntry {
             id: id.to_string(),
             path: format!("/eval/other/{id}"),

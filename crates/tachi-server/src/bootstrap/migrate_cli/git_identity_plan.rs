@@ -278,7 +278,7 @@ pub(super) fn apply_aliases(tachi_home: &Path) -> Result<Vec<AliasDecision>, Str
             decision.status = AliasStatus::Recorded;
         }
         if changed {
-            manifest.generated_at = chrono::Utc::now().to_rfc3339();
+            manifest.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             manifest
                 .save(manifest_path)
                 .map_err(|error| format!("save manifest {}: {error}", manifest_path.display()))?;

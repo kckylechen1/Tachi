@@ -10,7 +10,6 @@
 //! migration. Rows are queried by listing the namespace and filtering on the
 //! `(vendor, role)` fields carried inside each row's JSON.
 
-use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use tachi_dispatch::{
@@ -51,7 +50,7 @@ pub(crate) struct SignatureRecord {
     /// When true this is an append-only *resolution* row, marking the signature
     /// resolved as of `recorded_at`.
     pub resolved: bool,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: jiff::Timestamp,
     /// Frozen dispatch identity when this evidence came from a Tachi dispatch.
     /// Older/external evidence remains explicitly unattached.
     pub identity_receipt: Option<Value>,
@@ -82,7 +81,7 @@ fn record_to_value(record: &SignatureRecord) -> Value {
         "severity": severity,
         "evidence_ref": record.evidence_ref,
         "identity_receipt": record.identity_receipt,
-        "recorded_at": record.recorded_at.to_rfc3339(),
+        "recorded_at": memcore::time_compat::rfc3339_compat(record.recorded_at),
         "attribution_basis": record.attribution_basis,
         "vendor_explicit": record.vendor_explicit,
     })
@@ -126,8 +125,8 @@ fn parse_row(value: &Value) -> Option<(String, String, SignatureEvidenceRow)> {
     let recorded_at_epoch = value
         .get("recorded_at")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp())?;
+        .and_then(crate::utils::Rfc3339Stamp::parse)
+        .map(|stamp| stamp.key.0)?;
     Some((
         vendor,
         role,
@@ -351,7 +350,7 @@ pub(crate) fn record_complete_signatures(
     if params.signatures.is_empty() {
         return json!("skipped (no signatures)");
     }
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let identity_receipt = params
         .dispatch_id
         .as_deref()
@@ -423,7 +422,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
         return Ok(false);
     }
 
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let mut records: Vec<SignatureRecord> = Vec::new();
 
     // glm-as-implementer: the 2026-07-05 vault-security failures + the falsified
@@ -472,8 +471,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
     // codex-as-implementer: parking + breadcrumb urges were vaccinated via the
     // constitution — recorded then resolved (proves the resolution path). Plus
     // one fresh, unresolved assertion_weakening from #733 BUG-1.
-    let older = now - chrono::Duration::days(10);
-    let resolved_at = now - chrono::Duration::days(9);
+    let older = now - jiff::SignedDuration::from_secs(10 * 86_400);
+    let resolved_at = now - jiff::SignedDuration::from_secs(9 * 86_400);
     for signature in ["parking_after_contract", "breadcrumb_violation"] {
         records.push(SignatureRecord {
             vendor: "codex".to_string(),

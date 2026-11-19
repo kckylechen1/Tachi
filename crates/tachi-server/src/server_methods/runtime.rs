@@ -370,7 +370,7 @@ impl MemoryServer {
     pub(crate) fn touch_activity(&self) {
         crate::staffing_ops::presence::observe_client(self);
         self.last_activity_ms.store(
-            chrono::Utc::now().timestamp_millis(),
+            jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) as i64,
             std::sync::atomic::Ordering::Relaxed,
         );
     }

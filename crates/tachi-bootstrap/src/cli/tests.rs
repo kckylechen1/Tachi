@@ -234,8 +234,6 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 confirm: None,
                 backup_dir: None,
                 plan: None,
-                repair_sibling_damage: false,
-                adopt_legacy: false,
             }
         })
     ));
@@ -261,96 +259,19 @@ fn wiki_corpus_cli_is_nested_under_wiki_and_defaults_to_preview() {
                 confirm: Some(confirm),
                 backup_dir: Some(backup_dir),
                 plan: Some(plan),
-                repair_sibling_damage: false,
-                adopt_legacy: false,
             }
         }) if confirm == "MIGRATE_WIKI_CORPUS_V1"
             && backup_dir == std::path::Path::new("/tmp/wiki-backups")
             && plan == std::path::Path::new("/tmp/wiki-plan.json")
     ));
 
-    let repair = Cli::try_parse_from([
-        "tachi",
-        "wiki",
-        "corpus",
-        "--repair-sibling-damage",
-        "--confirm",
-        "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1",
-        "--backup-dir",
-        "/tmp/wiki-backups",
-    ])
-    .expect("wiki corpus sibling-damage repair flags should parse");
-    assert!(matches!(
-        repair.command,
-        Some(Commands::Wiki {
-            action: WikiAction::Corpus {
-                apply: false,
-                confirm: Some(confirm),
-                backup_dir: Some(backup_dir),
-                plan: None,
-                repair_sibling_damage: true,
-                adopt_legacy: false,
-            }
-        }) if confirm == "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1"
-            && backup_dir == std::path::Path::new("/tmp/wiki-backups")
-    ));
-}
-
-/// tachi#1624: `--adopt-legacy` is a third confirmed mode of the same
-/// subcommand, so the flag must parse alongside its own token and must
-/// default to `false` on every pre-existing invocation.
-#[test]
-fn wiki_corpus_cli_parses_adopt_legacy_mode() {
-    let adopt = Cli::try_parse_from([
-        "tachi",
-        "wiki",
-        "corpus",
-        "--adopt-legacy",
-        "--confirm",
-        "ADOPT_WIKI_LEGACY_V1",
-    ])
-    .expect("wiki corpus legacy-adoption flags should parse");
-    assert!(matches!(
-        adopt.command,
-        Some(Commands::Wiki {
-            action: WikiAction::Corpus {
-                apply: false,
-                confirm: Some(confirm),
-                backup_dir: None,
-                plan: None,
-                repair_sibling_damage: false,
-                adopt_legacy: true,
-            }
-        }) if confirm == "ADOPT_WIKI_LEGACY_V1"
-    ));
-
-    let preview = Cli::try_parse_from(["tachi", "wiki", "corpus"])
-        .expect("bare wiki corpus must keep parsing");
-    assert!(matches!(
-        preview.command,
-        Some(Commands::Wiki {
-            action: WikiAction::Corpus {
-                adopt_legacy: false,
-                ..
-            }
-        })
-    ));
-
-    let adopt_preview = Cli::try_parse_from(["tachi", "wiki", "corpus", "--adopt-legacy"])
-        .expect("legacy-adoption preview takes no token");
-    assert!(matches!(
-        adopt_preview.command,
-        Some(Commands::Wiki {
-            action: WikiAction::Corpus {
-                apply: false,
-                confirm: None,
-                backup_dir: None,
-                plan: None,
-                repair_sibling_damage: false,
-                adopt_legacy: true,
-            }
-        })
-    ));
+    for retired in [
+        ["tachi", "wiki", "corpus", "--repair-sibling-damage"],
+        ["tachi", "wiki", "corpus", "--adopt-legacy"],
+    ] {
+        Cli::try_parse_from(retired)
+            .expect_err("retired wiki corpus adoption/repair flags must be rejected");
+    }
 }
 
 /// `tachi wiki review` is preview-by-default and requires the full apply
@@ -1788,6 +1709,31 @@ fn broker_is_a_plan_apply_surface_with_no_one_shot_mutation() {
         assert!(
             Cli::try_parse_from(["tachi", "broker", verb, "lane.reasoning"]).is_err(),
             "`broker {verb}` must not exist: an alias write goes through plan/apply"
+        );
+    }
+}
+
+#[test]
+fn harness_status_is_read_only_and_rejects_mutation_subcommands_and_flags() {
+    let status = Cli::try_parse_from(["tachi", "harness", "status"])
+        .expect("`tachi harness status` should parse");
+    assert!(matches!(
+        status.command,
+        Some(Commands::Harness {
+            action: HarnessAction::Status { .. }
+        })
+    ));
+
+    for verb in ["fix", "apply", "promote", "delete", "repair"] {
+        assert!(
+            Cli::try_parse_from(["tachi", "harness", verb]).is_err(),
+            "`tachi harness {verb}` must be rejected by clap"
+        );
+    }
+    for flag in ["--fix", "--apply", "--promote"] {
+        assert!(
+            Cli::try_parse_from(["tachi", "harness", "status", flag]).is_err(),
+            "`tachi harness status {flag}` must be rejected by clap"
         );
     }
 }

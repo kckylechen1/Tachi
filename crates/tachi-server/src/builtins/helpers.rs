@@ -1,7 +1,7 @@
 use super::*;
 
 fn now() -> String {
-    Utc::now().to_rfc3339()
+    memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
 }
 
 /// Content source for a builtin skill table entry.

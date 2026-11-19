@@ -11,7 +11,6 @@
 //! semantics, allow-lists, reserved framing keys, timestamps, and error text
 //! are byte-for-byte preserved.
 
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -149,7 +148,10 @@ pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value,
     let github = obj.entry("github".to_string()).or_insert_with(|| json!({}));
     deep_merge(github, patch);
     let merged = github.clone();
-    obj.insert("updated_at".into(), json!(Utc::now().to_rfc3339()));
+    obj.insert(
+        "updated_at".into(),
+        json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+    );
     super::utils::write_json_atomic(&run_dir.join("status.json"), &status)?;
     Ok(merged)
 }
@@ -182,6 +184,9 @@ pub(crate) fn append_github_event(
     };
     event.insert("event".into(), json!(kind));
     event.insert("flow_id".into(), json!(flow_id));
-    event.insert("timestamp".into(), json!(Utc::now().to_rfc3339()));
+    event.insert(
+        "timestamp".into(),
+        json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+    );
     super::utils::append_flow_event(run_dir, Value::Object(event))
 }

@@ -3,17 +3,13 @@ use std::path::{Path, PathBuf};
 pub(crate) mod apply;
 pub(crate) mod classify;
 pub(crate) mod fs;
-pub(crate) mod legacy;
 pub(crate) mod plan;
-pub(crate) mod repair;
 pub(crate) mod types;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use apply::apply_plan_internal;
-pub(crate) use legacy::run_wiki_corpus_legacy_adoption_command;
-pub(crate) use repair::run_wiki_corpus_sibling_repair_command;
 pub(crate) use types::*;
 
 use self::apply::*;
@@ -99,8 +95,6 @@ pub(crate) fn run_wiki_corpus_command_internal(
             backup_manifest: None,
             migration_outcomes: Vec::new(),
             warnings,
-            sibling_repair: None,
-            legacy_adoption: None,
         });
     }
 
@@ -121,7 +115,5 @@ pub(crate) fn run_wiki_corpus_command_internal(
         backup_manifest: Some(backup_manifest),
         migration_outcomes,
         warnings,
-        sibling_repair: None,
-        legacy_adoption: None,
     })
 }

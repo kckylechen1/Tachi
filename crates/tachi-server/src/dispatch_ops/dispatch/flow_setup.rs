@@ -67,7 +67,7 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
                     "dispatch_id": inputs.dispatch_id,
                     "flow_id": flow_id,
                     "error": error,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
         }

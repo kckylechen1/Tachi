@@ -76,7 +76,9 @@ fn resolve_skill_content_source_library_present_resolves_and_hashes() {
         "fixture probe must not resolve before the fixture central library is mounted"
     );
 
-    let base = chrono::Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
+    let base = jiff::Timestamp::now()
+        .strftime("%Y%m%dT%H%M%S%9fZ")
+        .to_string();
     let central =
         crate::utils::test_fixture_path(format!("tachi-builtins-hermeticity-present-{base}"));
     let file = central.join(rel_path);
@@ -118,7 +120,9 @@ fn resolve_skill_content_source_library_absent_degrades_to_stub_not_error() {
         "fixture probe must not resolve before the (empty) fixture library is mounted either"
     );
 
-    let base = chrono::Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
+    let base = jiff::Timestamp::now()
+        .strftime("%Y%m%dT%H%M%S%9fZ")
+        .to_string();
     let empty_central =
         crate::utils::test_fixture_path(format!("tachi-builtins-hermeticity-absent-{base}"));
     std::fs::create_dir_all(&empty_central).unwrap();

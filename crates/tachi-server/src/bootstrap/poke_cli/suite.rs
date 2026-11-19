@@ -1,5 +1,4 @@
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -10,10 +9,10 @@ use super::probes::{
 use super::report::{render_poke_report_markdown, write_text_file};
 
 pub(super) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, String> {
-    let started_at = Utc::now().to_rfc3339();
+    let started_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let run_id = format!(
         "poke_{}_{}",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        memcore::time_compat::compact_basic(jiff::Timestamp::now()),
         &uuid::Uuid::new_v4().as_simple().to_string()[..8]
     );
     let run_dir = app_home.join("runs").join(&run_id);
@@ -88,7 +87,7 @@ pub(super) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, Strin
         "run_id": run_id,
         "status": overall,
         "started_at": started_at,
-        "finished_at": Utc::now().to_rfc3339(),
+        "finished_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "run_dir": run_dir.to_string_lossy(),
         "sandbox_home": sandbox_home.to_string_lossy(),
         "summary": {
@@ -119,7 +118,7 @@ async fn run_probe<'a, F>(name: &str, probes_dir: &Path, probe: F) -> Value
 where
     F: FnOnce() -> ProbeFuture<'a>,
 {
-    let started_at = Utc::now().to_rfc3339();
+    let started_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let result = probe().await;
     let mut payload = match result {
         Ok(mut value) => {
@@ -146,7 +145,7 @@ where
             "error": error,
         }),
     };
-    payload["finished_at"] = json!(Utc::now().to_rfc3339());
+    payload["finished_at"] = json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
     let path = probes_dir.join(format!("{name}.json"));
     if let Err(error) = crate::utils::write_json_file_owner_only(&path, &payload) {
         payload["status"] = json!("failed");

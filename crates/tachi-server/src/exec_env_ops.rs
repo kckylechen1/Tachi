@@ -1001,7 +1001,7 @@ fn book_private_reservation(
         reserved_bytes: approval.reserved_bytes,
         target_path: target_path.to_string(),
         resource_id: resource_id.to_string(),
-        approved_at: chrono::Utc::now().to_rfc3339(),
+        approved_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     };
     let value =
         serde_json::to_string(&reservation).map_err(|e| format!("serialize reservation: {e}"))?;

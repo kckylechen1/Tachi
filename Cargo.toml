@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/memcore",
-    "crates/memory-node",
     "crates/tachi-server",
     "crates/tachi-params",
     "crates/memory-server-runtime",
@@ -34,7 +33,6 @@ members = [
     # stays product-local). Depends on nothing else in this workspace.
     "crates/vault-kit",
     "tools/cleaner",
-    "tools/release-check",
 ]
 default-members = [
     "crates/memcore",
@@ -81,9 +79,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v5"] }
 thiserror = "2"
 tracing = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-# Successor lane for chrono (RUSTSEC-2026-0543, unmaintained; migration #2361).
-# std+serde only: no system timezone is used anywhere in this workspace.
+# Workspace time handling needs std and serde, not the system timezone.
 jiff = { version = "1", default-features = false, features = ["std", "serde"] }
 regex = "1.10.0"
 aes-gcm = "0.10"

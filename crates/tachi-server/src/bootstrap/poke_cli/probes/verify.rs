@@ -1,6 +1,5 @@
 use crate::tool_params::TachiVerifyParams;
 use crate::MemoryServer;
-use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
@@ -9,12 +8,12 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
 ) -> Result<Value, String> {
     let flow_id = format!(
         "flow_{}_poke_verify_{}",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        memcore::time_compat::compact_basic(jiff::Timestamp::now()),
         &uuid::Uuid::new_v4().as_simple().to_string()[..8]
     );
     let unrelated_flow_id = format!(
         "flow_{}_poke_unrelated_{}",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        memcore::time_compat::compact_basic(jiff::Timestamp::now()),
         &uuid::Uuid::new_v4().as_simple().to_string()[..8]
     );
     use crate::tool_params::TachiVerifyAction;

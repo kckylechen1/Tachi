@@ -4,7 +4,6 @@ use crate::tool_params::{
     SaveMemoryParams, SearchMemoryParams, SyncMemoriesParams, TachiCompleteParams,
     TachiMemoryParams, TachiSaveParams, TachiSearchParams,
 };
-use chrono::Utc;
 use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};

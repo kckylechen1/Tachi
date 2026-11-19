@@ -32,7 +32,7 @@ async fn tachi_status_full_surfaces_continuity_challenge_rate() {
                             "evidence_basis": "external_evidence",
                         }),
                         provenance: json!({"source": "test"}),
-                        created_at: Utc::now().to_rfc3339(),
+                        created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     })
                     .map_err(|e| e.to_string())?;
             }
@@ -42,7 +42,7 @@ async fn tachi_status_full_surfaces_continuity_challenge_rate() {
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: server.global_db_path_buf().display().to_string(),
@@ -51,7 +51,7 @@ async fn tachi_status_full_surfaces_continuity_challenge_rate() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),

@@ -10,7 +10,6 @@ use super::store::{
     merge_foundry_metadata, update_entry_metadata, with_foundry_store, with_foundry_store_read,
 };
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use serde_json::json;
 use tachi_foundry::infer_memory_insight;
 
@@ -146,7 +145,7 @@ pub(super) async fn process_memory_neighborhood_job(
         let metadata = merge_foundry_metadata(
             &entry.metadata,
             json!({
-                "last_neighborhood_at": Utc::now().to_rfc3339(),
+                "last_neighborhood_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "neighborhood_job_id": item.job.id,
                 "related_entries": related,
                 "insight": insight,

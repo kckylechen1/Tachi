@@ -146,7 +146,7 @@ pub(crate) fn update_phase(
             return Err("native session lost lifecycle ownership".into());
         }
         status["native_session"] = session;
-        status["updated_at"] = json!(Utc::now().to_rfc3339());
+        status["updated_at"] = json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
         advance_status_revision(
             status
                 .as_object_mut()

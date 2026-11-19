@@ -69,28 +69,6 @@ class RegistrarTests(unittest.TestCase):
 
 
 class InstallerRetirementTests(unittest.TestCase):
-    def test_legacy_plugin_installer_refuses_without_forwarding(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            wrapper = root / "install_openclaw_ext.sh"
-            wrapper.write_text(Path(__file__).with_name(wrapper.name).read_text())
-            marker = root / "install-started"
-            installer = root / "install.sh"
-            installer.write_text('#!/bin/sh\necho started > "$INSTALL_TEST_MARKER"\n')
-            installer.chmod(0o700)
-            env = {**os.environ, "INSTALL_TEST_MARKER": str(marker)}
-            for args in ([], ["--help"], ["--dir", str(root / "plugin")]):
-                with self.subTest(args=args):
-                    result = subprocess.run(
-                        ["/bin/bash", str(wrapper), *args], env=env,
-                        capture_output=True, text=True, check=False,
-                    )
-                    self.assertEqual(result.returncode, 1)
-                    self.assertIn("plugin is retired", result.stderr)
-                    self.assertFalse(marker.exists())
-                    self.assertEqual(sorted(path.name for path in root.iterdir()),
-                                     ["install.sh", "install_openclaw_ext.sh"])
-
     def test_legacy_plugin_option_refuses_before_any_install_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

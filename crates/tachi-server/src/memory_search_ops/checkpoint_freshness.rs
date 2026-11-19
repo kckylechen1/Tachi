@@ -1,7 +1,6 @@
 //! Read-time hints for dated agent checkpoints; durable lifecycle stays intact.
 
 use crate::tool_params::SearchMemoryParams;
-use chrono::{NaiveDate, Utc};
 use memcore::{MemoryEntry, MemoryStore, SearchResult};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -17,7 +16,7 @@ pub(crate) fn is_checkpoint_path(path: &str) -> bool {
 
 fn checkpoint_date(path: &str) -> Option<&str> {
     let date = path.strip_prefix(PREFIX)?;
-    (date.len() == 10 && NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()).then_some(date)
+    (date.len() == 10 && jiff::civil::Date::strptime("%Y-%m-%d", date).is_ok()).then_some(date)
 }
 
 /// Compare only attributed, canonical dated checkpoints in this physical
@@ -49,7 +48,7 @@ pub(crate) fn annotation(
     };
     let cutoff = as_of
         .map(str::to_owned)
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+        .unwrap_or_else(|| memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
     // This exact namespace cannot overlap reserved test paths; only the
     // explicit JSON boolean fixture marker remains relevant before LIMIT.
     let sql = "SELECT id, substr(path, 20) AS checkpoint_date
@@ -150,7 +149,7 @@ pub(crate) fn markdown_suffix(row: &Value) -> String {
     }
     hint["newer_checkpoint_date"]
         .as_str()
-        .filter(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+        .filter(|date| jiff::civil::Date::strptime("%Y-%m-%d", date).is_ok())
         .map(|date| format!(" [older checkpoint; newer checkpoint: {date}]"))
         .unwrap_or_default()
 }

@@ -71,8 +71,8 @@ impl StoredVectorSweepState {
     fn from_update(
         update: VectorSweepStateUpdate,
         previous: Option<&Self>,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Self {
+        now: jiff::Timestamp,
+    ) -> Result<Self, String> {
         let interval_secs = if update.preserve_schedule {
             update
                 .interval_secs
@@ -80,22 +80,24 @@ impl StoredVectorSweepState {
         } else {
             update.interval_secs
         };
-        let next_run_after = if update.preserve_schedule {
-            update
-                .interval_secs
-                .map(|secs| {
-                    (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
-                })
-                .or_else(|| previous.and_then(|state| state.next_run_after.clone()))
-        } else {
-            update.interval_secs.map(|secs| {
-                (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
-            })
+        let next_run_after = match update.interval_secs {
+            Some(secs) => {
+                let elapsed = jiff::SignedDuration::try_from(Duration::from_secs(secs))
+                    .map_err(|e| format!("invalid vector sweep interval: {e}"))?;
+                let next = now
+                    .checked_add(elapsed)
+                    .map_err(|e| format!("invalid vector sweep schedule: {e}"))?;
+                Some(memcore::time_compat::rfc3339_compat(next))
+            }
+            None if update.preserve_schedule => {
+                previous.and_then(|state| state.next_run_after.clone())
+            }
+            None => None,
         };
         let preserve_outcome = update.preserve_outcome && previous.is_some();
-        let timestamp = now.to_rfc3339();
+        let timestamp = memcore::time_compat::rfc3339_compat(now);
 
-        Self {
+        Ok(Self {
             enabled: update.enabled,
             disabled_reason: update.disabled_reason,
             skip_recall_cache: update.skip_recall_cache,
@@ -123,7 +125,7 @@ impl StoredVectorSweepState {
             next_run_after,
             interval_secs,
             updated_at: timestamp,
-        }
+        })
     }
 
     fn into_status(self) -> VectorSweepState {
@@ -308,9 +310,9 @@ pub(crate) fn record_vector_sweep_state_on_store(
     store: &MemoryStore,
     update: VectorSweepStateUpdate,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let previous = read_stored_vector_sweep_state(store)?;
-    let state = StoredVectorSweepState::from_update(update, previous.as_ref(), now);
+    let state = StoredVectorSweepState::from_update(update, previous.as_ref(), now)?;
     let payload =
         serde_json::to_string(&state).map_err(|e| format!("serialize vector sweep state: {e}"))?;
     store
@@ -727,7 +729,7 @@ mod tests {
     }
 
     fn insert_memory(store: &mut MemoryStore, id: &str, source: &str, topic: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         store
             .upsert(&MemoryEntry {
                 id: id.to_string(),

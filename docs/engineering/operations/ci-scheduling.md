@@ -12,8 +12,9 @@ continues on `windows-latest`. Owner/event admission, scope profiles and
 same-run platform evidence remain unchanged.
 
 The TypeScript CLI and OpenClaw plugin are retired. Their dedicated `node` job
-family and `node_cache` applicability profile are removed. Native Node bindings
-remain a separate package with their own manual build/publish workflow.
+family and `node_cache` applicability profile are removed. The native Node
+bindings package (`crates/memory-node`) and its manual build/publish workflow
+were retired 2026-11-18 (owner adjudication; #2143).
 
 Since 2026-10-22 (owner decision) the main ruleset requires only `acceptance`,
 and there is no Linux conformance workflow: the former `Linux acceptance`

@@ -1,11 +1,5 @@
 use super::*;
 
-pub(super) fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
 fn tokenize_for_similarity(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

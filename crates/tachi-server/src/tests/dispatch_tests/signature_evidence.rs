@@ -12,7 +12,6 @@ use crate::dispatch_ops::signature_evidence::{
     self_report_trust_for_vendor, SignatureRecord,
 };
 use crate::tool_params::SignatureRecordParams;
-use chrono::{Duration, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use tachi_dispatch::{project_counter_clauses, Severity, COUNTER_CLAUSE_TOP_N};
 
@@ -84,7 +83,7 @@ async fn g1_discrimination_glm_carries_security_clauses_codex_does_not() {
 #[tokio::test]
 async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
     let server = make_server();
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
 
     // A lane whose only signature is resolved projects nothing.
     record_signature(
@@ -96,7 +95,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             severity: Some(Severity::Medium),
             evidence_ref: Some("seed".to_string()),
             resolved: false,
-            recorded_at: now - Duration::days(10),
+            recorded_at: now - jiff::SignedDuration::from_secs(10 * 86_400),
             identity_receipt: None,
             attribution_basis: "fallback_unreceipted".to_string(),
             vendor_explicit: true,
@@ -112,7 +111,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             severity: None,
             evidence_ref: Some("resolved".to_string()),
             resolved: true,
-            recorded_at: now - Duration::days(9),
+            recorded_at: now - jiff::SignedDuration::from_secs(9 * 86_400),
             identity_receipt: None,
             attribution_basis: "fallback_unreceipted".to_string(),
             vendor_explicit: true,
@@ -121,7 +120,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
     .expect("record resolution");
 
     let rows = rows_for_lane(&server, "implementer", "grok").expect("rows");
-    let projected = project_counter_clauses(&rows, now.timestamp(), COUNTER_CLAUSE_TOP_N);
+    let projected = project_counter_clauses(&rows, now.as_second(), COUNTER_CLAUSE_TOP_N);
     assert!(
         projected.is_empty(),
         "resolved-only lane must project nothing: {projected:?}"
@@ -137,7 +136,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             severity: Some(Severity::High),
             evidence_ref: Some("old".to_string()),
             resolved: false,
-            recorded_at: now - Duration::days(400),
+            recorded_at: now - jiff::SignedDuration::from_secs(400 * 86_400),
             identity_receipt: None,
             attribution_basis: "fallback_unreceipted".to_string(),
             vendor_explicit: true,
@@ -153,7 +152,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             severity: Some(Severity::Critical),
             evidence_ref: Some("old-critical".to_string()),
             resolved: false,
-            recorded_at: now - Duration::days(400),
+            recorded_at: now - jiff::SignedDuration::from_secs(400 * 86_400),
             identity_receipt: None,
             attribution_basis: "fallback_unreceipted".to_string(),
             vendor_explicit: true,
@@ -162,7 +161,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
     .expect("record stale critical");
 
     let rows = rows_for_lane(&server, "implementer", "kimi").expect("rows");
-    let projected = project_counter_clauses(&rows, now.timestamp(), COUNTER_CLAUSE_TOP_N);
+    let projected = project_counter_clauses(&rows, now.as_second(), COUNTER_CLAUSE_TOP_N);
     let ids: Vec<&str> = projected.iter().map(|c| c.signature.as_str()).collect();
     assert_eq!(
         ids,
@@ -275,7 +274,7 @@ async fn g7_convoy_suffixed_stage_gets_vaccinated() {
             severity: Some(Severity::High),
             evidence_ref: Some("G7".to_string()),
             resolved: false,
-            recorded_at: Utc::now(),
+            recorded_at: jiff::Timestamp::now(),
             identity_receipt: None,
             attribution_basis: "fallback_unreceipted".to_string(),
             vendor_explicit: true,
@@ -343,7 +342,7 @@ async fn planned_unconfirmed_auto_derived_row_is_excluded_from_self_report_trust
             severity: Some(Severity::Critical),
             evidence_ref: Some("auto-derived".to_string()),
             resolved: false,
-            recorded_at: Utc::now(),
+            recorded_at: jiff::Timestamp::now(),
             identity_receipt: None,
             attribution_basis: "planned_unconfirmed".to_string(),
             vendor_explicit: false,
@@ -370,7 +369,7 @@ async fn planned_unconfirmed_auto_derived_row_is_excluded_from_self_report_trust
             severity: Some(Severity::Critical),
             evidence_ref: Some("explicit-vendor".to_string()),
             resolved: false,
-            recorded_at: Utc::now(),
+            recorded_at: jiff::Timestamp::now(),
             identity_receipt: None,
             attribution_basis: "planned_unconfirmed".to_string(),
             vendor_explicit: true,

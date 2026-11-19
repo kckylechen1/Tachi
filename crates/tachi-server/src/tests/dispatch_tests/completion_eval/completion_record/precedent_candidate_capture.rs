@@ -937,7 +937,7 @@ async fn s4_committing_caller_session_does_not_witness_historical_adjudicator() 
     seed_dispatch_run(&server, "disp-1076");
 
     // Admit the committing caller as `owner` with a verified admission.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let req = VerifiedAdmissionRequest {
         agent_identity_id: "owner".to_string(),
         connection_id: "conn-s4-owner".to_string(),
@@ -958,8 +958,8 @@ async fn s4_committing_caller_session_does_not_witness_historical_adjudicator() 
         verification_scope: req.verification_scope.clone(),
         evidence_digest: "d".repeat(64),
         evidence_ref: VerifiedEvidenceRef::attestation("oidc", "s4-1").unwrap(),
-        issued_at: now - chrono::Duration::seconds(5),
-        expires_at: now + chrono::Duration::minutes(10),
+        issued_at: now - jiff::SignedDuration::from_secs(5),
+        expires_at: now + jiff::SignedDuration::from_mins(10),
         nonce: "nonce-s4-owner".to_string(),
         state: VerifiedEvidenceState::Active,
     };

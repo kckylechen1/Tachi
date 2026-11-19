@@ -1,4 +1,3 @@
-use chrono::Utc;
 use serde_json::json;
 
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
@@ -363,8 +362,8 @@ fn persist_distill_memory_with_optional_receipt(
         .as_ref()
         .map(|p| p.agent_id.clone())
         .unwrap_or_else(|| "tachi_scheduler".to_string());
-    let timestamp = Utc::now().to_rfc3339();
-    let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let timestamp = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
+    let timestamp_segment = memcore::time_compat::compact_naked(jiff::Timestamp::now());
     let source_memory_ids = normalized_source_memory_ids(group);
     let memory_id = stable_distill_memory_id(group, &source_memory_ids);
     let plan = plan_daily_distill_memory(DailyDistillMemoryInput {

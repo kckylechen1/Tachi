@@ -1,4 +1,3 @@
-use chrono::Utc;
 use memcore::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -488,7 +487,7 @@ pub(crate) fn insert_required_ingest_audit(
     server.with_global_store(|store| {
         store
             .audit_log_insert(
-                &Utc::now().to_rfc3339(),
+                &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "ingest",
                 label,
                 audit_key,
@@ -510,7 +509,7 @@ pub(crate) fn insert_ingest_skip_audit(
     server.with_global_store(|store| {
         store
             .audit_log_insert(
-                &Utc::now().to_rfc3339(),
+                &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "ingest",
                 label,
                 &args_hash,
@@ -811,7 +810,7 @@ mod tests {
             summary: text.to_string(),
             text: text.to_string(),
             importance: 0.8,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".to_string(),
@@ -917,7 +916,7 @@ mod tests {
             .with_global_store(|store| {
                 store
                     .audit_log_insert(
-                        &Utc::now().to_rfc3339(),
+                        &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         "ingest",
                         "ingest_source",
                         event_hash,
@@ -1056,7 +1055,7 @@ mod tests {
         MemoryStore::open(ambient_db.to_str().expect("utf8 ambient DB")).expect("ambient DB");
         crate::manifest::Manifest {
             schema_version: 1,
-            generated_at: Utc::now().to_rfc3339(),
+            generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             comment: String::new(),
             dbs: vec![crate::manifest::DbEntry {
                 path: ambient_db.display().to_string(),
@@ -1065,7 +1064,7 @@ mod tests {
                 schema_kind: "tachi".to_string(),
                 vec_enabled: true,
                 allow_write: true,
-                last_doctor_at: Utc::now().to_rfc3339(),
+                last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 last_classification: "healthy".to_string(),
                 scope_hint: format!("project:{project_name}"),
                 notes: String::new(),

@@ -15,7 +15,7 @@ fn read_distill_marker_parses_json_quality_summary() {
     std::fs::write(
         runs.join(".last_distill_run"),
         serde_json::json!({
-            "ts": Utc::now().to_rfc3339(),
+            "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "groups_distilled": 7,
             "groups_skipped": 2,
             "fallback_used": 1,
@@ -40,8 +40,11 @@ fn read_distill_marker_accepts_legacy_bare_timestamp() {
     std::fs::create_dir_all(&runs).expect("runs dir");
     // Pre-JSON markers were a bare RFC3339 string; they must still parse with
     // every quality field left None (not be mistaken for a JSON document).
-    std::fs::write(runs.join(".last_distill_run"), Utc::now().to_rfc3339())
-        .expect("write legacy marker");
+    std::fs::write(
+        runs.join(".last_distill_run"),
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+    )
+    .expect("write legacy marker");
 
     let marker = read_distill_marker(app_home.path()).expect("legacy marker parsed");
     assert_eq!(marker.groups_distilled, None);
@@ -162,7 +165,7 @@ fn read_distill_marker_parses_error_field() {
     std::fs::write(
         runs.join(".last_distill_run"),
         serde_json::json!({
-            "ts": Utc::now().to_rfc3339(),
+            "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "error": "provider timeout after 30s",
             "groups_distilled": 0,
             "groups_skipped": 0,
@@ -191,7 +194,7 @@ fn read_distill_marker_error_field_absent_for_success_marker() {
     std::fs::write(
         runs.join(".last_distill_run"),
         serde_json::json!({
-            "ts": Utc::now().to_rfc3339(),
+            "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "groups_distilled": 5,
             "errors": 0,
         })

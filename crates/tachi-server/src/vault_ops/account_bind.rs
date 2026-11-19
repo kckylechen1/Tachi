@@ -7,8 +7,8 @@
 //! a new family into the slot row. Account names still rotate in place.
 
 use super::slot_rebind::fingerprint_secret;
+use crate::utils::Rfc3339Stamp;
 use crate::vault_crypto as crypto;
-use chrono::Utc;
 use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use memcore::MemoryStore;
 pub(crate) use tachi_llm::is_lane_slot_secret_name;
@@ -23,8 +23,8 @@ pub(crate) fn health_row_unusable(health: &VaultKeyHealth) -> bool {
         "rate_limited" | "cooldown" => health
             .cooldown_until
             .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .is_some_and(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now()),
+            .and_then(Rfc3339Stamp::parse)
+            .is_some_and(|until| until.after(jiff::Timestamp::now())),
         _ => false,
     }
 }
@@ -340,7 +340,7 @@ pub(crate) fn write_lane_slot_binding_in_transaction(
     let (encrypted_value, nonce) = crypto::encrypt(master_key, decided.store_value.as_bytes())
         .map_err(|e| format!("encrypt slot pointer: {e}"))?;
     let created = existing_entry.is_none();
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = VaultEntry {
         name: name.to_string(),
         encrypted_value,
@@ -986,7 +986,7 @@ mod tests {
     fn seed_account(store: &MemoryStore, name: &str, value: &str) {
         let (encrypted_value, nonce) =
             crypto::encrypt(&MASTER, value.as_bytes()).expect("encrypt account");
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         store
             .vault_upsert_entry(&VaultEntry {
                 name: name.to_string(),
@@ -1122,7 +1122,7 @@ mod tests {
 
     fn encrypted_entry(name: &str, value: &str) -> VaultEntry {
         let (encrypted_value, nonce) = crypto::encrypt(&MASTER, value.as_bytes()).expect("encrypt");
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         VaultEntry {
             name: name.to_string(),
             encrypted_value,

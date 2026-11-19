@@ -4,8 +4,8 @@ use tachi_llm::{RerankConfig, RerankProviderKind};
 
 use crate::status_ops::{ApiKeyStatus, DbStatus};
 
-pub(crate) fn format_elapsed(dur: chrono::Duration) -> String {
-    let secs = dur.num_seconds().max(0);
+pub(crate) fn format_elapsed(seconds: i64) -> String {
+    let secs = seconds.max(0);
     if secs < 60 {
         format!("{secs}s ago")
     } else if secs < 3600 {

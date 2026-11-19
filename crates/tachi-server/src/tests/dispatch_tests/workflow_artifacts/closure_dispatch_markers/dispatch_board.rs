@@ -119,7 +119,7 @@ async fn tachi_task_board_filters_to_flow_dispatch_ids() {
                 "task": task,
                 "state": "TASK_STATE_COMPLETED",
                 "exit_code": 0,
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }))
             .expect("status json"),
         )

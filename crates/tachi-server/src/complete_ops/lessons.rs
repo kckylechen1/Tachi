@@ -1,4 +1,3 @@
-use chrono::Utc;
 use serde_json::json;
 
 use crate::memory_search_ops::handle_save_memory;
@@ -40,7 +39,7 @@ pub(super) async fn run_lesson_post_complete_hook(
                 safe_task,
                 outcome_norm,
                 safe_skills_used,
-                &Utc::now().to_rfc3339(),
+                &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 30,
             )
             .map_err(|e| format!("lesson dedup update: {e}"))
@@ -113,7 +112,7 @@ pub(super) async fn run_lesson_post_complete_hook(
             "dispatch_id": params.dispatch_id.clone(),
             "outcome": outcome_norm,
             "count": 1,
-            "last_seen": Utc::now().to_rfc3339(),
+            "last_seen": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "skills_used": safe_skills_used,
         })),
         emit_continuity: false,

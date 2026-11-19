@@ -8,7 +8,7 @@ fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> Memo
         summary: "summary".to_string(),
         text: "status vector health test memory".to_string(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),
@@ -261,7 +261,7 @@ fn namespace_health_counts_cache_wiki_derived_and_graph_rows() {
             "INSERT INTO memory_edges
                  (source_id, target_id, relation, weight, metadata, created_at)
                  VALUES ('normal', 'missing-target', 'related_to', 1.0, '{}', ?1)",
-            [Utc::now().to_rfc3339()],
+            [memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())],
         )
         .expect("insert orphan edge");
 

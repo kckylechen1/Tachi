@@ -80,8 +80,7 @@ tachi --daemon --no-project-db --port 6919 serve
 
 The OpenClaw plugin, memory tools, lifecycle hooks and experimental passthroughs
 are removed. The historical `openclaw` profile alias does not provide an
-installed adapter or authorize public HTTP management. See the
-[retirement guidance](../../../integrations/openclaw/README.md).
+installed adapter or authorize public HTTP management.
 
 ### Compaction primitive
 

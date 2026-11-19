@@ -15,7 +15,7 @@ async fn rate_limit_rpm_blocks_when_exceeded() {
             tool_filter: None,
             rate_limit_rpm: Some(5),   // Override: only 5 calls/min
             rate_limit_burst: Some(0), // Disable burst detection for this test
-            registered_at: Utc::now().to_rfc3339(),
+            registered_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
     }
 

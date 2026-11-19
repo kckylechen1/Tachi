@@ -6,7 +6,6 @@
 
 use crate::managed_run_control::AnchoredRunStatus;
 use crate::MemoryServer;
-use chrono::{DateTime, Utc};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CreateTaskResult,
     DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus,
@@ -234,10 +233,8 @@ fn result_response(
 }
 
 fn expired(binding: &ResultBinding) -> bool {
-    DateTime::parse_from_rfc3339(&binding.created_at)
-        .map(|created| {
-            Utc::now().signed_duration_since(created).num_milliseconds() >= TTL_MS as i64
-        })
+    crate::utils::parse_rfc3339(&binding.created_at)
+        .map(|created| (jiff::Timestamp::now() - created).as_millis() >= i128::from(TTL_MS))
         .unwrap_or(true)
 }
 
@@ -248,9 +245,8 @@ fn task_metadata(binding: &ResultBinding, status: &Value) -> Task {
         .get("updated_at")
         .and_then(Value::as_str)
         .filter(|updated| {
-            DateTime::parse_from_rfc3339(updated)
-                .ok()
-                .zip(DateTime::parse_from_rfc3339(&binding.created_at).ok())
+            crate::utils::Rfc3339Stamp::order_key(updated)
+                .zip(crate::utils::Rfc3339Stamp::order_key(&binding.created_at))
                 .is_some_and(|(updated, created)| updated >= created)
         });
     Task::new(
@@ -346,7 +342,7 @@ pub(crate) fn begin_result(
                 "{TASK_PREFIX}{dispatch_id}:{}",
                 uuid::Uuid::new_v4().simple()
             ),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             observed_revision: status["status_revision"].as_u64().ok_or_else(unavailable)?,
             cancel_revision: None,
             terminal: None,

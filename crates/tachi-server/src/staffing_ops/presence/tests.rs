@@ -26,7 +26,8 @@ fn roster_counts_expired_peers_before_display_limit_and_keeps_self() {
             row.id = format!("expired-presence-{index}");
             row.owner = format!("expired-owner-{index}");
             row.client = Some(format!("expired-client-{index}"));
-            row.observed_at = Utc::now() - chrono::Duration::seconds(CLIENT_TTL_SECONDS + 1);
+            row.observed_at =
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(CLIENT_TTL_SECONDS + 1);
             rows.insert(format!("expired-{index}"), row);
         }
     }
@@ -119,11 +120,13 @@ fn sightings_expire_without_fabricating_readiness_and_refresh_keeps_identity() {
     assert_eq!(before["items"][0]["state"], "recently_seen");
     assert!(before["items"][0]["accepts_new_work"].is_null());
     for row in server.staff_presence.rows.lock().unwrap().values_mut() {
-        row.observed_at = Utc::now() - chrono::Duration::seconds(CLIENT_TTL_SECONDS + 1);
+        row.observed_at = "2000-01-01T00:00:00.120Z".parse().unwrap();
     }
+    let expired = roster(&server, None, None, 20).unwrap();
+    assert_eq!(expired["items"][0]["state"], "stale");
     assert_eq!(
-        roster(&server, None, None, 20).unwrap()["items"][0]["state"],
-        "stale"
+        expired["items"][0]["observed_at"],
+        "2000-01-01T00:00:00.120Z"
     );
     server.touch_activity();
     let after = roster(&server, None, None, 20).unwrap();

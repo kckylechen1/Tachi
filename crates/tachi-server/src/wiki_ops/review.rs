@@ -899,7 +899,7 @@ pub(crate) fn apply_wiki_review(
     // Validate the manifest and snapshot bytes BEFORE the write path.
     let manifest = load_source_manifest(&request.manifest_path)?;
 
-    let decided_at = Utc::now().to_rfc3339();
+    let decided_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let mut approved_receipt = None;
 
     server.with_named_project_store_identity_checked(&request.project, |store| {

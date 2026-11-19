@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -230,7 +229,7 @@ impl CodexAppServerConnection {
             "raw_tool_kind": raw_kind,
             "verdict": "deny",
             "authorizer": "codex_app_server_fail_closed",
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
         if self.defer_worker_text {
             self.staged_events.push(NativeAcpStagedEvent {
@@ -264,7 +263,7 @@ impl CodexAppServerConnection {
                 "agent": self.agent,
                 "acp_event": kind,
                 "text": text,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         });
         self.mapped_events += 1;

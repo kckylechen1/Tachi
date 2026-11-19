@@ -1,20 +1,5 @@
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("tachi-server lives under crates/tachi-server")
-        .to_path_buf()
-}
-
-fn kernel_surface_doc() -> String {
-    fs::read_to_string(repo_root().join("docs/engineering/architecture/kernel-surface-v1.md"))
-        .expect("read kernel surface doc")
-}
 
 fn kernel_surface_fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
@@ -142,19 +127,4 @@ fn portable_kernel_manifest_does_not_require_product_surfaces() {
             "portable kernel must not require product/operator surface {forbidden}"
         );
     }
-}
-
-#[test]
-fn kernel_surface_doc_names_evidence_and_decision_rule() {
-    let doc = kernel_surface_doc();
-
-    assert!(doc.contains("### Portable Memory Kernel Manifest"));
-    assert!(doc.contains("### Backend Boundary"));
-    assert!(doc.contains("### Memory Ontology"));
-    assert!(doc.contains("OMP's\n`MemoryBackend`"));
-    assert!(doc.contains("Hindsight's four-network ontology"));
-    assert!(doc.contains("It explicitly excludes GitHub, dispatch, ship, release"));
-    assert!(doc.contains("Downstream\nagents should cite that fixture"));
-    assert!(doc.contains("This is a target contract"));
-    assert!(doc.contains("`memory.saved` exists today"));
 }

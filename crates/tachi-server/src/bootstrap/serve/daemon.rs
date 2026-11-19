@@ -141,28 +141,8 @@ pub(super) async fn serve_http_daemon(
             }
         });
         eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
-
-        let rem_server = server.clone();
-        tokio::spawn(async move {
-            loop {
-                let next_run = crate::daily_pipeline::next_weekly_rem_run_time();
-                tokio::time::sleep_until(next_run).await;
-                match crate::foundry_runtime_ops::wiki_evolver::recover_pending_rem_operations(
-                    &rem_server,
-                ) {
-                    Ok(report) => eprintln!(
-                        "[rem-wiki-recovery] completed={} aborted_stale={} foreign_pending_skipped={}",
-                        report.completed,
-                        report.aborted_stale,
-                        report.foreign_pending_skipped,
-                    ),
-                    Err(e) => eprintln!("[rem-wiki-recovery] failed: {e}"),
-                }
-            }
-        });
-        eprintln!("[daemon] REM wiki recovery scheduled for Sunday 05:00 Asia/Shanghai");
     } else {
-        eprintln!("[daemon] daily pipeline and REM wiki recovery disabled for scoped daemon");
+        eprintln!("[daemon] daily pipeline disabled for scoped daemon");
     }
 
     use tokio_util::sync::CancellationToken;
@@ -217,8 +197,9 @@ pub(super) async fn serve_http_daemon(
             loop {
                 tokio::time::sleep(tick).await;
                 let last = clock.load(std::sync::atomic::Ordering::Relaxed);
-                let idle_ms = chrono::Utc::now().timestamp_millis() - last;
-                if idle_ms >= idle_timeout.as_millis() as i64 {
+                let idle_ms =
+                    jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) - i128::from(last);
+                if idle_ms >= idle_timeout.as_millis() as i128 {
                     eprintln!(
                         "[idle-reaper] daemon idle {}s (limit {}s); shutting down; a supervisor or operator must restart it for native HTTP clients",
                         idle_ms / 1000,
@@ -353,7 +334,7 @@ pub(super) async fn serve_http_daemon(
         "project_db": project_db_path
             .as_ref()
             .map(|p| p.display().to_string()),
-        "started_at": Utc::now().to_rfc3339(),
+        "started_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "version": crate::build_info::PKG_VERSION,
         "git_sha": crate::build_info::GIT_SHA,
         "internal_proxy_token": internal_proxy_token,

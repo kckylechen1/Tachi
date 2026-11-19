@@ -158,7 +158,7 @@ impl MaintenancePlan {
         {
             return Err("maintenance plan target/profile identity is incomplete".to_string());
         }
-        chrono::DateTime::parse_from_rfc3339(&self.as_of)
+        crate::utils::parse_rfc3339(&self.as_of)
             .map_err(|error| format!("maintenance plan as_of is invalid: {error}"))?;
         match (self.operation, &self.policy, &self.delete_id) {
             (MaintenanceOperation::Gc, MaintenancePolicy::Gc { .. }, None) => {}
@@ -290,7 +290,7 @@ impl CommittedReceiptAuthority {
         {
             return Err("committed maintenance authority does not bind the supplied plan".into());
         }
-        chrono::DateTime::parse_from_rfc3339(&self.apply_timestamp).map_err(|error| {
+        crate::utils::parse_rfc3339(&self.apply_timestamp).map_err(|error| {
             format!("committed maintenance authority timestamp is invalid: {error}")
         })?;
         validate_facts(self.operation, &self.source)?;

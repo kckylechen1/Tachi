@@ -499,7 +499,7 @@ fn vault_upsert_secret_with_key_binds_lane_slot_instead_of_copying() {
             key_id: "DEEPSEEK_API_KEY".to_string(),
             status: "disabled".to_string(),
             disabled: true,
-            updated_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             ..Default::default()
         })
         .expect("disable account");
@@ -669,7 +669,7 @@ fn lease_api_key_from_store_ignores_legacy_slot_rotation() {
     let store = open_cli_store(&db_path).expect("open rw");
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(key.bytes(), b"leftover-rotation-member").expect("encrypt");
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     store
         .vault_upsert_entry(&memcore::vault::VaultEntry {
             name: "EXTRACT_API_KEY_1".to_string(),

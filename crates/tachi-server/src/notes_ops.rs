@@ -1,4 +1,3 @@
-use chrono::Utc;
 use std::path::{Component, Path, PathBuf};
 
 // ─── Notes filesystem helpers ──────────────────────────────────────────────────
@@ -125,7 +124,7 @@ fn build_note_markdown(
     keywords: &[String],
     source: &str,
 ) -> String {
-    let ts = Utc::now().to_rfc3339();
+    let ts = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let kw_str = if keywords.is_empty() {
         "[]".to_string()
     } else {
@@ -163,8 +162,8 @@ pub(crate) fn write_note_file(
     let root = notes_root(home);
     ensure_notes_dirs(&root)?;
 
-    let now = Utc::now();
-    let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let now = jiff::Timestamp::now();
+    let ts = memcore::time_compat::compact_basic(now);
 
     let slug_source = title
         .map(str::to_string)
