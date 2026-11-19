@@ -5,7 +5,6 @@
 //! current source groups, or compensates and archives stale pending operations.
 //! Existing drafts retain their review lifecycle and remain available to readers.
 
-use chrono::Utc;
 use serde_json::Value;
 
 use crate::server_state::MemoryServer;
@@ -395,7 +394,7 @@ fn complete_rem_operation(
     sources: &[RemSourceRef],
 ) -> Result<bool, String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let runtime_stores = runtime_rem_source_stores(server)?;
     let (global_sources, project_sources) = route_rem_sources(sources, &runtime_stores, draft_id)?;
 
@@ -828,7 +827,7 @@ pub(crate) fn recover_pending_rem_operations(
                         entry.id
                     )
                 })?;
-                let aborted_at = Utc::now().to_rfc3339();
+                let aborted_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 server.with_named_project_store_identity_checked("wiki", |store| {
                     store
                         .abort_stale_rem_wiki_operation(&entry.id, &aborted_at)

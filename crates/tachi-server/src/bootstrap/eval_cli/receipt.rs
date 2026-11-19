@@ -76,7 +76,7 @@ pub(super) fn write_receipt(
     let mut receipt = json!({
         "schema_version": SCHEMA,
         "run_id": uuid::Uuid::new_v4().to_string(),
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "build": {
             "git_sha": crate::build_info::GIT_SHA,
             "build_time": crate::build_info::BUILD_TIME,

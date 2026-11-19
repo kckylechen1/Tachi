@@ -7,8 +7,8 @@ pub fn cmd_purge(
     apply: bool,
     json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cutoff: DateTime<Utc> = Utc::now() - Duration::days(older_than_days as i64);
-    let cutoff_iso = cutoff.to_rfc3339();
+    let cutoff = crate::repair::retention_cutoff(older_than_days)?;
+    let cutoff_iso = memcore::time_compat::rfc3339_compat(cutoff);
     let rows = collect_quarantined(manifest)?;
 
     let stale: Vec<&QRow> = rows

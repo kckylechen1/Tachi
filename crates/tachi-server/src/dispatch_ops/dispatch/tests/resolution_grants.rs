@@ -1,6 +1,5 @@
 use super::*;
 use crate::test_support::EnvRestore;
-use chrono::Utc;
 use serde_json::{json, Value};
 
 fn custom_adapter_source_is_flat_free(source: &str) -> bool {
@@ -641,7 +640,7 @@ fn dispatch_resolution_mints_typed_assignment_with_exact_legacy_projection() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L2,
     )
     .expect("profile-less custom dispatch resolves");
@@ -790,7 +789,7 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
     let start = resolve_dispatch_start(
         &server,
         &mut assignment_params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("assignment baseline");
@@ -894,7 +893,7 @@ fn explicit_profile_assignment_is_authoritative_before_legacy_projection() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("profile alias resolves before legacy projection");
@@ -965,7 +964,7 @@ async fn raw_profile_alias_keeps_completion_diagnostics_raw_while_assignment_is_
     let start = resolve_dispatch_start(
         &server,
         &mut resolved_params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("raw alias resolves before the compatibility projection");
@@ -1067,7 +1066,8 @@ fn typed_ingress_equivalence_matrix_covers_missing_and_effective_values() {
         }
 
         let start =
-            resolve_dispatch_start(&server, &mut params, Utc::now(), case.level).expect(case.name);
+            resolve_dispatch_start(&server, &mut params, jiff::Timestamp::now(), case.level)
+                .expect(case.name);
         assert_eq!(
             start.resolved_assignment.selected_worker, "custom",
             "{}",
@@ -1118,7 +1118,7 @@ fn invalid_profile_is_refused_before_typed_assignment_or_launch() {
     let err = match resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     ) {
         Ok(_) => panic!("unknown profile must be refused before typed assignment or launch"),
@@ -1138,7 +1138,7 @@ fn canonical_ingress_refuses_cross_lineage_model_without_partial_legacy_projecti
     let err = match resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     ) {
         Ok(_) => {
@@ -1251,7 +1251,7 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("composed MCP profile resolves");
@@ -1752,7 +1752,7 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     let omitted_start = resolve_dispatch_start(
         &server,
         &mut omitted,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("omitted permission profile resolves");
@@ -1772,7 +1772,7 @@ fn compiled_permission_projection_preserves_verify_headless_spelling() {
     let verify_start = resolve_dispatch_start(
         &server,
         &mut verify,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("verify permission profile resolves");
@@ -1817,7 +1817,7 @@ fn valid_profile_resolves_conflicting_caller_hints_with_exact_legacy_projection(
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("same-lineage model and explicit agent override resolve through the profile policy");
@@ -1863,8 +1863,13 @@ fn host_authorization_default_and_refusal_guard_typed_resolution() {
         .expect("missing host profile authorizes the documented L1 default");
     assert_eq!(host, crate::host_profile::HostProfile::Development);
     assert_eq!(effective_level, tachi_params::ExecutionLevel::L1);
-    let start = resolve_dispatch_start(&server, &mut params, Utc::now(), effective_level)
-        .expect("only the actual host-authorized level reaches typed resolution");
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        jiff::Timestamp::now(),
+        effective_level,
+    )
+    .expect("only the actual host-authorized level reaches typed resolution");
     assert_eq!(
         start.resolved_assignment.execution_level,
         Some(tachi_params::ExecutionLevel::L1)

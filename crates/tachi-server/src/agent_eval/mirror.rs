@@ -1025,7 +1025,7 @@ mod rubric_tests {
         // Verified admission matching actor -> acknowledged_overlay, but KNOB1
         // still keeps independence_basis = declared_only and cross_model_independent = false
         // because verified_admission proves actor identity only, not model execution.
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let req = VerifiedAdmissionRequest {
             agent_identity_id: "reviewer.v".to_string(),
             connection_id: "conn-s3-verified".to_string(),
@@ -1046,8 +1046,8 @@ mod rubric_tests {
             verification_scope: req.verification_scope.clone(),
             evidence_digest: "c".repeat(64),
             evidence_ref: VerifiedEvidenceRef::attestation("oidc", "s3-1").unwrap(),
-            issued_at: now - chrono::Duration::seconds(5),
-            expires_at: now + chrono::Duration::minutes(10),
+            issued_at: now - jiff::SignedDuration::from_secs(5),
+            expires_at: now + jiff::SignedDuration::from_mins(10),
             nonce: "nonce-s3-v".to_string(),
             state: VerifiedEvidenceState::Active,
         };

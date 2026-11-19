@@ -1,5 +1,4 @@
 use crate::server_state::{DbScope, MemoryServer};
-use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashSet;
@@ -114,7 +113,7 @@ pub(in crate::foundry_runtime_ops::handlers::compact) fn persist_compact_session
     db_path: Option<&PathBuf>,
     entries: &[MemoryEntry],
 ) -> Result<usize, String> {
-    let created_at = Utc::now().to_rfc3339();
+    let created_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let edges = build_compact_session_import_edges(entries, &created_at);
     if edges.is_empty() {
         return Ok(0);

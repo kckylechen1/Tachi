@@ -16,7 +16,7 @@ fn seed_pending_rem_operation(
     server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
-                let claimed_at = Utc::now().to_rfc3339();
+                let claimed_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 for source in sources {
                     let (source_key, source_identity) = stable_rem_source_claim(source);
                     operation.claim_rem_source(

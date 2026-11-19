@@ -1,4 +1,3 @@
-use chrono::{Duration, Utc};
 use memcore::{A2aInsertOutcome, NewA2aEnvelope};
 use sha2::{Digest, Sha256};
 use tachi_params::{TachiA2aAction, TachiA2aParams};
@@ -98,7 +97,7 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
     if !(1..=MAX_TURN_RESPONSE_TTL_DAYS).contains(&ttl_days) {
         return Err(format!("ttl_days must be 1..={MAX_TURN_RESPONSE_TTL_DAYS}"));
     }
-    let created_at = Utc::now();
+    let created_at = jiff::Timestamp::now();
     let request = NewA2aEnvelope {
         envelope_id: format!("a2a-{}", uuid::Uuid::new_v4()),
         issuer_agent_identity_id,
@@ -107,8 +106,10 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
         subject_ref,
         body: safe_text,
         idempotency_key,
-        created_at: created_at.to_rfc3339(),
-        expires_at: (created_at + Duration::days(i64::from(ttl_days))).to_rfc3339(),
+        created_at: memcore::time_compat::rfc3339_compat(created_at),
+        expires_at: memcore::time_compat::rfc3339_compat(
+            created_at + jiff::SignedDuration::from_secs(i64::from(ttl_days) * 86_400),
+        ),
     };
     let outcome = server.with_global_store(|store| {
         if let Some(project) = project.as_deref() {
@@ -206,7 +207,7 @@ fn receive(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
             &actor,
             &project,
             params.limit.unwrap_or(DEFAULT_STATUS_LIMIT),
-            &Utc::now().to_rfc3339(),
+            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         )
         .map_err(|e| e.to_string())
     })?;

@@ -85,21 +85,21 @@ fn latest_snapshot_for_skill(store: &mut MemoryStore, skill_path: &str) -> Optio
         .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
 }
 
-fn skill_activity_timestamp(cap: &HubCapability) -> Option<DateTime<Utc>> {
+fn skill_activity_timestamp(cap: &HubCapability) -> Option<(i64, u32)> {
     cap.last_used
         .as_deref()
-        .and_then(parse_rfc3339_utc)
-        .or_else(|| parse_rfc3339_utc(&cap.updated_at))
+        .and_then(crate::utils::Rfc3339Stamp::order_key)
+        .or_else(|| crate::utils::Rfc3339Stamp::order_key(&cap.updated_at))
 }
 
-fn should_archive_skill(cap: &HubCapability, now: DateTime<Utc>) -> bool {
-    let stale_cutoff = now - ChronoDuration::days(30);
+fn should_archive_skill(cap: &HubCapability, now: jiff::Timestamp) -> bool {
+    let stale_cutoff = now - jiff::SignedDuration::from_secs(30 * 86_400);
     cap.avg_rating < 0.3
         && cap
             .last_used
             .as_deref()
-            .and_then(parse_rfc3339_utc)
-            .map(|ts| ts < stale_cutoff)
+            .and_then(crate::utils::Rfc3339Stamp::order_key)
+            .map(|ts| ts < crate::utils::timestamp_key(stale_cutoff))
             .unwrap_or(false)
 }
 
@@ -222,7 +222,7 @@ struct SkillQualityPlan {
     pagerank: HashMap<String, f64>,
     pairwise_evaluated_skills: usize,
     pairwise_skipped_skills: usize,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 }
 
 fn compute_skill_quality_plan(
@@ -262,7 +262,7 @@ fn compute_skill_quality_plan(
             .then_with(|| a.cap.id.cmp(&b.cap.id))
     });
 
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let mut merge_map: HashMap<String, Vec<Value>> = HashMap::new();
     let mut graph_edges = Vec::<memcore::MemoryEdge>::new();
     let pairwise_evaluated_skills = snapshots.len().min(SKILL_QUALITY_PAIRWISE_CAP);
@@ -308,7 +308,7 @@ fn compute_skill_quality_plan(
                             "type": "merge_hint",
                             "similarity": similarity,
                         }),
-                        created_at: now.to_rfc3339(),
+                        created_at: memcore::time_compat::rfc3339_compat(now),
                         valid_from: String::new(),
                         valid_to: None,
                     });
@@ -364,7 +364,7 @@ fn apply_skill_quality_plan(
         });
     }
 
-    let now_rfc3339 = now.to_rfc3339();
+    let now_rfc3339 = memcore::time_compat::rfc3339_compat(now);
     let mut archived_skills = Vec::<String>::new();
     let mut changed_caps = Vec::<HubCapability>::new();
     let mut skipped_conflicts = Vec::<String>::new();

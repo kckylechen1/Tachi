@@ -115,7 +115,7 @@ pub(crate) fn unresolved_number_anchors(query: &str) -> Vec<RecallEvidenceV1> {
             if !seen.insert(source_ref.clone()) { return None; }
             Some(missing_anchor_row(
                 &source_ref,
-                &chrono::Utc::now().to_rfc3339(),
+                &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "Repository is unspecified; supply owner/repo#number or a GitHub URL. Retrieved memories do not verify this object's current state.",
             ))
         })
@@ -215,7 +215,7 @@ pub(crate) async fn resolve_current_work_anchors(
     server: &MemoryServer,
     targets: &[GithubTarget],
 ) -> Vec<RecallEvidenceV1> {
-    let resolved_at = chrono::Utc::now().to_rfc3339();
+    let resolved_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let mut out = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
         if index >= MAX_RESOLVED_ANCHORS_PER_ASK {

@@ -309,10 +309,8 @@ async fn pending_hidden_approve_default_visible_ordinary_edit_hidden() {
     assert_eq!(receipt_json["expected_revision"], json!(expected_revision));
     assert_eq!(receipt_json["store"], json!("named:wiki"));
     assert!(
-        chrono::DateTime::parse_from_rfc3339(
-            receipt_json["decided_at"].as_str().expect("decided_at")
-        )
-        .is_ok(),
+        crate::utils::Rfc3339Stamp::parse(receipt_json["decided_at"].as_str().expect("decided_at"))
+            .is_some(),
         "decided_at must be RFC3339"
     );
     assert_eq!(

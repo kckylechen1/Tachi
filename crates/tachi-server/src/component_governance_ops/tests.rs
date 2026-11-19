@@ -773,3 +773,27 @@ async fn component_governance_context_project_hint_matches_hypermem() {
         "hypermem match must surface backflow_candidates"
     );
 }
+
+#[test]
+fn governance_freshness_keeps_accepting_unpadded_legacy_dates() {
+    // astra rounds 3+4, finding 4: chrono's %Y-%m-%d parsed `2020-5-7` —
+    // unpadded records must keep classifying (not `unknown`) — while its
+    // field grammar rejected over-width fields (`2026-011-18` must stay
+    // `unknown`; %m consumes at most two digits). Both fixtures are
+    // deliberately OLD so the classification never depends on the wall
+    // clock (a padded "current" fixture would flip to stale 14 days after
+    // it was written — astra round 4).
+    use serde_json::json;
+    let classify = |date: &str| super::record_freshness(&json!({ "last_verified_at": date }));
+    assert_eq!(classify("2020-11-18")["state"], "stale", "padded sanity");
+    assert_eq!(
+        classify("2020-5-7")["state"],
+        "stale",
+        "unpadded legacy date must classify (not unknown)"
+    );
+    assert_eq!(
+        classify("2020-011-18")["state"],
+        "unknown",
+        "over-width month must be rejected, not parsed as November"
+    );
+}

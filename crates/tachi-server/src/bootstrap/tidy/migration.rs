@@ -690,14 +690,14 @@ pub(crate) fn update_manifest_after_migration(
             schema_kind: "tachi-memory-v1".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "registered by `tachi tidy --execute`".to_string(),
             aliases: Vec::new(),
         });
     }
-    manifest.generated_at = chrono::Utc::now().to_rfc3339();
+    manifest.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     manifest.save(&cfg.manifest_path)?;
     Ok(())
 }

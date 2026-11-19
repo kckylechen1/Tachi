@@ -1,4 +1,3 @@
-use chrono::{DateTime, SecondsFormat, Utc};
 use memcore::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventQuery, TachiEventRecord};
 use memory_server_runtime::query_limit;
 use serde_json::json;
@@ -18,12 +17,20 @@ fn trim_string(value: Option<String>) -> Option<String> {
 
 fn normalize_created_at(raw: Option<String>) -> Result<String, String> {
     let Some(raw) = trim_string(raw) else {
-        return Ok(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+        return Ok(memcore::time_compat::millis_z(jiff::Timestamp::now()));
     };
-    DateTime::parse_from_rfc3339(&raw)
-        .map(|dt| {
-            dt.with_timezone(&Utc)
-                .to_rfc3339_opts(SecondsFormat::Millis, true)
+    // Fast path: an in-range instant renders via the shared canonical form.
+    // Fallback: stamps jiff cannot hold as an instant (leap `:60`, dates
+    // past 9999-12-30) still normalize as TEXT via the civil ordering key —
+    // the ledger stores the normalized string and never needs an instant,
+    // and the pre-migration chrono path persisted both forms (astra round
+    // 3, finding 2).
+    crate::utils::parse_rfc3339(&raw)
+        .map(memcore::time_compat::millis_z)
+        .or_else(|_| {
+            crate::utils::Rfc3339Stamp::parse(&raw)
+                .map(|stamp| crate::utils::key_to_utc_millis_z(stamp.key))
+                .ok_or(())
         })
         .map_err(|_| format!("invalid created_at timestamp: {raw}"))
 }
@@ -210,5 +217,39 @@ pub(crate) async fn handle_tachi_event(
             "Invalid action '{}'. Use 'emit', 'query', 'metrics', 'project', 'promote', 'context', 'a2a', or 'label_eval'.",
             params.action
         )),
+    }
+}
+
+#[cfg(test)]
+mod created_at_tests {
+    use super::normalize_created_at;
+
+    #[test]
+    fn normalize_created_at_keeps_chrono_bytes_across_the_year_boundary() {
+        // astra round 4, F2: a four-digit INPUT year can cross the UTC year
+        // boundary after offset folding; chrono spelled out-of-range years
+        // `+10000` / `-0001` (sign + digits), never `10000` / `-001`.
+        assert_eq!(
+            normalize_created_at(Some("9999-12-31T23:59:59-00:01".into())).unwrap(),
+            "+10000-01-01T00:00:59.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("0000-01-01T00:00:60+00:01".into())).unwrap(),
+            "-0001-12-31T23:59:60.000Z"
+        );
+        // The leap/far-future rows from round 3 stay pinned through the
+        // same production path (not just the helper directly).
+        assert_eq!(
+            normalize_created_at(Some("2016-12-31T23:59:60Z".into())).unwrap(),
+            "2016-12-31T23:59:60.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("9999-12-31T23:59:59Z".into())).unwrap(),
+            "9999-12-31T23:59:59.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("2026-11-18T20:34:56.123456+08:00".into())).unwrap(),
+            "2026-11-18T12:34:56.123Z"
+        );
     }
 }

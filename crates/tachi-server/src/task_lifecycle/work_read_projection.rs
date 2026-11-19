@@ -555,7 +555,7 @@ fn project_run_receipt(
     let timestamp = |field: &str| {
         receipt[field]
             .as_str()
-            .filter(|time| chrono::DateTime::parse_from_rfc3339(time).is_ok())
+            .filter(|time| crate::utils::Rfc3339Stamp::parse(time).is_some())
             .map(str::to_owned)
     };
     let summary = json!({
@@ -599,7 +599,7 @@ pub(crate) fn scoped_work_read_section(
     use tachi_params::work_read_model::{ClaimModeV1, ClaimStateV1, WorkClaimFactV1};
 
     let binding = LocalProject::capture(server)?;
-    let read_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+    let read_at = memcore::time_compat::micros_utc_offset(jiff::Timestamp::now());
     let mut section = json!({
         "authority":"work_read_model_v1", "projection":"project_claims_partial", "available":false,
         "read_at":read_at, "scope":{"binding":"local_canonical_project","project":binding.project},

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,7 +49,7 @@ impl Manifest {
     pub fn empty() -> Self {
         Self {
             schema_version: MANIFEST_SCHEMA_VERSION,
-            generated_at: Utc::now().to_rfc3339(),
+            generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             comment: "Tachi-owned memory DBs. Managed by `tachi doctor` / `tachi manifest`."
                 .to_string(),
             dbs: Vec::new(),
@@ -227,7 +226,7 @@ impl Manifest {
             .collect();
         new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
         self.dbs = new_dbs;
-        self.generated_at = Utc::now().to_rfc3339();
+        self.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         if self.schema_version == 0 {
             self.schema_version = MANIFEST_SCHEMA_VERSION;
         }

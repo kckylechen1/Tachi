@@ -42,7 +42,7 @@ fn write_status(run: &Path, state: &str, revision: u64) {
         .write_atomic(
             &serde_json::to_vec(&json!({
                 "dispatch_id":DISPATCH,"state":state,"status_revision":revision,
-                "updated_at":Utc::now().to_rfc3339(), "project":PROJECT,
+                "updated_at":memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()), "project":PROJECT,
             }))
             .unwrap(),
             &fence,
@@ -65,8 +65,11 @@ fn start(server: &MemoryServer) -> String {
     };
     assert_eq!(task.task.status, TaskStatus::Working);
     assert!(
-        DateTime::parse_from_rfc3339(&task.task.last_updated_at).unwrap()
-            >= DateTime::parse_from_rfc3339(&task.task.created_at).unwrap()
+        task.task
+            .last_updated_at
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            >= task.task.created_at.parse::<jiff::Timestamp>().unwrap()
     );
     task.task.task_id
 }

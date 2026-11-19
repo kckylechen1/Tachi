@@ -242,7 +242,7 @@ fn cycle_view(raw: &str) -> Value {
 /// anywhere else receives no exemption.
 fn status_business_fields(raw: &str) -> Option<Value> {
     fn reader_time(value: &mut Value) -> Option<()> {
-        chrono::DateTime::parse_from_rfc3339(value.as_str()?).ok()?;
+        crate::utils::Rfc3339Stamp::parse(value.as_str()?)?;
         *value = json!("<reader-time>");
         Some(())
     }

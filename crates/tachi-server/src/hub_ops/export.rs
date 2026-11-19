@@ -271,7 +271,7 @@ fn export_for_openclaw(
         "plugin": "tachi-skills",
         "version": "1.0.0",
         "description": "Tachi Hub skills exported for OpenClaw",
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "hooks": {
             "before_agent_start": {
                 "type": "skill-injection",

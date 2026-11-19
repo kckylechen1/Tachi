@@ -5,7 +5,6 @@ use crate::memory_search_ops::text_scrub::{
 use crate::pipeline_ops::helpers::chunk_text;
 use crate::tool_params::{RememberParams, SaveMemoryParams};
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -201,7 +200,7 @@ pub(crate) async fn handle_remember(
     // Default path = /notes/{YYYY-MM-DD} so quick captures land in a
     // predictable, browsable bucket without forcing the caller to choose one.
     let inferred_path = params.path.clone().unwrap_or_else(|| {
-        let date = Utc::now().format("%Y-%m-%d");
+        let date = memcore::time_compat::date_only(jiff::Timestamp::now());
         format!("/notes/{date}")
     });
 

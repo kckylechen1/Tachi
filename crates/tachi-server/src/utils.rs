@@ -30,6 +30,10 @@ pub(crate) use self::test_fixtures::{test_fixture_path, test_fixture_root};
 pub(super) use self::text::redact_sensitive_value;
 pub(crate) use self::text::{append_warning, compact_text_line, sanitize_safe_path_name};
 pub(super) use self::validation::{is_trusted_command, normalize_supported_values};
+pub(crate) use self::validation::{
+    key_to_utc_millis_z, parse_relaxed_datetime, parse_rfc3339, relaxed_datetime_key,
+    timestamp_key, Rfc3339Stamp,
+};
 pub(super) use tachi_params::util::{is_shell_env_name, stable_hash};
 // #1120 PR1: `find_git_root_from` is now also used by production code
 // (`project_db_ops::resolve_or_register_workspace_root`, resolving an

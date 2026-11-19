@@ -38,7 +38,7 @@ pub(crate) fn seed_vault(server: &MemoryServer, password: &str) -> Result<(), St
         vault_crypto::DerivedVaultKey::derive(password, &salt)?,
         vault_crypto::active_kdf_params_json(),
     );
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let config = memcore::vault::VaultConfig {
         salt: B64.encode(salt),
         verifier: vault_crypto::create_verifier(key.bytes())?,
@@ -72,7 +72,7 @@ pub(crate) fn seed_vault_secret(
             .bytes(),
     );
     let (encrypted_value, nonce) = vault_crypto::encrypt(key.bytes(), fixture.value.as_bytes())?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     server.with_global_store(|store| {
         store
             .vault_upsert_entry(&memcore::vault::VaultEntry {
@@ -295,7 +295,7 @@ impl VaultTestServer {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),

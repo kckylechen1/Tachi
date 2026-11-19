@@ -1357,7 +1357,7 @@ mod tests {
     }
 
     fn insert_memory(store: &mut MemoryStore, id: &str, source: &str, topic: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         store
             .upsert(&MemoryEntry {
                 id: id.to_string(),
@@ -2267,7 +2267,7 @@ mod tests {
         summary: &str,
         text: &str,
     ) -> MemoryEntry {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let entry = MemoryEntry {
             id: id.to_string(),
             path: "/p".to_string(),

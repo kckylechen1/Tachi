@@ -124,7 +124,6 @@ mod tests {
     use crate::bootstrap::vault_cli::providers_doctor::{
         build_provider_rows_with_evidence, render_provider_report, ApiKeyShape, ProviderVaultAccess,
     };
-    use chrono::Utc;
     use memcore::vault::{VaultEntry, VaultKeyHealth};
     use memcore::MemoryStore;
     use std::collections::BTreeMap;
@@ -199,9 +198,13 @@ mod tests {
         store
             .vault_upsert_key_health(&health)
             .expect("seed fixture health");
-        let evidence =
-            super::super::collect_provider_vault_evidence(&store, Some(&key), &names, Utc::now())
-                .expect("collect production doctor evidence");
+        let evidence = super::super::collect_provider_vault_evidence(
+            &store,
+            Some(&key),
+            &names,
+            jiff::Timestamp::now(),
+        )
+        .expect("collect production doctor evidence");
 
         assert_eq!(
             evidence.exact_values.get("EXTRACT_API_KEY"),
@@ -241,7 +244,7 @@ mod tests {
             &env_values,
             &evidence,
             ProviderVaultAccess::Unlocked,
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("build doctor rows");
         let rendered = render_provider_report(&rows);
@@ -275,9 +278,13 @@ mod tests {
             );
         }
 
-        let locked_evidence =
-            super::super::collect_provider_vault_evidence(&store, None, &names, Utc::now())
-                .expect("collect locked doctor evidence");
+        let locked_evidence = super::super::collect_provider_vault_evidence(
+            &store,
+            None,
+            &names,
+            jiff::Timestamp::now(),
+        )
+        .expect("collect locked doctor evidence");
         assert!(locked_evidence.exact_values.is_empty());
         assert!(locked_evidence
             .exact_updated_at
@@ -291,7 +298,7 @@ mod tests {
             &HashMap::new(),
             &locked_evidence,
             ProviderVaultAccess::LockedOrUnavailable,
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("build locked doctor row");
         assert_eq!(locked_rows[0].vault, Some(true));
@@ -312,7 +319,7 @@ mod tests {
             &legacy_store,
             Some(&key),
             &HashSet::from(["EXTRACT_API_KEY".to_string()]),
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("collect legacy doctor evidence");
         assert!(legacy_evidence
@@ -328,7 +335,7 @@ mod tests {
             &HashMap::new(),
             &legacy_evidence,
             ProviderVaultAccess::Unlocked,
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("build legacy doctor row");
         assert_eq!(legacy_rows[0].vault, Some(true));

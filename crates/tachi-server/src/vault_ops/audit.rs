@@ -1,5 +1,4 @@
 use crate::vault_ops::ctx::*;
-use chrono::Utc;
 use serde_json::json;
 
 pub(super) fn record_vault_audit(
@@ -9,7 +8,7 @@ pub(super) fn record_vault_audit(
     success: bool,
     detail: Option<&str>,
 ) -> Result<(), String> {
-    let timestamp = Utc::now().to_rfc3339();
+    let timestamp = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     server
         .with_global_store(|store| {
             store

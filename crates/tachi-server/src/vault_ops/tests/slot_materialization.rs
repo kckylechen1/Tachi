@@ -22,7 +22,7 @@ fn seed(server: &MemoryServer, name: &str, value: &str) {
                     encrypted_value,
                     nonce,
                     secret_type: "api_key".into(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())
@@ -55,7 +55,7 @@ async fn slot_scan_honors_account_health_and_keeps_drop_reason() {
                     key_id: "DEEPSEEK_API_KEY".into(),
                     disabled: true,
                     status: "disabled".into(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())
@@ -622,7 +622,7 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
                     key_id: "SILICONFLOW_API_KEY".to_string(),
                     status: "disabled".to_string(),
                     disabled: true,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())
@@ -643,7 +643,7 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
                     key_id: "SILICONFLOW_API_KEY".to_string(),
                     status: "ok".to_string(),
                     disabled: false,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
@@ -677,7 +677,7 @@ async fn leftover_slot_ciphertext_is_not_materialized() {
     crate::vault_test_api::seed_vault(&server, "slot-leftover").expect("seed unlocked vault");
     with_vault_key(&server, |key| {
         let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         server.with_global_store(|store| {
             store
                 .vault_upsert_entry(&memcore::vault::VaultEntry {
@@ -760,7 +760,7 @@ async fn child_env_all_mode_does_not_inject_leftover_slot_bytes() {
     crate::vault_test_api::seed_vault(&server, "slot-child-env").expect("seed unlocked vault");
     with_vault_key(&server, |key| {
         let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         server.with_global_store(|store| {
             store
                 .vault_upsert_entry(&memcore::vault::VaultEntry {
@@ -922,7 +922,7 @@ async fn read_unlocked_vault_secret_resolves_lane_slot_pointer() {
                     key_id: "DEEPSEEK_API_KEY".to_string(),
                     status: "disabled".to_string(),
                     disabled: true,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     ..Default::default()
                 })
                 .map_err(|e| e.to_string())
@@ -972,7 +972,7 @@ async fn lane_slot_read_ignores_legacy_rotation_members() {
     with_vault_key(&server, |key| {
         let (encrypted_value, nonce) =
             crate::vault_crypto::encrypt(key, b"leftover-rotation-member")?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         server.with_global_store(|store| {
             store
                 .vault_upsert_entry(&memcore::vault::VaultEntry {

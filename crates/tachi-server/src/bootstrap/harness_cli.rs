@@ -140,7 +140,7 @@ fn build_harness_report_with_manifest(
 
     Ok(HarnessStatusReport {
         schema_version: "tachi.harness.status.v1".to_string(),
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         home: home.display().to_string(),
         hosts: hosts.iter().map(|h| h.to_string()).collect(),
         summary,

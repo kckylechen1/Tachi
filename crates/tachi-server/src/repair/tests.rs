@@ -184,7 +184,7 @@ fn insert_memory(
     retention: Option<&str>,
     source: Option<&str>,
 ) {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     conn.execute(
         "INSERT INTO memories (
             id, path, summary, text, importance, timestamp, category, topic,

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -337,6 +336,6 @@ fn scan_with_open_mode(
         warnings: Vec::new(),
         auto_fix_actions,
         quarantine_dir: Some(quarantine_root.display().to_string()),
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     }
 }

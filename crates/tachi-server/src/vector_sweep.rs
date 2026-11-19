@@ -448,7 +448,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn insert_memory(store: &mut MemoryStore, id: &str, path: &str, text: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         store
             .upsert(&MemoryEntry {
                 id: id.to_string(),

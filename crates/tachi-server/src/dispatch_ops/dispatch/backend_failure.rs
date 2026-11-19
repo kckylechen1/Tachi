@@ -62,7 +62,7 @@ pub(super) fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrep
             "agent": ctx.assignment.selected_backend,
             "execution_backend": ctx.backend,
             "error": ctx.error,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
     write_status_json(
@@ -80,7 +80,7 @@ pub(super) fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrep
             "agent": ctx.assignment.selected_backend,
             "task": ctx.request.task.clone(),
             "state": "TASK_STATE_FAILED",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "run_dir": ctx.workspace_dir.to_string_lossy(),
             "result_written": false,
             "harness_transport": ctx.harness_transport,

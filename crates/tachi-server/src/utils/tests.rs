@@ -4,6 +4,28 @@ use crate::test_support::EnvRestore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn rfc3339_receipt_parser_keeps_legacy_offsets_and_excludes_temporal_extensions() {
+    let expected = parse_rfc3339("2026-06-02T00:00:00.123456789Z").unwrap();
+    for spelling in [
+        "2026-06-02t00:00:00.123456789019z",
+        "2026-06-01 00:01:00.123456789−23:59",
+        "2026-06-02T23:59:00.123456789+23:59",
+    ] {
+        assert_eq!(parse_rfc3339(spelling), Ok(expected), "{spelling}");
+    }
+    for invalid in [
+        "2026-06-02T00:00:00Z[UTC]",
+        "2026-06-02T00:00:00+00",
+        "2026-06-02T00:00:00,123Z",
+        "2026-06-02T00:00:00+24:00",
+        "2026-06-02T00:00:60Z",
+        "2026-02-30T00:00:00Z",
+    ] {
+        assert!(parse_rfc3339(invalid).is_err(), "{invalid}");
+    }
+}
+
 struct CwdGuard {
     original: PathBuf,
 }
@@ -348,4 +370,26 @@ fn dispatch_interpreters_remain_trusted_for_caller_supplied_commands() {
     assert!(is_trusted_command("python3"));
     assert!(is_trusted_command("/usr/local/bin/node"));
     assert!(is_trusted_command("acpx"));
+}
+
+#[test]
+fn key_to_utc_millis_z_preserves_leap_and_far_future_stamps_as_text() {
+    use crate::utils::key_to_utc_millis_z;
+    use crate::utils::Rfc3339Stamp;
+    let render = |raw: &str| Rfc3339Stamp::parse(raw).map(|s| key_to_utc_millis_z(s.key));
+    // Leap second keeps its :60 spelling (chrono parity; astra round 3 F2).
+    assert_eq!(
+        render("2016-12-31T23:59:60Z").as_deref(),
+        Some("2016-12-31T23:59:60.000Z")
+    );
+    // Outside jiff's instant range, still renders as text.
+    assert_eq!(
+        render("9999-12-31T23:59:59Z").as_deref(),
+        Some("9999-12-31T23:59:59.000Z")
+    );
+    // Numeric offset folds to UTC; fraction truncates to millis.
+    assert_eq!(
+        render("2026-11-18T20:34:56.123456+08:00").as_deref(),
+        Some("2026-11-18T12:34:56.123Z")
+    );
 }

@@ -813,7 +813,7 @@ pub(crate) fn slim_kanban(value: Value) -> Value {
     // #925: mark aged WORKING rows so zombie in-flight dispatches are not
     // presented as "current work" without age context.
     const STALE_WORKING_SECS: i64 = 6 * 3600;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     json!({
         "count": value.get("count"),
         "incomplete": value.get("incomplete"),
@@ -835,9 +835,9 @@ pub(crate) fn slim_kanban(value: Value) -> Value {
                 let state = task.get("state").and_then(Value::as_str).unwrap_or("");
                 let updated_at = task.get("updated_at").and_then(Value::as_str);
                 let age_secs = updated_at.and_then(|ts| {
-                    chrono::DateTime::parse_from_rfc3339(ts)
+                    crate::utils::parse_rfc3339(ts)
                         .ok()
-                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_seconds().max(0))
+                        .map(|dt| memcore::time_compat::whole_seconds_between(now, dt).max(0))
                 });
                 let stale = matches!(state, "TASK_STATE_WORKING" | "working" | "in_progress")
                     && age_secs.is_some_and(|age| age >= STALE_WORKING_SECS);
@@ -956,8 +956,10 @@ mod tests {
 
     #[test]
     fn slim_kanban_marks_stale_working_rows() {
-        let old = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
-        let fresh = chrono::Utc::now().to_rfc3339();
+        let old = memcore::time_compat::rfc3339_compat(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_hours(12),
+        );
+        let fresh = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let board = json!({
             "count": 2,
             "tasks": [

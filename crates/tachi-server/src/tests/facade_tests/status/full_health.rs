@@ -8,7 +8,11 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         .temp_home
         .join(".tachi/foundry-runs/.last_distill_run");
     std::fs::create_dir_all(marker_path.parent().unwrap()).expect("marker parent");
-    std::fs::write(&marker_path, Utc::now().to_rfc3339()).expect("write marker");
+    std::fs::write(
+        &marker_path,
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+    )
+    .expect("write marker");
 
     server
         .with_global_store(|store| {
@@ -30,7 +34,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
                      VALUES ('job-1', 'memory_distill', 'distill', 'failed', 'project', '/', '[]', ?1, ?2, ?2)",
                     rusqlite::params![
                         json!({"terminal_reason":{"reason":"403 Forbidden"}}).to_string(),
-                        Utc::now().to_rfc3339()
+                        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -40,7 +44,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: server.global_db_path_buf().display().to_string(),
@@ -49,7 +53,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
@@ -174,7 +178,7 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: server.global_db_path_buf().display().to_string(),
@@ -183,7 +187,7 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
@@ -240,7 +244,7 @@ async fn tachi_status_surfaces_malformed_vector_sweep_state() {
 
     let manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: server.global_db_path_buf().display().to_string(),
@@ -249,7 +253,7 @@ async fn tachi_status_surfaces_malformed_vector_sweep_state() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),

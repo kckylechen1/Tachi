@@ -17,7 +17,6 @@ use crate::memory_search_ops::text_scrub::{scrub_secrets_with_categories, scrub_
 use crate::tool_params::{build_evidence_refs_v1, SaveMemoryParams};
 use crate::{DbScope, MemoryServer};
 use blake2::{Blake2s256, Digest};
-use chrono::Utc;
 use serde_json::json;
 
 pub(super) struct AuthorizedReferenceMutations(Vec<memcore::db::ValidatedReferenceMutation>);
@@ -60,7 +59,7 @@ impl AuthorizedReferenceMutations {
 
     fn validate(references: &[String]) -> Result<Self, String> {
         crate::wiki_ops::validate_references(references)?;
-        let captured_at = Utc::now().to_rfc3339();
+        let captured_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         build_evidence_refs_v1(references, &captured_at)
             .into_iter()
             .map(|reference| {
@@ -584,7 +583,7 @@ async fn handle_save_memory_impl(
         .timestamp
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
+        .unwrap_or_else(|| memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
     // tachi#2125: when caller omits validity, fill cheap cues from text.
     // Explicit valid_from/valid_until always win (shared helper, not remember-only).
     {

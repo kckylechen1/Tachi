@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde_json::{json, Value};
 
 use super::{NativeAcpPromptOutcome, NativeAcpRunSpec, NativeAcpSession, ACP_SESSION_SCHEMA};
@@ -138,7 +137,7 @@ pub(super) fn write_native_acp_session_record(
     let existing = crate::task_lifecycle::read_json_file(record_path)
         .ok()
         .flatten();
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let created_at = existing
         .as_ref()
         .and_then(|value| value.get("created_at"))

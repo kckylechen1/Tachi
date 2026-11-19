@@ -9,7 +9,6 @@ use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,
     TachiSearchParams, TachiTaskParams,
 };
-use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 

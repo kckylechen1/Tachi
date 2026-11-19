@@ -7,7 +7,6 @@ use super::evidence_format::{
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -62,13 +61,13 @@ pub(crate) async fn save_memory_checkpoint(
         .unwrap_or_else(|| "Agent checkpoint".to_string());
     let checkpoint_text = format!(
         "Checkpoint: {title}\n\n{text}\n\nRecorded at: {}",
-        Utc::now().to_rfc3339()
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
     );
     let echo = params.summary.clone().or_else(|| Some(text.clone()));
     let path = params.path.take().or_else(|| {
         Some(format!(
             "/agent/checkpoints/{}",
-            Utc::now().format("%Y-%m-%d")
+            memcore::time_compat::date_only(jiff::Timestamp::now())
         ))
     });
     let display_path = path.clone();

@@ -2,7 +2,7 @@ use super::*;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use chrono::Utc;
+use crate::utils::Rfc3339Stamp;
 use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
 use memcore::vault::health::{
     credential_generation_from_metadata, EvidenceKind, EVIDENCE_AT_FIELD, EVIDENCE_OUTCOME_FIELD,
@@ -223,8 +223,8 @@ fn relevant_health<'a>(
         .collect()
 }
 
-fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()
+fn health_updated_at(health: &VaultKeyHealth) -> Option<(i64, u32)> {
+    Rfc3339Stamp::order_key(&health.updated_at)
 }
 
 fn health_is_attributed(
@@ -267,7 +267,7 @@ fn latest_usable_health_conflicts(health: &[&VaultKeyHealth]) -> bool {
 }
 
 fn selected_health<'a>(health: &[&'a VaultKeyHealth]) -> Option<&'a VaultKeyHealth> {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let unusable = health
         .iter()
         .copied()
@@ -366,7 +366,7 @@ fn safe_probe_observation(
 }
 
 fn health_is_unusable(health: &[&VaultKeyHealth]) -> bool {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     health
         .iter()
         .any(|row| crate::vault_ops::unusable_skip_class(row, now).is_some())
@@ -1005,6 +1005,24 @@ mod tests {
     }
 
     #[test]
+    fn listing_orders_leap_seconds_and_health_beyond_the_instant_ceiling() {
+        let mut earlier = new_key_health("earlier", "key", at(0));
+        let mut later = new_key_health("later", "key", at(0));
+        for (first, last) in [
+            ("2026-01-01T23:59:59.999999999Z", "2026-01-01T23:59:60Z"),
+            ("2026-01-01T23:59:60.999999999Z", "2026-01-02T00:00:00Z"),
+            ("9999-12-31T23:59:59+00:00", "9999-12-31 23:59:59−23:59"),
+        ] {
+            earlier.updated_at = first.into();
+            later.updated_at = last.into();
+            assert_eq!(
+                selected_health(&[&later, &earlier]).unwrap().logical_name,
+                "later"
+            );
+        }
+    }
+
+    #[test]
     fn typed_unknown_stays_unknown_with_its_evidence_timestamp_and_no_raw_error() {
         let prior = record_key_outcome(
             None,
@@ -1397,10 +1415,7 @@ mod tests {
         )
         .health;
         assert!(health_is_attributed(&old_success, true, 41));
-        let replaced_at = replacement
-            .updated_at
-            .parse::<chrono::DateTime<Utc>>()
-            .unwrap();
+        let replaced_at = Rfc3339Stamp::parse(&replacement.updated_at).unwrap().key;
         assert!(health_updated_at(&late_old_success).unwrap() > replaced_at);
         assert!(!health_is_attributed(&late_old_success, true, 42));
         assert!(!health_is_attributed(&late_old_success, false, 41));

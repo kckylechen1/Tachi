@@ -466,7 +466,7 @@ fn project_delivery_observation(
 /// not of the receipt timestamp): a corrected mint must strictly exceed
 /// every revision the wall clock could have produced before it.
 fn revision_wall_clock_base() -> i64 {
-    chrono::Utc::now().timestamp_millis().max(1)
+    (jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) as i64).max(1)
 }
 
 fn digest_token(parts: &[&str]) -> String {

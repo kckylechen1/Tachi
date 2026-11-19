@@ -993,9 +993,11 @@ async fn genuine_use_feedback_in_one_store_invalidates_another_servers_warm_rank
     let cache_entries = global_recall_cache_entries(&reader);
     assert!(cache_entries > 0, "ranking query must warm the cache");
 
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     for days_ago in [2_i64, 1, 0] {
-        let used_at = (now - chrono::Duration::days(days_ago)).to_rfc3339();
+        let used_at = memcore::time_compat::rfc3339_compat(
+            now - jiff::SignedDuration::from_secs(days_ago * 86_400),
+        );
         writer
             .with_global_store(|store| {
                 memcore::db::record_memory_use(
@@ -1391,7 +1393,7 @@ async fn graph_edge_write_in_one_server_invalidates_another_servers_warm_expansi
                     relation: "references".to_string(),
                     weight: 1.0,
                     metadata: serde_json::json!({}),
-                    created_at: chrono::Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     valid_from: String::new(),
                     valid_to: None,
                 })

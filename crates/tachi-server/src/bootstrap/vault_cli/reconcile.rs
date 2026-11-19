@@ -173,7 +173,7 @@ pub(super) fn run_reconcile_action(
             let outcome = build_plan(&store, key.bytes(), &env_home, &cwd)?;
             let artifact = ReconcilePlanArtifact {
                 schema: PLAN_SCHEMA.to_string(),
-                generated_at: chrono::Utc::now().to_rfc3339(),
+                generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 plan_digest: memcore::plan_digest(&outcome.plan),
                 bound: outcome.plan,
             };
