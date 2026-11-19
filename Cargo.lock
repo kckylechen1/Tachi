@@ -2905,14 +2905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tachi-release-check"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "tachi-runtime-core"
 version = "0.1.0"
 dependencies = [

@@ -102,44 +102,6 @@ pub(super) struct InstructionDriftReport {
     pub(super) manifest_findings: Vec<ManifestDriftFinding>,
 }
 
-/// Refuse fix/apply/promote/delete shaped requests. Report-only contract.
-///
-/// Unreachable from the CLI today, deliberately (#1710): `HarnessAction`
-/// (`tachi-bootstrap/src/cli/maintenance_actions.rs`) has exactly one
-/// variant, `Status`, and clap's `Subcommand` derive means a mutation token
-/// (`fix`/`apply`/…) cannot even be *parsed* into a `HarnessAction` — `tachi
-/// harness fix` is rejected by clap itself before `run_harness_command`
-/// (`harness_cli.rs`) ever runs. The report-only contract is structurally
-/// true right now, not runtime-enforced, so there is no live action string
-/// to wire this against; stringifying `HarnessAction`'s `Debug` output and
-/// checking that would guard an input no caller can actually construct,
-/// which is decoration, not a gate.
-///
-/// This function stays, unreachable, as the pre-built gate for the day a
-/// mutation-shaped `HarnessAction` variant is added (a separate CLI-surface
-/// decision, out of scope here): wire the call in then, instead of
-/// re-deriving the refusal wording and blocked-verb list from scratch. Its
-/// contract is exercised directly by
-/// `tests::fix_shaped_request_refuses_and_leaves_bytes_identical` below,
-/// which is what's actually tested today, not a CLI path.
-#[allow(dead_code)]
-pub(super) fn refuse_instruction_mutation(action: &str) -> Result<(), String> {
-    let normalized = action.trim().to_ascii_lowercase();
-    let blocked = [
-        "fix", "apply", "promote", "delete", "write", "amend", "repair", "autofix", "--fix",
-        "--apply",
-    ];
-    if blocked
-        .iter()
-        .any(|needle| normalized == *needle || normalized.contains(needle))
-    {
-        return Err(format!(
-            "instruction drift sentinel is report-only; refusing mutation action '{action}'"
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn build_instruction_drift_report(
     status: &InstructionManifestStatus,
 ) -> Result<InstructionDriftReport, String> {
@@ -1725,15 +1687,14 @@ mod tests {
     }
 
     #[test]
-    fn fix_shaped_request_refuses_and_leaves_bytes_identical() {
-        let (root, manifest_path) = fixture("refuse-fix");
+    fn status_scan_leaves_instruction_tree_bytes_identical() {
+        let (root, manifest_path) = fixture("readonly-status");
         write_clean_tree(&root);
         write_manifest(&manifest_path, &clean_manifest());
         let before = snapshot_tree(&root);
 
-        let error = refuse_instruction_mutation("--fix").expect_err("must refuse");
-        assert!(error.contains("report-only"), "{error}");
-        let _ = scan_drift_for_test(&manifest_path).expect("scan still works");
+        let report = scan_drift_for_test(&manifest_path).expect("scan must succeed");
+        assert_eq!(report.status, CLEAN_STATUS);
 
         let after = snapshot_tree(&root);
         assert_eq!(before, after);

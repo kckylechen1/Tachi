@@ -1,7 +1,7 @@
 # Tachi Agent Host Substrate
 
 Status: draft host-neutral implementation note for issue #455. The former
-OpenClaw adapter is retired; see [its retirement guidance](../../../integrations/openclaw/README.md).
+OpenClaw adapter is retired.
 
 ## Position
 
@@ -69,8 +69,6 @@ The repo already has most of the substrate pieces:
   such as patterns, timelines, project-cycle context, and A2A handoff bundles.
 - `crates/tachi-params/src/facade/task.rs` already exposes dispatch,
   board, status, wait, complete, lifecycle, and PR/issue-oriented surfaces.
-- `integrations/openclaw` retains retirement guidance and historical release
-  notes; its plugin implementation and lifecycle hooks have been removed.
 
 The gap is not raw storage. The gap is a canonical work-lane read model that
 turns host events, dispatches, issues, PRs, cron outputs, and handoffs into one

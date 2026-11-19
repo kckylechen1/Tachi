@@ -341,7 +341,6 @@ def main() -> int:
         "README.classical.md",
         "scripts/install.sh",
         "docs/INSTALL.md",
-        "integrations/openclaw/README.md",
     ]
     for path in pinned_refs:
         require_contains(path, read(path), f"/{tag}/scripts/install", errors)

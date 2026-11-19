@@ -22,7 +22,6 @@ fn foundry_job_lane(kind: &memcore::FoundryJobKind) -> memcore::FoundryModelLane
         // been removed (deserialize-aliased to `Reasoning` for back-compat).
         memcore::FoundryJobKind::MemoryNeighborhood => memcore::FoundryModelLane::Reasoning,
         memcore::FoundryJobKind::RecallRerankCache => memcore::FoundryModelLane::Rerank,
-        memcore::FoundryJobKind::MemoryDistill => memcore::FoundryModelLane::Distill,
         memcore::FoundryJobKind::ForgetSweep => memcore::FoundryModelLane::Distill,
         _ => memcore::FoundryModelLane::Reasoning,
     }
@@ -32,7 +31,6 @@ pub(super) fn foundry_worker_name(kind: &memcore::FoundryJobKind) -> &'static st
     match kind {
         memcore::FoundryJobKind::MemoryNeighborhood => "foundry_neighborhood",
         memcore::FoundryJobKind::RecallRerankCache => "foundry_recall_rerank_cache",
-        memcore::FoundryJobKind::MemoryDistill => "foundry_distill",
         memcore::FoundryJobKind::ForgetSweep => "foundry_forget",
         _ => "foundry",
     }
