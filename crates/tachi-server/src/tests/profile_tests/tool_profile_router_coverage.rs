@@ -158,6 +158,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_tune",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_research",
     "wiki_browse",
     // #1690 C3: standalone skill aliases and recommendation routes are retired
     // end-to-end. Their duplicate entries preserve the branch census while the

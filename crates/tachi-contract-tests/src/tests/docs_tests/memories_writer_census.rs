@@ -5,7 +5,7 @@
 //! Exemptions documented here:
 //! 1. `crates/memcore/src/db/anchor.rs` — synthetic anchor rows, zero index
 //!    (R1 rebuild backstop).
-//! 2. `crates/memory-server-rescue/` — disaster-recovery writes, zero index
+//! 2. `crates/tachi-server/src/bootstrap/rescue_cli/` — disaster-recovery writes, zero index
 //!    (R1 rebuild backstop).
 //!
 //! Metadata-only UPDATEs (retention/archived/tier/recall_count/…) are listed
@@ -90,7 +90,7 @@ const ALLOWLIST: &[AllowEntry] = &[
         reason: "keywords bridge from indexed_tags; R1 rebuild backstop",
     },
     AllowEntry {
-        path: "crates/memory-server-rescue/",
+        path: "crates/tachi-server/src/bootstrap/rescue_cli/",
         function: None,
         class: AllowClass::ZeroIndex,
         reason: "disaster-recovery writes, zero index (R1 rebuild backstop)",
@@ -611,7 +611,7 @@ fn memories_writer_census_synced_or_allowlisted() {
     assert!(
         relatives
             .iter()
-            .any(|p| p.starts_with("crates/memory-server-rescue/")),
-        "expected memory-server-rescue writer in census"
+            .any(|p| p.starts_with("crates/tachi-server/src/bootstrap/rescue_cli/")),
+        "expected rescue_cli writer in census"
     );
 }

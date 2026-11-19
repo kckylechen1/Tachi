@@ -7,8 +7,8 @@ use std::path::Path;
 // ─── Kanban helpers ────────────────────────────────────────────────────────────
 
 /// JSON pointer to the committed model plan inside a run's `status.json`.
-/// This is the public reference for a V2 model-derived plan; a bare
-/// `plan.md` path is the V1 placeholder and is never model-derived.
+/// Historical V2 runs use this reference; new runs keep the host assignment
+/// at `plan.md` and never publish a model-derived plan.
 pub(crate) const MODEL_PLAN_POINTER: &str = "/model_plan";
 
 /// Public reference to a dispatch plan. V1 points at the placeholder
@@ -31,9 +31,8 @@ impl PlanReference {
     }
 }
 
-/// Build the public plan reference for a dispatch. V2 always references the
-/// receiving `status.json#/model_plan` even though the plan is committed
-/// later (board-first); V1 keeps the placeholder `plan.md` path.
+/// Preserve the historical V2 reference shape when projecting an old run;
+/// current dispatches use the host-assignment `plan.md` path.
 pub(crate) fn plan_reference(
     plan_path: Option<&Path>,
     workspace_dir: &Path,
@@ -315,17 +314,9 @@ pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&s
 /// #971 review-fix (F3): idempotent-safe close for the BOARD-FIRST kanban
 /// row on an early exit out of `handle_tachi_dispatch`'s post-init section.
 ///
-/// The row is seeded `TASK_STATE_WORKING` by `init_kanban_task` before any
-/// of the fallible post-init stages (V2 plan stage, backend prep, credential
-/// materialization, harness preflight, slot reservation) run. Some of those
-/// stages (the plan stage's own failure/timeout branches) already close the
-/// row to a terminal state themselves before propagating their `Err` — this
-/// helper must NOT clobber that with a second, possibly-redundant write, so
-/// it checks the current state first and only writes `TASK_STATE_FAILED`
-/// if the row is still non-terminal (i.e. still WORKING/PENDING/etc.).
-/// Best-effort: a kanban write failure here is logged, not escalated — the
-/// caller is already on an error path and must propagate the original error,
-/// not a secondary bookkeeping failure.
+/// Backend preparation, credentials, preflight and slot reservation can fail
+/// after the board row is seeded. Keep an already-settled state unchanged;
+/// otherwise project FAILED without masking the caller's original error.
 pub(crate) async fn close_kanban_row_on_early_exit(
     server: &MemoryServer,
     dispatch_id: &str,
@@ -334,13 +325,12 @@ pub(crate) async fn close_kanban_row_on_early_exit(
 ) {
     // #773 Layer-2 ② (hole b): every post-init early exit is a terminal
     // dispatch state the agent never `tachi_complete`s. Record a canonical
-    // outcome row here as the GENERIC catch (covers credential/slot/plan-stage
+    // outcome row here as the GENERIC catch (covers credential/slot
     // failures that have no more-specific writer). FIRST-WRITER-WINS on
     // dispatch_id means the specific classifiers upstream (backend/preflight,
     // which run before this closer) keep their precise class — this coarse
     // 'dispatch' class only lands when nothing else already recorded the row.
-    // Written even when the kanban row is already terminal (plan-stage closed
-    // it), since that path still produced no outcome row of its own.
+    // A settled kanban row may still lack its canonical outcome row.
     // `project` (#774 round 2): the dispatch's `TachiDispatchParams::project`,
     // so this coarse catch-all lands in the same DB the upstream classifiers
     // (and any later `tachi_complete`) would resolve to — see
@@ -359,15 +349,8 @@ pub(crate) async fn close_kanban_row_on_early_exit(
             "TASK_STATE_COMPLETED"
                 | "TASK_STATE_FAILED"
                 | "TASK_STATE_CANCELED"
-                // #971 review-fix (F2, second pass): the plan-review early
-                // response now writes TASK_STATE_INPUT_REQUIRED to the
-                // kanban row (see `plan_stage.rs`), not
-                // TASK_STATE_PENDING_REVIEW. That early return is a
-                // legitimate non-failure exit out of
-                // `handle_tachi_dispatch`'s post-init section, so this guard
-                // must treat INPUT_REQUIRED as already-settled here too —
-                // otherwise this early-exit closer would immediately stomp
-                // the just-written INPUT_REQUIRED row to FAILED.
+                // Preserve historical review gates and other settled
+                // input-required states instead of projecting a new failure.
                 | "TASK_STATE_INPUT_REQUIRED"
         )
     );

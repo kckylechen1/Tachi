@@ -413,9 +413,9 @@ User session
     ↓
 capture_session emits session.captured              [implemented]
     ↓
-TACHI_CONTINUITY_PIPELINE=1                         [implemented, opt-in]
-distill lane    → pattern.candidate / bonding.candidate / timeline.candidate
-reasoning lane  → session.outcome
+Host-owned reasoning submits typed candidates and outcome labels
+    → pattern.candidate / bonding.candidate / timeline.candidate
+    → session.outcome
     ↓
 tachi_event action=project                          [implemented, explicit]
     → idempotently materialize eligible candidates into:
@@ -497,7 +497,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `memcore` typed `tachi_events` ledger: `TachiEventRecord`, `ProjectionKind`, `AuthorityLevel`, `EffectScope`.
 - `tachi-server` `tachi_event` facade with eight actions: `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, `label_eval`.
 - `tachi_status` surfaces `challenge_rate` as a read-only continuity metric.
-- `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
+- `capture_session` emits `session.captured`. Host-owned reasoning supplies candidates and `session.outcome` through typed event emission; capture does not run automatic labelers.
 - `tachi_task(action="complete")` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
 - `tachi_event action=project` idempotently materializes events into stable projections.
 - `tachi_event action=context` returns projected memories plus `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections. It is read-only and never treats its model-supplied `session_id` as internal evidence admission.

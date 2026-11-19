@@ -1,9 +1,6 @@
 use super::acp_native::{build_native_acp_run_spec, is_native_acp_transport};
 use super::acpx::is_acpx_transport;
-use super::dispatch_v2::{
-    append_trajectory_event, build_execute_prompt, parse_plan_sections, plan_review_required,
-    plan_timeout_secs, run_plan_stage, v2_enabled_from_env, write_status_json, V2Decision,
-};
+use super::dispatch_v2::{append_trajectory_event, write_status_json};
 use super::kanban_helpers::{close_kanban_row_on_early_exit, init_kanban_task};
 use super::launcher::{
     build_claude_command, build_codex_command, build_grok_command, build_kimi_command,
@@ -213,7 +210,6 @@ pub(crate) use execution::install_managed_credential_cleanup_failure;
 pub(crate) use execution::install_managed_timeout_override;
 mod flow_setup;
 mod harness_preflight;
-mod plan_stage;
 mod recovery;
 mod response_helpers;
 mod staff_retention;
@@ -382,7 +378,6 @@ use self::execution::{
 };
 use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
 use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
-use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
 use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
@@ -528,35 +523,6 @@ fn validate_subprocess_launch_spec_timeout(
         );
     }
     Ok(())
-}
-
-/// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
-/// section in `handle_tachi_dispatch`. Either the plan stage's own
-/// pending-review early-response fires (`EarlyResponse`), or every fallible
-/// stage succeeded and execution is ready to spawn (`Ready`).
-enum PostInitDispatchOutcome {
-    EarlyResponse(String),
-    Ready(Box<ReadyDispatch>),
-}
-
-/// Post-init failure with an explicit terminalization disposition. It keeps
-/// the pre-existing post-init behavior for ordinary errors (`planner_settled`
-/// is false, so the caller's early-exit closer runs), while letting the plan
-/// stage report that it already conditionally published a terminal failure or
-/// safely refused to clobber a newer winner — in which case the closer must
-/// NOT run and re-terminalize the row.
-struct PostInitError {
-    message: String,
-    planner_settled: bool,
-}
-
-impl From<String> for PostInitError {
-    fn from(message: String) -> Self {
-        Self {
-            message,
-            planner_settled: false,
-        }
-    }
 }
 
 /// Everything the post-guard spawn/response-building code (steps 8-9) needs,
@@ -705,8 +671,7 @@ async fn launch_canonical_dispatch(
     // spawn work (#894 S2d). This is the single choke-point every dispatch
     // caller (`tachi_staff(start)`, task lifecycle callers, poke probes)
     // funnels through, so it runs before step 1 (workspace creation), before
-    // prompt assembly, before the V2 plan stage's provider call, before
-    // credential materialization, and before any builder's own preflight
+    // prompt assembly, credential materialization, and any builder's preflight
     // (acpx's `node --version` probe, etc.).
     //
     // It subsumes the #894 S0 `validate_dispatch_sandbox_at_entry` gate: an
@@ -855,33 +820,11 @@ async fn launch_canonical_dispatch(
     }
 
     // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
-    // Seed status.json + the first trajectory event immediately after the
-    // run directory exists, BEFORE prompt assembly / the V2 plan stage's
-    // (up to 180s) LLM call. External pollers must see *something* the
-    // instant a dispatch is accepted, not only after the plan stage
-    // succeeds. Every field serialized here is available straight off
-    // the request, resolved assignment, execution grant, and private start
-    // owners — no prompt/artifact/plan dependency.
-    // `v2` is not yet decided (that needs the resolved request stage, which IS already
-    // resolved) so compute it early too; feedback_rules are not known yet
-    // (they come from `write_dispatch_artifacts` below) and are seeded as a
-    // neutral "pending" placeholder here, then overwritten by the existing
-    // post-artifacts `write_status_json` call once real values exist.
+    // Seed the receipt before prompt assembly or backend preparation so
+    // pollers can observe the admitted assignment immediately.
     let harness_server_url =
         infer_harness_server_url(&requested_harness_server_url, &command, &harness_transport);
-    let v2_decision = if resolved_assignment
-        .selected_profile
-        .as_deref()
-        .and_then(tachi_dispatch::native_session_profile)
-        .is_some()
-    {
-        // Native supervision owns all turns; a legacy planner environment flag
-        // cannot insert another provider call before the admitted Session.
-        V2Decision::Disabled
-    } else {
-        v2_enabled_from_env(request.stage.as_deref())
-    };
-    let v2 = matches!(v2_decision, V2Decision::Enabled);
+    let v2 = false;
 
     write_status_json(
         &workspace_dir,
@@ -1047,15 +990,8 @@ async fn launch_canonical_dispatch(
     );
 
     // 3. ─── #971 BOARD-FIRST ────────────────────────────────────────────
-    // Initialize the kanban row BEFORE the V2 plan stage (which can block
-    // for up to 180s on an LLM call) so board/status pollers see a row
-    // immediately, not only after planning succeeds. Artifacts (including
-    // the V1-placeholder plan.md) are already written above either way, so
-    // `init_kanban_task`'s plan reference is always valid here. For V2 the
-    // reference is `status.json#/model_plan` — a pointer that is filled by
-    // the plan commit later, while the placeholder `plan.md` is never
-    // overwritten with model content. This is the accepted, documented
-    // consequence of moving board-first ahead of Stage 1.
+    // Publish the board row before backend preparation and worker launch.
+    // The plan.md artifact records the host-supplied task and execution context.
     init_kanban_and_flow(FlowSetupInputs {
         server,
         dispatch_id: &dispatch_id,
@@ -1072,60 +1008,12 @@ async fn launch_canonical_dispatch(
     })
     .await?;
 
-    // ─── #971 review-fix (F3) ────────────────────────────────────────────
-    // Structural guard: everything from here through the success
-    // return/spawn handoff below runs inside this `async` block so that
-    // ANY `?` exit within it (Stage-1 plan, backend prep, credential
-    // materialization, harness preflight, slot reservation) is caught at
-    // ONE boundary and closes the BOARD-FIRST kanban row seeded above,
-    // instead of leaking it in TASK_STATE_WORKING per uncovered callsite.
-    // `close_kanban_row_on_early_exit` is idempotent-safe (checks current
-    // state first) so it does not clobber branches — like the plan stage's
-    // own failure/timeout paths and the pending-review path (F2) — that
-    // already close/transition the row themselves before their `?`
-    // propagates out of this block. A real `Drop` guard can't `.await`,
-    // so this "wrap the fallible section, match on Err" shape is the
-    // idiom that covers all current exits without per-callsite tracking.
-    let post_init: Result<PostInitDispatchOutcome, PostInitError> = async {
-        // 4. Stage 1 (V2 only): generate plan via the provider. The plan stage
-        // conditionally publishes its own terminal failure under the run's
-        // anchor/CAS and reports whether it already settled the row, so this
-        // guard does not blind-close a concurrent winner.
-        let plan_stage_outcome = match run_v2_plan_stage(PlanStageInputs {
-            server,
-            request: &request,
-            dispatch_id: &dispatch_id,
-            assignment: &resolved_assignment,
-            resolved_profile: &resolved_profile,
-            profile_payload: &profile_payload,
-            base_prompt: &base_prompt,
-            prompt_md_path: &prompt_md_path,
-            context_md_path: &context_md_path,
-            trajectory_path: &trajectory_path,
-            workspace_dir: &workspace_dir,
-            feedback_rules_trace: &feedback_rules_trace,
-            v2_decision,
-        })
-        .await
-        {
-            Ok(outcome) => outcome,
-            // Every plan-stage error is already settled: the planner either
-            // published a terminal failure, safely refused a newer winner, or
-            // could not durably publish (reconciliation unknown). The outer
-            // closer must not fabricate a terminal kanban state for any of them.
-            Err(error) => {
-                return Err(PostInitError {
-                    message: error,
-                    planner_settled: true,
-                });
-            }
-        };
-        if let Some(early_response) = plan_stage_outcome.early_response {
-            return Ok(PostInitDispatchOutcome::EarlyResponse(early_response));
-        }
-        let prompt = plan_stage_outcome.prompt;
-        let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
-        let plan_generated_at = plan_stage_outcome.plan_generated_at;
+    // Every fallible preparation step after board publication shares one
+    // early-exit closer, so failed launches cannot leave an orphaned row.
+    let post_init: Result<Box<ReadyDispatch>, String> = async {
+        let prompt = base_prompt.clone();
+        let plan_duration_ms = None;
+        let plan_generated_at: Option<String> = None;
         let carrier_execution_grant =
             carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
         let subprocess_launch_spec = ["custom", "dsh"]
@@ -1280,7 +1168,7 @@ async fn launch_canonical_dispatch(
                     mcp_config_path.as_deref(),
                 )
             });
-            return Err(error.into());
+            return Err(error);
         }
 
         // 7. Harness preflight (opencode_serve only)
@@ -1309,7 +1197,7 @@ async fn launch_canonical_dispatch(
         let flow_dispatch_slot =
             reserve_dispatch_slot(request.flow_id.as_deref(), &request.task, &dispatch_id)?;
 
-        Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
+        Ok(Box::new(ReadyDispatch {
             execution,
             managed_custom_eligible,
             execution_backend_name,
@@ -1321,7 +1209,7 @@ async fn launch_canonical_dispatch(
             plan_generated_at,
             flow_dispatch_slot,
             managed_authority_refs,
-        })))
+        }))
     }
     .await;
 
@@ -1338,26 +1226,16 @@ async fn launch_canonical_dispatch(
         flow_dispatch_slot,
         managed_authority_refs,
     } = match post_init {
-        Ok(PostInitDispatchOutcome::EarlyResponse(early_response)) => {
-            return Ok(early_response);
-        }
-        Ok(PostInitDispatchOutcome::Ready(ready)) => *ready,
-        Err(e) => {
-            // The plan stage reports whether it already conditionally
-            // published a terminal failure (or safely refused to clobber a
-            // concurrent winner). Blind-closing the row here would clobber
-            // that winner; ordinary post-init failures keep their existing
-            // closer behavior.
-            if !e.planner_settled {
-                close_kanban_row_on_early_exit(
-                    server,
-                    &dispatch_id,
-                    "post-init dispatch stage",
-                    request.project.as_deref(),
-                )
-                .await;
-            }
-            return Err(e.message);
+        Ok(ready) => *ready,
+        Err(error) => {
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "post-init dispatch stage",
+                request.project.as_deref(),
+            )
+            .await;
+            return Err(error);
         }
     };
 

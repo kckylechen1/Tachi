@@ -250,7 +250,7 @@ Current implementation emits `session.captured` as a raw capture marker. It is t
 
 ### `pattern.candidate` events
 
-With `TACHI_CONTINUITY_PIPELINE=1`, the distill lane can emit five candidate events, one per pattern above, with `projection_hints = ["Pattern"]`, `authority = "CollectOnly"`, and `effects = ["None"]`.
+The host may submit five typed candidate events, one per pattern above, with `projection_hints = ["Pattern"]`, `authority = "CollectOnly"`, and `effects = ["None"]`. Session capture itself does not generate these candidates.
 
 ### `session.outcome` event
 
