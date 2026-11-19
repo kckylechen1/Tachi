@@ -13,7 +13,6 @@ pub const RUST_MANIFEST_PATHS: &[&str] = &[
     "crates/tachi-server/Cargo.toml",
     "crates/tachi-params/Cargo.toml",
     "crates/memory-server-runtime/Cargo.toml",
-    "crates/memory-node/Cargo.toml",
     "crates/tachi-bootstrap/Cargo.toml",
     "crates/tachi-dispatch/Cargo.toml",
     "crates/tachi-foundry/Cargo.toml",
@@ -21,7 +20,7 @@ pub const RUST_MANIFEST_PATHS: &[&str] = &[
     "crates/tachi-llm/Cargo.toml",
 ];
 
-pub const JS_PACKAGE_PATHS: &[&str] = &["crates/memory-node/package.json"];
+pub const JS_PACKAGE_PATHS: &[&str] = &[];
 
 pub const PINNED_REFS: &[&str] = &[
     "README.md",
