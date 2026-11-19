@@ -56,22 +56,28 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 
 | Profile | Eligibility | Execution retained |
 | --- | --- | --- |
-| `full` | Default; every unclassified or mixed change, active docs outside the explicit operational allowlist, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
-| `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
-| `operational_prose` | Only modifications to the existing regular `docs/engineering/operations/recall-eval.md` and `staff-result-testing.md` files | Same retained checks as `archive_prose`; no Rust job |
+| `full` | Default; every unclassified or mixed change, Rust-embedded or governance-locked docs (`RUST_OR_GOVERNANCE_LOCKED_DOCS`), non-Markdown fixtures, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix (`main` and `workflow_dispatch` always run full `--workspace` tests and `portable-kernel` boundary checks) |
+| `docs_prose` | PRs that only add, modify, delete, or rename regular non-executable, non-symlink `.md` files under `docs/**/*.md`, `wiki/**/*.md`, or `cards/**/*.md` outside `RUST_OR_GOVERNANCE_LOCKED_DOCS` | Setup policy, applicability/acceptance/crate-scope tests, release-version checks, secret scan, unconditional observational Windows matrix; no Rust job |
+| `archive_prose`, `operational_prose` | Retained schema-4 prose profiles (also exclude only `rust`) | Same retained checks as `docs_prose`; no Rust job |
 
 The retired `node_presentation` and `node_cache` profiles are rejected. Changes
 at former plugin/CLI paths or workflow cache settings receive the conservative
 `full` profile.
 
-Active docs outside that two-file allowlist remain full until their consumers
-are checked. Native Node,
-transport, daemon, credentials/config, protocol and package/build inputs remain
-full. New paths, deletes, renames, executable-mode or symlink
-changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
-coverage. Workflow, shell/YAML, tool pin, version, hook and classifier edits
-stay full.
-Expanding the positive scope requires source review of consumers.
+Rust-embedded docs (`README.md`, `README.zh-CN.md`, `README.classical.md`,
+`docs/INSTALL.md`, `docs/engineering/architecture/portable-kernel-split.md`,
+`docs/engineering/architecture/downstream-sync-surface.md`), contract-test-read
+docs listed in `memory-action-contract-v1.fixture.json`, governance docs
+(`AGENTS.md`, `CLAUDE.md`, `docs/engineering/architecture/dispatch-lifecycle.md`,
+`docs/engineering/architecture/issue-portfolio-governance.md`,
+`docs/engineering/operations/ci-scheduling.md`), and any non-Markdown file
+(such as `docs/**/*.json` fixtures or `docs/current-state.agent.yaml`) remain
+`full`. Native Node, transport, daemon, credentials/config, protocol and
+package/build inputs remain full. Executable-mode or symlink changes, dirty
+source, missing/shallow ancestry and invalid inputs never reduce coverage.
+Workflow, shell/YAML, tool pin, version, hook and classifier edits stay full.
+Expanding prose eligibility requires source review of consumers, enforced by a
+dynamic `include_str!`/`include_bytes!` `.md` guard in `test_ci_scope.py`.
 
 The retired-tool prose scanner has been removed under the repository cleanup
 scope. A word in documentation is not a tool invocation: native tool names and
@@ -80,17 +86,26 @@ routes against the actual router and removed actions against the typed wire
 parser. Documentation accuracy is reviewed with the affected behavior; source
 text cannot grant itself a CI exemption.
 
-The two allowlisted guides have no remaining build, runtime or Rust test
-consumer. Skipping Rust for those exact prose-only PRs avoids compiling the
-workspace solely to lint wording. When Rust is applicable, its full workspace
-suite, clippy, audit, portable tests and doc tests still run. Release-version
-validation and its tests run once in the required setup job.
+When `rust` runs on `pull_request`, `.github/scripts/ci_affected_crates.py`
+computes the fail-closed reverse-dependency closure from `cargo metadata`
+(`normal`, `dev`, and `build` dependencies), explicit cross-crate
+`include_str!` source edges (`portable-server`, `memcore`, and
+`memory-server-runtime` -> `tachi-server`), and `tachi-contract-tests`.
+Ordinary non-locked `.md` edits alongside crate changes do not force
+`--workspace`, whereas any change outside workspace member directories (root
+manifests, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/**`, `.config/**`,
+`.github/**`, `scripts/**`, locked docs, or non-Markdown docs/fixtures), any
+symlink/structural change, or any git/metadata ambiguity fails closed to
+`--workspace`. `Verify portable-kernel feature boundary` runs on `pull_request`
+only when `portable-kernel` is in the affected crate set (or on `--workspace`
+fallback), and always runs on `push` to `main` and `workflow_dispatch`. Clippy,
+formatting, `cargo-audit`, and doc tests continue to run whenever `rust` runs.
+Release-version validation and its tests run once in the required setup job.
 
-This is an exact file allowlist, not an operations-directory exemption.
-CI/review/authority policy, other runbooks, fixtures and new files stay full.
-If an allowlisted document gains a build, runtime or test consumer, update the
-selected coverage or remove its eligibility in that same change. Classifier,
-acceptance-plan, workflow and scheduling-policy changes themselves stay full.
+If an exempted prose document gains a build, runtime or test consumer, add it
+to `RUST_OR_GOVERNANCE_LOCKED_DOCS` in `.github/scripts/ci_scope.py` in that
+same change. Classifier, acceptance-plan, workflow and scheduling-policy
+changes themselves stay full.
 
 The setup job publishes the profile and checkout tree; acceptance independently
 recomputes the profile from its checkout and always requires a matching

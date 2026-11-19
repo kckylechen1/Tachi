@@ -16,6 +16,9 @@
     ],
     "operational_prose": [
       "rust"
+    ],
+    "docs_prose": [
+      "rust"
     ]
   }
 }

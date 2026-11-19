@@ -4,13 +4,14 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import ci_acceptance as acceptance
-from ci_scope import classify, exclusions
+from ci_scope import RUST_OR_GOVERNANCE_LOCKED_DOCS, classify, exclusions
 
 ROOT = Path(__file__).resolve().parents[2]
 PLAN = json.loads((ROOT / '.github/acceptance-plan.json').read_text())
@@ -18,23 +19,60 @@ RETIRED_PRESENTATION_PATHS = (
     'packages/tachi-cli/src/utils/ui.ts',
     'packages/tachi-cli/src/utils/i18n.ts',
 )
-OPERATIONAL_PROSE_PATHS = (
+ORDINARY_PROSE_PATHS = (
     'docs/engineering/operations/recall-eval.md',
     'docs/engineering/operations/staff-result-testing.md',
+    'docs/engineering/operations/host-admission-reference.md',
+    'docs/engineering/operations/test-failure-injection.md',
+    'docs/engineering/operations/current-store-admission-preparation.md',
+    'docs/engineering/operations/portable-version-admission.md',
+    'docs/engineering/operations/fts-split-repair.md',
+    'docs/engineering/operations/legacy-entrypoints.md',
+    'docs/UPGRADING.md',
+    'wiki/skills/eng-auto-checkpoint.md',
+    'cards/sample-lane.md',
 )
 FULL_SCOPE_PATHS = (
-    'AGENTS.md', '.github/scripts/ci_scope.py', '.github/scripts/ci_acceptance.py',
-    '.github/scripts/test_ci_scope.py', '.github/scripts/test_ci_acceptance.py',
+    '.github/scripts/ci_scope.py', '.github/scripts/ci_affected_crates.py',
+    '.github/scripts/ci_acceptance.py', '.github/scripts/test_ci_scope.py',
+    '.github/scripts/test_ci_affected_crates.py', '.github/scripts/test_ci_acceptance.py',
     '.github/acceptance-plan.json', '.github/workflows/ci.yml', '.config/nextest.toml',
     'crates/tachi-server/src/lib.rs',
-    'docs/engineering/architecture/dispatch-lifecycle.md',
-    *('docs/engineering/operations/' + name for name in (
-        'ci-scheduling.md',
-        'host-admission-reference.md', 'test-failure-injection.md',
-        'current-store-admission-preparation.md', 'portable-version-admission.md',
-        'fts-split-repair.md', 'legacy-entrypoints.md',
-    )),
+    'docs/engineering/architecture/kernel-surface-v1.fixture.json',
+    'docs/current-state.agent.yaml',
+    *sorted(RUST_OR_GOVERNANCE_LOCKED_DOCS),
 )
+
+
+def _discover_rust_embedded_markdown_paths(repo_root: Path) -> set[str]:
+    """Scan crates/** and tools/** for include_str!/include_bytes! referencing .md files."""
+    macro_pat = re.compile(r'include_(?:str|bytes)!\s*\(([^;{}]+?)\)', re.S)
+    str_pat = re.compile(r'"([^"]+)"')
+    discovered: set[str] = set()
+    for base in ('crates', 'tools'):
+        for rs_file in (repo_root / base).rglob('*.rs'):
+            text = rs_file.read_text(encoding='utf-8', errors='replace')
+            crate_root = rs_file
+            while crate_root != repo_root and not (crate_root / 'Cargo.toml').exists():
+                crate_root = crate_root.parent
+            for match in macro_pat.finditer(text):
+                inner = match.group(1)
+                literals = str_pat.findall(inner)
+                if not literals:
+                    continue
+                if 'CARGO_MANIFEST_DIR' in inner:
+                    for lit in literals:
+                        if lit == 'CARGO_MANIFEST_DIR' or not lit.endswith('.md'):
+                            continue
+                        target = (crate_root / lit.lstrip('/')).resolve()
+                        discovered.add(target.relative_to(repo_root.resolve()).as_posix())
+                else:
+                    for lit in literals:
+                        if not lit.endswith('.md'):
+                            continue
+                        target = (rs_file.parent / lit).resolve()
+                        discovered.add(target.relative_to(repo_root.resolve()).as_posix())
+    return discovered
 
 
 class ScopeTests(unittest.TestCase):
@@ -45,9 +83,8 @@ class ScopeTests(unittest.TestCase):
         self.git('init', '-q')
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
-        for path in ['docs/archive/old.md', 'docs/INSTALL.md', 'README.md',
-                     'integrations/openclaw/config.ts', 'Cargo.toml', *RETIRED_PRESENTATION_PATHS,
-                     *OPERATIONAL_PROSE_PATHS, *FULL_SCOPE_PATHS]:
+        for path in ['integrations/openclaw/config.ts', 'Cargo.toml',
+                     *RETIRED_PRESENTATION_PATHS, *ORDINARY_PROSE_PATHS, *FULL_SCOPE_PATHS]:
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('before\n')
@@ -72,8 +109,8 @@ class ScopeTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('after\n')
 
-    def test_archive_narrows_but_retired_presentation_modifications_stay_full(self):
-        for path, profile in [('docs/archive/old.md', 'archive_prose'),
+    def test_ordinary_docs_wiki_cards_narrow_but_retired_presentation_stays_full(self):
+        for path, profile in [*[(p, 'docs_prose') for p in ORDINARY_PROSE_PATHS],
                               *[(p, 'full') for p in RETIRED_PRESENTATION_PATHS]]:
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.base)
@@ -84,50 +121,126 @@ class ScopeTests(unittest.TestCase):
                 self.assertEqual(scope['checkout_sha'], self.git('rev-parse', 'HEAD'))
                 self.assertEqual(scope['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
 
-    def test_operational_prose_accepts_only_existing_allowlisted_documents(self):
-        for paths in [(path,) for path in OPERATIONAL_PROSE_PATHS] + [OPERATIONAL_PROSE_PATHS]:
-            with self.subTest(paths=paths):
-                self.git('reset', '--hard', self.base)
-                for path in paths:
-                    self.edit(path)
-                self.commit()
-                scope = self.scope()
-                self.assertEqual(scope['profile'], 'operational_prose')
-                self.assertEqual(scope['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
+    def test_mixed_ordinary_prose_across_docs_wiki_and_cards_narrows_together(self):
+        self.git('reset', '--hard', self.base)
+        self.edit('docs/engineering/operations/recall-eval.md')
+        self.edit('wiki/skills/eng-auto-checkpoint.md')
+        self.edit('cards/sample-lane.md')
+        self.edit('docs/new-guide.md')
+        self.commit()
+        scope = self.scope()
+        self.assertEqual(scope['profile'], 'docs_prose')
+        self.assertEqual(scope['reason'], 'approved_prose_scope')
 
-    def test_operational_prose_does_not_exempt_policy_code_or_mixed_changes(self):
-        for path in FULL_SCOPE_PATHS + ('docs/archive/old.md', 'docs/INSTALL.md', 'README.md'):
-            for paths in ((path,), (OPERATIONAL_PROSE_PATHS[0], path)):
-                with self.subTest(paths=paths):
+    def test_add_delete_and_rename_of_ordinary_prose_narrows_to_docs_prose(self):
+        # Add new docs, wiki, and cards markdown files
+        for new_path in ('docs/new-guide.md', 'wiki/new-page.md', 'cards/new-card.md'):
+            with self.subTest(action='add', path=new_path):
+                self.git('reset', '--hard', self.base)
+                self.edit(new_path)
+                self.commit()
+                self.assertEqual(self.scope()['profile'], 'docs_prose')
+
+        # Delete existing non-locked prose files
+        for existing in ('docs/UPGRADING.md', 'wiki/skills/eng-auto-checkpoint.md', 'cards/sample-lane.md'):
+            with self.subTest(action='delete', path=existing):
+                self.git('reset', '--hard', self.base)
+                (self.repo / existing).unlink()
+                self.commit()
+                self.assertEqual(self.scope()['profile'], 'docs_prose')
+
+        # Rename existing non-locked prose file (represented as D + A by --no-renames)
+        for src, dst in (
+            ('docs/UPGRADING.md', 'docs/UPGRADING-V2.md'),
+            ('wiki/skills/eng-auto-checkpoint.md', 'docs/migrated-checkpoint.md'),
+        ):
+            with self.subTest(action='rename', src=src, dst=dst):
+                self.git('reset', '--hard', self.base)
+                target_dst = self.repo / dst
+                target_dst.parent.mkdir(parents=True, exist_ok=True)
+                (self.repo / src).rename(target_dst)
+                self.commit()
+                self.assertEqual(self.scope()['profile'], 'docs_prose')
+
+    def test_locked_docs_and_full_scope_paths_never_exempt_even_on_add_delete_rename_or_mixed(self):
+        for path in FULL_SCOPE_PATHS:
+            for paths in ((path,), (ORDINARY_PROSE_PATHS[0], path)):
+                with self.subTest(action='modify', paths=paths):
                     self.git('reset', '--hard', self.base)
                     for changed in paths:
                         self.edit(changed)
                     self.commit()
-                    expected = 'archive_prose' if paths == ('docs/archive/old.md',) else 'full'
-                    self.assertEqual(self.scope()['profile'], expected)
+                    self.assertEqual(self.scope()['profile'], 'full')
 
-    def test_new_operational_documents_including_allowlisted_names_stay_full(self):
-        for path in OPERATIONAL_PROSE_PATHS:
-            with self.subTest(path=path):
+        for locked_doc in sorted(RUST_OR_GOVERNANCE_LOCKED_DOCS):
+            with self.subTest(action='delete_locked', path=locked_doc):
                 self.git('reset', '--hard', self.base)
-                self.git('rm', path)
-                without_document = self.commit()
-                self.edit(path)
+                (self.repo / locked_doc).unlink()
                 self.commit()
-                self.assertEqual(self.scope(base=without_document)['profile'], 'full')
-        for path in ('docs/engineering/operations/cleanup-kill-list.md',
-                     'docs/engineering/operations/new.md', 'unknown.md'):
-            self.git('reset', '--hard', self.base)
-            self.edit(OPERATIONAL_PROSE_PATHS[0])
-            self.edit(path)
-            self.commit()
-            self.assertEqual(self.scope()['profile'], 'full')
+                self.assertEqual(self.scope()['profile'], 'full')
 
-    def test_active_docs_native_security_unknown_and_mixed_remain_full(self):
-        cases = [('docs/INSTALL.md',), ('README.md',), ('Cargo.toml',),
-                 ('integrations/openclaw/config.ts',),
-                 ('docs/archive/new.md',), ('unknown',),
-                 ('docs/archive/old.md', 'packages/tachi-cli/src/utils/ui.ts')]
+            with self.subTest(action='rename_to_locked', path=locked_doc):
+                self.git('reset', '--hard', self.base)
+                (self.repo / locked_doc).unlink()
+                without_locked = self.commit()
+                self.edit('docs/UPGRADING.md')
+                (self.repo / 'docs/UPGRADING.md').rename(self.repo / locked_doc)
+                self.commit()
+                self.assertEqual(self.scope(base=without_locked)['profile'], 'full')
+
+    def test_all_rust_embedded_and_contract_markdown_files_stay_full(self):
+        embedded_md = _discover_rust_embedded_markdown_paths(ROOT)
+        self.assertGreaterEqual(len(embedded_md), 6, 'expected Rust-embedded markdown files')
+        self.assertIn('README.md', embedded_md)
+        self.assertIn('docs/INSTALL.md', embedded_md)
+        self.assertIn('docs/engineering/architecture/portable-kernel-split.md', embedded_md)
+        self.assertIn('docs/engineering/architecture/downstream-sync-surface.md', embedded_md)
+
+        contract_fixture = json.loads(
+            (ROOT / 'docs/engineering/architecture/memory-action-contract-v1.fixture.json').read_text()
+        )
+        contract_md = {
+            path for path in contract_fixture['active_contract_files']
+            if path.endswith('.md')
+        }
+        all_guarded_md = sorted(embedded_md | contract_md)
+
+        for md_path in all_guarded_md:
+            with self.subTest(mode='modify', path=md_path):
+                self.git('reset', '--hard', self.base)
+                self.edit(md_path)
+                self.commit()
+                self.assertEqual(
+                    self.scope()['profile'], 'full',
+                    f'Rust-consumed markdown {md_path} must never bypass Rust CI',
+                )
+            with self.subTest(mode='add', path=md_path):
+                self.git('reset', '--hard', self.base)
+                target = self.repo / md_path
+                if target.exists():
+                    target.unlink()
+                    without_file = self.commit()
+                else:
+                    without_file = self.base
+                self.edit(md_path)
+                self.commit()
+                self.assertEqual(
+                    self.scope(base=without_file)['profile'], 'full',
+                    f'Added Rust-consumed markdown {md_path} must never bypass Rust CI',
+                )
+
+    def test_non_markdown_and_outside_roots_remain_full(self):
+        cases = [
+            ('Cargo.toml',),
+            ('integrations/openclaw/config.ts',),
+            ('docs/new.json',),
+            ('docs/new.yaml',),
+            ('wiki/script.py',),
+            ('cards/schema.toml',),
+            ('unknown.md',),
+            ('unknown',),
+            ('docs/UPGRADING.md', 'packages/tachi-cli/src/utils/ui.ts'),
+        ]
         for paths in cases:
             with self.subTest(paths=paths):
                 self.git('reset', '--hard', self.base)
@@ -162,27 +275,30 @@ jobs:
         self.commit()
         self.assertEqual(self.scope()['profile'], 'full')
 
-    def test_deleted_renamed_executable_and_symlink_entries_remain_full(self):
-        for path in ('docs/archive/old.md', *OPERATIONAL_PROSE_PATHS):
+    def test_executable_mode_and_symlink_entries_remain_full(self):
+        for path in ('docs/UPGRADING.md', 'wiki/skills/eng-auto-checkpoint.md', 'cards/sample-lane.md'):
             target = self.repo / path
-            for action in ('delete', 'rename', 'mode', 'symlink'):
+            for action in ('mode', 'symlink', 'add_exec', 'add_symlink'):
                 with self.subTest(path=path, action=action):
                     self.git('reset', '--hard', self.base)
-                    if action == 'delete':
-                        target.unlink()
-                    elif action == 'rename':
-                        target.rename(target.with_name('renamed.md'))
-                    elif action == 'mode':
+                    if action == 'mode':
                         target.chmod(0o755)
-                    else:
+                    elif action == 'symlink':
                         target.unlink()
                         target.symlink_to('../INSTALL.md')
+                    elif action == 'add_exec':
+                        extra = target.with_name('exec-doc.md')
+                        extra.write_text('exec\n')
+                        extra.chmod(0o755)
+                    else:
+                        extra = target.with_name('sym-doc.md')
+                        extra.symlink_to('../INSTALL.md')
                     self.commit()
                     self.assertEqual(self.scope()['profile'], 'full')
 
     def test_unproven_inputs_and_non_pr_events_never_narrow(self):
         self.assertEqual(self.scope()['profile'], 'full')  # empty diff
-        for path in ('docs/archive/old.md', OPERATIONAL_PROSE_PATHS[0]):
+        for path in ('docs/UPGRADING.md', ORDINARY_PROSE_PATHS[0]):
             self.git('reset', '--hard', self.base)
             self.edit(path)
             self.commit()
@@ -195,7 +311,7 @@ jobs:
 
     def test_depth_two_merge_checkout_and_advanced_base(self):
         self.git('checkout', '-qb', 'candidate')
-        self.edit('docs/archive/old.md')
+        self.edit('docs/UPGRADING.md')
         head = self.commit()
         self.git('checkout', '-qb', 'advanced-base', self.base)
         self.edit('README.md')
@@ -204,7 +320,7 @@ jobs:
         with tempfile.TemporaryDirectory() as d:
             clone = Path(d) / 'clone'
             subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(clone)], check=True)
-            self.assertEqual(classify(clone, 'pull_request', head, base)['profile'], 'archive_prose')
+            self.assertEqual(classify(clone, 'pull_request', head, base)['profile'], 'docs_prose')
             # An advertised older base cannot silently hide the README change.
             self.assertEqual(classify(clone, 'pull_request', head, self.base)['profile'], 'full')
 
@@ -212,7 +328,7 @@ jobs:
         # PRs need not be up to date with main, so every merge on main is
         # integration-tested in full, even when the merged change is prose.
         self.git('checkout', '-qb', 'candidate')
-        self.edit('docs/archive/old.md')
+        self.edit('docs/UPGRADING.md')
         candidate = self.commit()
         self.git('checkout', '-qb', 'main-base', self.base)
         self.git('merge', '--no-ff', '-qm', 'merge fixture', candidate)
@@ -223,7 +339,7 @@ jobs:
         self.git('reset', '--hard', candidate)
 
     def test_missing_shallow_base_keeps_full(self):
-        self.edit('docs/archive/old.md')
+        self.edit('docs/UPGRADING.md')
         head = self.commit()
         with tempfile.TemporaryDirectory() as d:
             clone = Path(d) / 'clone'
@@ -247,9 +363,9 @@ jobs:
         self.commit()
         tree = self.git('rev-parse', 'HEAD^{tree}')
         bad_outputs = [None, [], {}, {'profile': None}, {'profile': []},
-                       {'profile': 'unknown'}, {'profile': 'operational_prose'},
-                       {'profile': 'operational_prose', 'checkout_tree': tree},
-                       {'profile': 'operational_prose', 'checkout_tree': '2' * 40}]
+                       {'profile': 'unknown'}, {'profile': 'docs_prose'},
+                       {'profile': 'docs_prose', 'checkout_tree': tree},
+                       {'profile': 'docs_prose', 'checkout_tree': '2' * 40}]
         for event in ('pull_request', 'workflow_dispatch'):
             for outputs in bad_outputs:
                 with self.subTest(event=event, outputs=outputs):
@@ -264,23 +380,23 @@ jobs:
             self.assertEqual(code, 0)
             self.assertTrue(json.loads(output)['accepted'])
 
-    def test_main_binds_operational_profile_and_tree_to_real_classification(self):
-        self.edit(OPERATIONAL_PROSE_PATHS[0])
+    def test_main_binds_prose_profile_and_tree_to_real_classification(self):
+        self.edit(ORDINARY_PROSE_PATHS[0])
         self.commit()
         tree = self.git('rev-parse', 'HEAD^{tree}')
         for outputs, expected in (
-                ({'profile': 'operational_prose', 'checkout_tree': tree}, 0),
+                ({'profile': 'docs_prose', 'checkout_tree': tree}, 0),
                 ({'profile': 'full', 'checkout_tree': tree}, 1),
-                ({'profile': 'operational_prose', 'checkout_tree': '2' * 40}, 1),
-                ({'profile': 'operational_prose', 'checkout_tree': ''}, 1),
-                ({'profile': 'operational_prose'}, 1)):
+                ({'profile': 'docs_prose', 'checkout_tree': '2' * 40}, 1),
+                ({'profile': 'docs_prose', 'checkout_tree': ''}, 1),
+                ({'profile': 'docs_prose'}, 1)):
             with self.subTest(outputs=outputs):
                 producer = {'result': 'success', 'outputs': outputs}
                 self.assertEqual(self.acceptance_main('pull_request', producer)[0], expected)
         # A dirty checkout falls back to full and cannot reuse the narrow producer.
         self.edit('README.md')
         producer = {'result': 'success',
-                    'outputs': {'profile': 'operational_prose', 'checkout_tree': tree}}
+                    'outputs': {'profile': 'docs_prose', 'checkout_tree': tree}}
         self.assertEqual(self.acceptance_main('pull_request', producer)[0], 1)
 
 
@@ -293,7 +409,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         return rows
 
     def test_only_approved_skips_are_not_applicable_not_passed(self):
-        for profile in ('archive_prose', 'operational_prose'):
+        for profile in ('archive_prose', 'operational_prose', 'docs_prose'):
             needs = self.needs(profile)
             ok, verdicts = acceptance.evaluate(PLAN, needs, profile=profile)
             self.assertTrue(ok)
@@ -311,7 +427,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
 
     def test_profile_cannot_exempt_setup_secret_scan_or_windows_inventory(self):
         forbidden = [(profile, job)
-                     for profile in ('archive_prose', 'operational_prose')
+                     for profile in ('archive_prose', 'operational_prose', 'docs_prose')
                      for job in ('gitleaks', 'build-seat-setup', 'physical-db-identity-windows')]
         for profile, job in forbidden + [('full', 'rust')]:
             plan = json.loads(json.dumps(PLAN))
@@ -330,7 +446,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
                     acceptance.evaluate(plan, self.needs('full'))
 
     def test_main_requires_matching_successful_scope_producer(self):
-        for profile in ('archive_prose', 'operational_prose'):
+        for profile in ('archive_prose', 'operational_prose', 'docs_prose'):
             scope = {'profile': profile, 'checkout_tree': '1' * 40}
             for producer in (None, {}, {'result': 'failure', 'outputs': {}},
                              {'result': 'success', 'outputs': {'profile': 'full', 'checkout_tree': '1' * 40}},
@@ -351,8 +467,8 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
     def test_main_never_accepts_matching_absent_or_invalid_reduced_tree(self):
         for tree in (None, '', 'not-a-tree', [], '1' * 39):
             with self.subTest(tree=tree):
-                scope = {'profile': 'operational_prose', 'checkout_tree': tree}
-                needs = self.needs('operational_prose')
+                scope = {'profile': 'docs_prose', 'checkout_tree': tree}
+                needs = self.needs('docs_prose')
                 needs['build-seat-setup'] = {'result': 'success', 'outputs': scope}
                 with patch.object(acceptance, 'current_scope', return_value=scope), \
                      patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), \
@@ -366,6 +482,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         setup = full.split('  build-seat-setup:\n', 1)[1].split('  rust:\n', 1)[0]
         self.assertIn('python3 scripts/check_release_versions.py', setup)
         self.assertIn('scripts.test_check_release_versions', setup)
+        self.assertIn('test_ci_affected_crates.py', setup)
         self.assertIn("needs.build-seat-setup.outputs.run_rust == 'true'", full)
 
 
