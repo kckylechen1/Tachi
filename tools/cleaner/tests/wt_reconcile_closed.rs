@@ -14,9 +14,34 @@ use std::process::{Command, Output};
 /// ~10 ms. Each distinct stub body is therefore written once per test here and
 /// every case's `bin/<name>` links to it: scan cost scales with distinct
 /// bodies, not with cases.
+struct MergedGitTemplate {
+    root: PathBuf,
+    accepted_oid: String,
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &dest_path)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(entry.path())?;
+            std::os::unix::fs::symlink(target, dest_path)?;
+        } else {
+            fs::copy(entry.path(), dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 struct StubStore {
     dir: PathBuf,
     bodies: std::cell::RefCell<Vec<String>>,
+    memory_db_template: std::cell::OnceCell<PathBuf>,
+    merged_git_template: std::cell::OnceCell<MergedGitTemplate>,
 }
 impl StubStore {
     fn new() -> Self {
@@ -29,7 +54,154 @@ impl StubStore {
         Self {
             dir,
             bodies: Default::default(),
+            memory_db_template: std::cell::OnceCell::new(),
+            merged_git_template: std::cell::OnceCell::new(),
         }
+    }
+    /// Copy a freshly migrated global store directory from a per-`StubStore`
+    /// template so multi-case tests pay schema initialization once per test.
+    fn copy_global_db_dir(&self, dest_dir: &Path) {
+        let template_dir = self.memory_db_template.get_or_init(|| {
+            let dir = self.dir.join("template-global");
+            fs::create_dir_all(&dir).unwrap();
+            {
+                let store =
+                    memcore::MemoryStore::open(dir.join("memory.db").to_str().unwrap()).unwrap();
+                store
+                    .connection()
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .unwrap();
+            }
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.ends_with("-wal") || n.ends_with("-shm") || n.ends_with(".migration-marker")
+                }) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+            dir
+        });
+        copy_dir_all(template_dir, dest_dir).unwrap();
+    }
+    /// Clone the pre-built `(origin.git, repo, worktrees/merged)` squash-merged
+    /// fixture from a per-`StubStore` template and rewrite the three embedded
+    /// absolute path files, avoiding ~11 `/usr/bin/git` spawns per test case.
+    fn clone_merged_git_fixture(&self, fixture: &Fixture<'_>) -> String {
+        let template = self.merged_git_template.get_or_init(|| {
+            let root = self.dir.join("merged-git-template");
+            for dir in ["home", "config", "tmp", "templates", "repo", "worktrees"] {
+                fs::create_dir_all(root.join(dir)).unwrap();
+            }
+            fs::write(root.join("gitconfig"), "").unwrap();
+            let run_git = |cwd: &Path, args: &[&str]| -> Output {
+                let mut cmd = Command::new("/usr/bin/git");
+                cmd.env_clear()
+                    .current_dir(cwd)
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", root.join("home"))
+                    .env("TMPDIR", root.join("tmp"))
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
+                    .env("GIT_TEMPLATE_DIR", root.join("templates"))
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .env("GIT_ALLOW_PROTOCOL", "file")
+                    .env("GIT_AUTHOR_NAME", "Fixture")
+                    .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+                    .env("GIT_COMMITTER_NAME", "Fixture")
+                    .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+                    .args(args);
+                cmd.output().unwrap()
+            };
+            let git_ok = |cwd: &Path, args: &[&str]| -> String {
+                let output = run_git(cwd, args);
+                assert!(output.status.success(), "template git {args:?}: {output:?}");
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+
+            let repo = root.join("repo");
+            let origin = root.join("origin.git");
+            let wt = root.join("worktrees/merged");
+            git_ok(&root, &["init", "--bare", origin.to_str().unwrap()]);
+            git_ok(&repo, &["init", "-b", "main"]);
+            assert_eq!(
+                git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
+                repo.join(".git").to_str().unwrap()
+            );
+            fs::write(repo.join("base"), "base\n").unwrap();
+            git_ok(&repo, &["add", "base"]);
+            git_ok(&repo, &["commit", "-m", "base"]);
+            git_ok(
+                &repo,
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
+            git_ok(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "fixture/merged",
+                    wt.to_str().unwrap(),
+                    "main",
+                ],
+            );
+            assert_eq!(
+                git_ok(
+                    &wt,
+                    &["rev-parse", "--path-format=absolute", "--git-common-dir"]
+                ),
+                repo.join(".git").to_str().unwrap()
+            );
+            fs::write(wt.join("accepted"), "accepted change\n").unwrap();
+            git_ok(&wt, &["add", "accepted"]);
+            git_ok(&wt, &["commit", "-m", "accepted PR head"]);
+            let accepted_oid = git_ok(&wt, &["rev-parse", "HEAD"]);
+            git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
+            git_ok(&repo, &["commit", "-m", "independent squash merge"]);
+            assert_eq!(
+                run_git(
+                    &repo,
+                    &["merge-base", "--is-ancestor", &accepted_oid, "main"]
+                )
+                .status
+                .code(),
+                Some(1)
+            );
+            git_ok(&repo, &["push", "origin", "fixture/merged"]);
+
+            MergedGitTemplate { root, accepted_oid }
+        });
+
+        let repo = fixture.0.join("repo");
+        let origin = fixture.0.join("origin.git");
+        let wt = fixture.0.join("worktrees/merged");
+        copy_dir_all(&template.root.join("origin.git"), &origin).unwrap();
+        copy_dir_all(&template.root.join("repo"), &repo).unwrap();
+        copy_dir_all(&template.root.join("worktrees/merged"), &wt).unwrap();
+
+        let template_root_str = template.root.to_str().unwrap();
+        let fixture_root_str = fixture.0.to_str().unwrap();
+        let config_path = repo.join(".git/config");
+        let config = fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains(template_root_str));
+        fs::write(
+            &config_path,
+            config.replace(template_root_str, fixture_root_str),
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".git/worktrees/merged/gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", repo.join(".git/worktrees/merged").display()),
+        )
+        .unwrap();
+
+        template.accepted_oid.clone()
     }
     /// The store file holding exactly `body`, written on first request.
     fn install(&self, body: &str) -> PathBuf {
@@ -296,16 +468,7 @@ fn merged_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) {
         fs::create_dir_all(fixture.0.join(dir)).unwrap();
     }
     fs::write(fixture.0.join("gitconfig"), "").unwrap();
-    drop(
-        memcore::MemoryStore::open(
-            fixture
-                .0
-                .join("home/.tachi/global/memory.db")
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stubs.copy_global_db_dir(&fixture.0.join("home/.tachi/global"));
     let expected_query = if registered_pr {
         "pr view 7 --json state,headRefOid,headRefName"
     } else {
@@ -316,54 +479,12 @@ fn merged_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) {
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
     let wt = fixture.0.join("worktrees/merged");
-    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
-    fixture.git_ok(&repo, &["init", "-b", "main"]);
-    assert_eq!(
-        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(repo.join("base"), "base\n").unwrap();
-    fixture.git_ok(&repo, &["add", "base"]);
-    fixture.git_ok(&repo, &["commit", "-m", "base"]);
-    fixture.git_ok(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    fixture.git_ok(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "fixture/merged",
-            wt.to_str().unwrap(),
-            "main",
-        ],
-    );
-    assert_eq!(
-        fixture.git_ok(
-            &wt,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
-        ),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
-    fixture.git_ok(&wt, &["add", "accepted"]);
-    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
-    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
-    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
-    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
-    assert_eq!(
-        fixture
-            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
-            .status
-            .code(),
-        Some(1)
-    );
+    let accepted = stubs.clone_merged_git_fixture(&fixture);
     if case == "unique" {
         fs::write(wt.join("later"), "must survive\n").unwrap();
         fixture.git_ok(&wt, &["add", "later"]);
         fixture.git_ok(&wt, &["commit", "-m", "later unique commit"]);
+        fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
     } else if case == "empty" {
         fixture.git_ok(
             &wt,
@@ -374,8 +495,8 @@ fn merged_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) {
             fixture.git_ok(&wt, &["rev-parse", &format!("{accepted}^{{tree}}")])
         );
         assert_ne!(fixture.git_ok(&wt, &["rev-parse", "HEAD"]), accepted);
+        fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
     }
-    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
     let mut register = vec![
         "wt-register",
         wt.to_str().unwrap(),
@@ -599,66 +720,13 @@ fn pr_lookup_error_cli_case(stubs: &StubStore, registered_pr: bool, case: &str) 
         serde_json::from_slice(&output.stdout).unwrap()
     };
 
-    drop(
-        memcore::MemoryStore::open(
-            fixture
-                .0
-                .join("home/.tachi/global/memory.db")
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stubs.copy_global_db_dir(&fixture.0.join("home/.tachi/global"));
 
     fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
     let wt = fixture.0.join("worktrees/merged");
-    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
-    fixture.git_ok(&repo, &["init", "-b", "main"]);
-    assert_eq!(
-        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(repo.join("base"), "base\n").unwrap();
-    fixture.git_ok(&repo, &["add", "base"]);
-    fixture.git_ok(&repo, &["commit", "-m", "base"]);
-    fixture.git_ok(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    fixture.git_ok(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "fixture/merged",
-            wt.to_str().unwrap(),
-            "main",
-        ],
-    );
-    assert_eq!(
-        fixture.git_ok(
-            &wt,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
-        ),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
-    fixture.git_ok(&wt, &["add", "accepted"]);
-    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
-    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
-    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
-    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
-    assert_eq!(
-        fixture
-            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
-            .status
-            .code(),
-        Some(1)
-    );
-    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let accepted = stubs.clone_merged_git_fixture(&fixture);
     let mut register = vec![
         "wt-register",
         wt.to_str().unwrap(),
@@ -881,66 +949,13 @@ fn reconcile_warning_cli_case(case: &str) {
         serde_json::from_slice(&output.stdout).unwrap()
     };
 
-    drop(
-        memcore::MemoryStore::open(
-            fixture
-                .0
-                .join("home/.tachi/global/memory.db")
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stubs.copy_global_db_dir(&fixture.0.join("home/.tachi/global"));
 
     fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
     let wt = fixture.0.join("worktrees/merged");
-    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
-    fixture.git_ok(&repo, &["init", "-b", "main"]);
-    assert_eq!(
-        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(repo.join("base"), "base\n").unwrap();
-    fixture.git_ok(&repo, &["add", "base"]);
-    fixture.git_ok(&repo, &["commit", "-m", "base"]);
-    fixture.git_ok(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    fixture.git_ok(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "fixture/merged",
-            wt.to_str().unwrap(),
-            "main",
-        ],
-    );
-    assert_eq!(
-        fixture.git_ok(
-            &wt,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
-        ),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
-    fixture.git_ok(&wt, &["add", "accepted"]);
-    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
-    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
-    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
-    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
-    assert_eq!(
-        fixture
-            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
-            .status
-            .code(),
-        Some(1)
-    );
-    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let accepted = stubs.clone_merged_git_fixture(&fixture);
     let mut register = vec![
         "wt-register",
         wt.to_str().unwrap(),
@@ -1342,66 +1357,13 @@ fn remote_delete_warning_cli_case(case: &str) {
         serde_json::from_slice(&output.stdout).unwrap()
     };
 
-    drop(
-        memcore::MemoryStore::open(
-            fixture
-                .0
-                .join("home/.tachi/global/memory.db")
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap(),
-    );
+    stubs.copy_global_db_dir(&fixture.0.join("home/.tachi/global"));
 
     fixture.script("lsof", "#!/bin/sh\n[ \"$1\" = '+D' ] && [ \"$2\" = \"$FIXTURE_ROOT/worktrees/merged\" ] || exit 92\nprintf 'clear\\n' >> \"$FIXTURE_ROOT/holder-probes\"\nexit 1\n");
     let repo = fixture.0.join("repo");
     let origin = fixture.0.join("origin.git");
     let wt = fixture.0.join("worktrees/merged");
-    fixture.git_ok(&fixture.0, &["init", "--bare", origin.to_str().unwrap()]);
-    fixture.git_ok(&repo, &["init", "-b", "main"]);
-    assert_eq!(
-        fixture.git_ok(&repo, &["rev-parse", "--absolute-git-dir"]),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(repo.join("base"), "base\n").unwrap();
-    fixture.git_ok(&repo, &["add", "base"]);
-    fixture.git_ok(&repo, &["commit", "-m", "base"]);
-    fixture.git_ok(
-        &repo,
-        &["remote", "add", "origin", origin.to_str().unwrap()],
-    );
-    fixture.git_ok(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "fixture/merged",
-            wt.to_str().unwrap(),
-            "main",
-        ],
-    );
-    assert_eq!(
-        fixture.git_ok(
-            &wt,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"]
-        ),
-        repo.join(".git").to_str().unwrap()
-    );
-    fs::write(wt.join("accepted"), "accepted change\n").unwrap();
-    fixture.git_ok(&wt, &["add", "accepted"]);
-    fixture.git_ok(&wt, &["commit", "-m", "accepted PR head"]);
-    let accepted = fixture.git_ok(&wt, &["rev-parse", "HEAD"]);
-    fixture.git_ok(&repo, &["merge", "--squash", "fixture/merged"]);
-    fixture.git_ok(&repo, &["commit", "-m", "independent squash merge"]);
-    assert_eq!(
-        fixture
-            .git(&repo, &["merge-base", "--is-ancestor", &accepted, "main"])
-            .status
-            .code(),
-        Some(1)
-    );
-    fixture.git_ok(&repo, &["push", "origin", "fixture/merged"]);
+    let accepted = stubs.clone_merged_git_fixture(&fixture);
     let mut register = vec![
         "wt-register",
         wt.to_str().unwrap(),
