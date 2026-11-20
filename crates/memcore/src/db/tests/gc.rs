@@ -561,3 +561,182 @@ fn gc_archival_receipts_survive_the_table_sweep_that_reaps_audit_log() {
          `gc_tables` prunes that table, so GC would reap its own evidence."
     );
 }
+
+#[test]
+fn gc_identity_admissions_prunes_aged_unreferenced_and_preserves_invariants() {
+    let conn = make_conn();
+    crate::db::schema::install_harness_session_attachments_schema(&conn).unwrap();
+    let now: jiff::Timestamp = "2026-11-20T00:00:00Z".parse().unwrap();
+    let old = "2026-09-01T00:00:00.000Z";
+    let older = "2026-08-01T00:00:00.000Z";
+    let recent = "2026-11-10T00:00:00.000Z";
+
+    conn.execute_batch(
+        "INSERT INTO agent_identities(agent_identity_id, created_at) VALUES
+            ('agent-revoked', '2026-07-01T00:00:00Z'),
+            ('agent-verified', '2026-07-01T00:00:00Z'),
+            ('agent-a2a', '2026-07-01T00:00:00Z'),
+            ('agent-attached', '2026-07-01T00:00:00Z');",
+    )
+    .unwrap();
+
+    // 1. Old rejected without identity -> MUST be pruned.
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, rejection_evidence, created_at)
+         VALUES ('rej-old', NULL, 'conn-rej-old', 'rejected', 'missing identity', ?1)",
+        params![old],
+    )
+    .unwrap();
+    // 2. Recent rejected without identity -> MUST stay.
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, rejection_evidence, created_at)
+         VALUES ('rej-recent', NULL, 'conn-rej-recent', 'rejected', 'missing identity', ?1)",
+        params![recent],
+    )
+    .unwrap();
+    // 3. Old self_asserted superseded by newer unavailable (>30d too):
+    //    older self_asserted -> pruned; latest unavailable -> preserved!
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, created_at)
+         VALUES
+            ('rev-1-self', 'agent-revoked', 'conn-rev-1', 'self_asserted', ?1),
+            ('rev-2-unavail', 'agent-revoked', 'conn-rev-2', 'unavailable', ?2)",
+        params![older, old],
+    )
+    .unwrap();
+    // 4. Old verified + older self_asserted -> verified MUST stay even if older than 30d;
+    //    superseded older self_asserted is pruned.
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, created_at)
+         VALUES
+            ('ver-old', 'agent-verified', 'conn-ver', 'verified', ?1),
+            ('ver-older-sa', 'agent-verified', 'conn-ver-sa', 'self_asserted', ?2)",
+        params![old, older],
+    )
+    .unwrap();
+    // 5. Old rows referenced by a2a_envelopes / a2a_delivery_receipts -> preserved!
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, created_at)
+         VALUES
+            ('a2a-issuer-old', 'agent-a2a', 'conn-a2a-1', 'self_asserted', ?1),
+            ('a2a-recip-old', 'agent-a2a', 'conn-a2a-2', 'self_asserted', ?2),
+            ('a2a-actor-old', 'agent-a2a', 'conn-a2a-3', 'self_asserted', ?2),
+            ('a2a-latest', 'agent-a2a', 'conn-a2a-latest', 'self_asserted', ?3)",
+        params![older, old, recent],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO a2a_envelopes
+            (envelope_id, kind, issuer_agent_identity_id, issuer_admission_id,
+             recipient_agent_identity_id, recipient_admission_id, subject_ref, body,
+             body_digest, issuer_identity_assurance, recipient_identity_assurance,
+             issuer_trust_domain, recipient_trust_domain, issuer_trust_basis,
+             recipient_trust_basis, idempotency_key, created_at, expires_at,
+             current_state, state_version)
+         VALUES
+            ('env-1', 'turn_response/v1', 'agent-a2a', 'a2a-issuer-old',
+             'agent-a2a', 'a2a-recip-old', 'peer:sub', 'ok',
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+             'self_asserted', 'self_asserted', 'same_host', 'same_host',
+             'current_local_connection', 'historical_local_admission',
+             'idem-1', ?1, '2026-12-01T00:00:00.000Z', 'received', 1)",
+        params![old],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO a2a_delivery_receipts
+            (receipt_id, envelope_id, state, envelope_version, actor_agent_identity_id,
+             actor_admission_id, identity_assurance, trust_domain, trust_basis, occurred_at)
+         VALUES ('rcpt-1', 'env-1', 'received', 1, 'agent-a2a', 'a2a-actor-old',
+                 'self_asserted', 'same_host', 'current_local_connection', ?1)",
+        params![old],
+    )
+    .unwrap();
+    // 6. Old row referenced by harness_session_attachments via connection_id -> preserved!
+    conn.execute(
+        "INSERT INTO identity_admissions
+            (admission_id, agent_identity_id, connection_id, state, created_at)
+         VALUES
+            ('att-old', 'agent-attached', 'conn-att-old', 'self_asserted', ?1),
+            ('att-newer', 'agent-attached', 'conn-att-newer', 'unavailable', ?2)",
+        params![older, old],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO harness_session_attachments
+            (attachment_id, host_identity, identity_attribution_basis, protocol_version,
+             adapter_connection_identity, remote_session_id, work_claim_id,
+             expected_transition_version, agent_identity_id, contract_digest,
+             capabilities_json, tool_profile, capability_class, policy_digest,
+             descriptor_digest, idempotency_key, admission_receipt_ref, state,
+             created_at, updated_at)
+         VALUES
+            ('att-row-1', 'host-1', 'trusted_local_host_declared', 'acp/1',
+             'adapter-1', 'remote-1', 'claim-1', 0, 'agent-attached',
+             'digest-1', '{}', 'read', 'read', 'pol-1', 'desc-1',
+             'idem-att-1', 'conn-att-old', 'attached', ?1, ?1)",
+        params![older],
+    )
+    .unwrap();
+
+    // PortableKernel is a no-op.
+    assert_eq!(
+        gc_identity_admissions(&conn, StoreProfile::PortableKernel, now, 30).unwrap(),
+        0
+    );
+
+    let pruned = gc_identity_admissions(&conn, StoreProfile::TachiFull, now, 30).unwrap();
+    assert_eq!(pruned, 3, "expected rej-old, rev-1-self, ver-older-sa only");
+
+    let mut stmt = conn
+        .prepare("SELECT admission_id FROM identity_admissions ORDER BY admission_id")
+        .unwrap();
+    let remaining: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![
+            "a2a-actor-old",
+            "a2a-issuer-old",
+            "a2a-latest",
+            "a2a-recip-old",
+            "att-newer",
+            "att-old",
+            "rej-recent",
+            "rev-2-unavail",
+            "ver-old",
+        ]
+    );
+}
+
+#[test]
+fn freelist_stats_tracks_freed_pages_until_vacuum() {
+    let conn = make_conn();
+    conn.execute_batch(
+        "CREATE TABLE bloat_tmp (id INTEGER PRIMARY KEY, body TEXT);
+         WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 200)
+         INSERT INTO bloat_tmp(id, body) SELECT x, printf('%.*c', 1500, 'x') FROM cnt;
+         DELETE FROM bloat_tmp;",
+    )
+    .unwrap();
+    let before = freelist_stats(&conn).unwrap();
+    assert!(
+        before.freelist_count > 0,
+        "deleted rows should populate freelist"
+    );
+    assert!(before.freelist_bytes() > 0);
+    assert!(before.freelist_percent() > 0);
+
+    conn.execute_batch("VACUUM;").unwrap();
+    let after = freelist_stats(&conn).unwrap();
+    assert_eq!(after.freelist_count, 0);
+    assert_eq!(after.freelist_bytes(), 0);
+}

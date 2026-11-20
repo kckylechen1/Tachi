@@ -72,35 +72,70 @@ pub async fn run_vacuum_cli(
         }
     };
 
+    let before_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
     // Backup first.
     let backup = backup_db(&path)?;
     eprintln!("[OK] backed up {} -> {}", path.display(), backup.display());
 
-    // VACUUM INTO temp file.
+    // Match backup_db/MemoryStore extension registration before running
+    // `VACUUM INTO` across FTS5 (`simple`) and `vec0` schemas.
+    let _ = memcore::db::enable_simple_auto_extension();
+    memcore::db::register_sqlite_vec();
+
+    // Checkpoint any committed WAL frames into the main DB, then VACUUM INTO
+    // temp file. Truncating the WAL before `VACUUM INTO` and removing stale
+    // `-wal`/`-shm` sidecars after closing avoids leaving an older WAL
+    // paired with a freshly compacted main database file.
     let tmp = sibling(&path, "vacuumed.tmp");
     if tmp.exists() {
         std::fs::remove_file(&tmp)?;
     }
-    {
-        let conn = Connection::open(&path)?;
+    let before_freelist_pages = {
+        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("BEGIN EXCLUSIVE")?;
+        conn.execute_batch("ROLLBACK")?;
+        let stats = memcore::db::freelist_stats(&conn)?;
+        memcore::db::checkpoint_wal_truncate(&conn)?;
         let tmp_str = tmp.display().to_string();
         // SQLite expects a string literal; parameter binding for VACUUM INTO works.
-        conn.execute("VACUUM INTO ?1", [&tmp_str])?;
+        if let Err(err) = conn.execute("VACUUM INTO ?1", [&tmp_str]) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        stats.freelist_count
+    };
+
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = wal_sidecar(&path, suffix);
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar)?;
+        }
     }
 
     // Atomic rename: tmp -> path. On unix, std::fs::rename is atomic on the same FS.
     std::fs::rename(&tmp, &path)?;
+    let after_bytes = std::fs::metadata(&path)?.len();
+    let reclaimed_bytes = before_bytes.saturating_sub(after_bytes);
 
     let body = json!({
         "db": entry.path,
         "backup": backup.display().to_string(),
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+        "reclaimed_bytes": reclaimed_bytes,
+        "before_freelist_pages": before_freelist_pages,
         "apply": true,
         "ok": true,
     });
     if json_out {
         println!("{}", serde_json::to_string_pretty(&body)?);
     } else {
-        println!("[OK] VACUUM complete for {}", entry.path);
+        println!(
+            "[OK] VACUUM complete for {} ({} -> {} bytes, reclaimed {}, freelist pages {})",
+            entry.path, before_bytes, after_bytes, reclaimed_bytes, before_freelist_pages
+        );
     }
     Ok(())
 }
@@ -108,6 +143,12 @@ pub async fn run_vacuum_cli(
 fn sibling(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".");
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
+fn wal_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_owned();
     s.push(suffix);
     std::path::PathBuf::from(s)
 }
@@ -264,5 +305,139 @@ mod tests {
         assert_eq!((link_after.dev(), link_after.ino()), link_identity);
         assert_eq!(std::fs::read_link(&project_link).unwrap(), missing_target);
         assert!(std::fs::symlink_metadata(&missing_target).is_err());
+    }
+
+    #[tokio::test]
+    async fn vacuum_checkpoints_wal_reclaims_freelist_and_removes_stale_sidecars() {
+        let dir = tempdir().unwrap();
+        let app_home = dir.path().join(".tachi");
+        std::fs::create_dir_all(&app_home).unwrap();
+        let db_path = dir.path().join("project").join("tachi-memory.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let make_entry = |id: &str, text: String| memcore::MemoryEntry {
+            id: id.to_string(),
+            path: "/notes/vacuum".to_string(),
+            summary: format!("summary {id}"),
+            text,
+            importance: 0.7,
+            timestamp: "2026-11-20T00:00:00Z".to_string(),
+            valid_from: "2026-11-20T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: vec!["vacuum".to_string()],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: String::new(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            scored_count: 0,
+            last_access: None,
+            last_use_at: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        };
+
+        let db_bytes_without_wal_row;
+        let wal_bytes_with_row;
+        {
+            let mut store = memcore::MemoryStore::open(&db_path.display().to_string()).unwrap();
+            let big_body = "x".repeat(4000);
+            for i in 0..80 {
+                let id = format!("bloat-{i}");
+                store
+                    .upsert(&make_entry(&id, format!("{id} {big_body}")))
+                    .unwrap();
+            }
+            for i in 0..80 {
+                store.delete(&format!("bloat-{i}")).unwrap();
+            }
+            store.checkpoint_wal_truncate().unwrap();
+
+            // Disable auto-checkpoint and commit a row that lives ONLY in the
+            // WAL file (snapshot the uncheckpointed main DB + -wal bytes before
+            // close so restoring them reproduces a lingering non-empty -wal).
+            store
+                .connection()
+                .execute_batch("PRAGMA wal_autocheckpoint = 0;")
+                .unwrap();
+            db_bytes_without_wal_row = std::fs::read(&db_path).unwrap();
+            store
+                .upsert(&make_entry(
+                    "wal-survivor",
+                    "wal committed row before vacuum".to_string(),
+                ))
+                .unwrap();
+            let wal_path = wal_sidecar(&db_path, "-wal");
+            wal_bytes_with_row = std::fs::read(&wal_path).unwrap();
+            assert!(
+                !wal_bytes_with_row.is_empty(),
+                "expected committed WAL frames before vacuum"
+            );
+        }
+
+        // Restore the pre-close uncheckpointed state + a stale -shm sidecar.
+        let wal_path = wal_sidecar(&db_path, "-wal");
+        let shm_path = wal_sidecar(&db_path, "-shm");
+        std::fs::write(&db_path, &db_bytes_without_wal_row).unwrap();
+        std::fs::write(&wal_path, &wal_bytes_with_row).unwrap();
+        std::fs::write(&shm_path, b"stale-shm").unwrap();
+
+        let mut manifest = Manifest::empty();
+        manifest.dbs.push(DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+            last_classification: "healthy".to_string(),
+            scope_hint: "project:vac".to_string(),
+            notes: String::new(),
+            aliases: Vec::new(),
+        });
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+
+        let before_bytes = std::fs::metadata(&db_path).unwrap().len();
+        let db_arg = db_path.display().to_string();
+        run_vacuum_cli(&db_arg, true, &app_home, true)
+            .await
+            .expect("vacuum apply succeeds");
+
+        let after_bytes = std::fs::metadata(&db_path).unwrap().len();
+        assert!(
+            after_bytes < before_bytes,
+            "expected vacuum to shrink DB ({before_bytes} -> {after_bytes})"
+        );
+        assert!(
+            !wal_path.exists() && !shm_path.exists(),
+            "stale WAL/SHM sidecars must be removed alongside swapped DB"
+        );
+
+        let reopened = memcore::MemoryStore::open(&db_path.display().to_string()).unwrap();
+        let stats = memcore::db::freelist_stats(reopened.connection()).unwrap();
+        assert_eq!(
+            stats.freelist_count, 0,
+            "freelist must be empty after vacuum"
+        );
+        let integrity: String = reopened
+            .connection()
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert!(
+            reopened.get("wal-survivor").unwrap().is_some(),
+            "WAL-committed row must survive checkpoint + VACUUM INTO"
+        );
     }
 }

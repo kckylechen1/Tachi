@@ -207,6 +207,8 @@ pub use db::foundry_jobs::{
     PendingFoundryJobMarker, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
+pub use db::gc_identity_admissions;
+#[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
     attach_harness_session, attach_project_harness_session, authorize_harness_session_attachment,
     get_harness_session_attachment, get_project_harness_session_attachment,

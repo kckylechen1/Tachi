@@ -286,6 +286,13 @@ fn run_background_gc(gc_server: &MemoryServer) {
         let claims_gc =
             memcore::gc_session_claims(store.connection(), jiff::Timestamp::now(), 7, 30)
                 .unwrap_or_default();
+        let admissions_deleted = memcore::gc_identity_admissions(
+            store.connection(),
+            store.store_profile(),
+            jiff::Timestamp::now(),
+            30,
+        )
+        .unwrap_or(0);
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
@@ -296,6 +303,10 @@ fn run_background_gc(gc_server: &MemoryServer) {
             object.insert(
                 "session_claims_pruned".into(),
                 json!(claims_gc.released_pruned),
+            );
+            object.insert(
+                "identity_admissions_pruned".into(),
+                json!(admissions_deleted),
             );
         }
         let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
@@ -332,9 +343,20 @@ fn run_background_gc(gc_server: &MemoryServer) {
                 .map_err(|e| format!("{e}"))?;
             let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
             let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+            let admissions_deleted = memcore::gc_identity_admissions(
+                store.connection(),
+                store.store_profile(),
+                jiff::Timestamp::now(),
+                30,
+            )
+            .unwrap_or(0);
             if let Some(object) = gc.as_object_mut() {
                 object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                 object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+                object.insert(
+                    "identity_admissions_pruned".into(),
+                    json!(admissions_deleted),
+                );
             }
             let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
                 .ok()

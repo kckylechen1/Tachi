@@ -153,7 +153,9 @@ pub use doctor_probe::{
     table_exists, FoundryJobStatusCounts, KeywordSuspectProbe,
 };
 #[cfg(any(feature = "admin", test))]
-pub use doctor_probe::{open_for_wal_checkpoint, open_immutable_readonly, open_raw};
+pub use doctor_probe::{
+    freelist_stats, open_for_wal_checkpoint, open_immutable_readonly, open_raw, FreelistStats,
+};
 pub(crate) use event_ledger::refuse_reserved_supersession_event_type;
 pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
@@ -389,6 +391,8 @@ pub use state::{
     list_derived_by_source, list_state, reap_expired_state, save_derived, save_derived_with_id,
     set_state, set_state_if_version, StateRow,
 };
+#[cfg(any(feature = "admin", test))]
+pub use stats_gc::gc_identity_admissions;
 pub(crate) use stats_gc::write_gc_archived_receipt;
 pub use stats_gc::{
     archive_stale_memories, archive_stale_memories_with_config, gc_tables, stats,
