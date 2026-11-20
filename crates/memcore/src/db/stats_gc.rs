@@ -761,15 +761,11 @@ pub fn stats(
     })
 }
 
-/// Prune aged, unreferenced non-verified rows from `identity_admissions`.
+/// Prune aged, unreferenced rejection rows without an admitted identity.
 ///
-/// Preserves:
-/// - every `verified` row (append-only audit evidence),
-/// - any row referenced by `a2a_envelopes`, `a2a_delivery_receipts`, or
-///   `harness_session_attachments` (when present),
-/// - the newest row per non-NULL `agent_identity_id` (`ORDER BY created_at DESC,
-///   admission_id DESC` in `peer_ops` live-addressing checks, preventing older
-///   `self_asserted` rows from resurrecting past a newer `unavailable` row).
+/// Identity-bound rows remain append-only evidence for historical A2A locality,
+/// exact-connection authorization, and the verified-admission connection-reuse
+/// guard. Persistently referenced rejections are retained as well.
 ///
 /// Only `Product` (`StoreProfile::TachiFull`) stores carry `identity_admissions`;
 /// `PortableKernel` stores return `Ok(0)`.
@@ -806,21 +802,10 @@ pub fn gc_identity_admissions(
     let select_sql = format!(
         "SELECT ia.admission_id
            FROM identity_admissions ia
-          WHERE ia.state IN ('rejected', 'unavailable', 'self_asserted')
+          WHERE ia.state = 'rejected'
+            AND ia.agent_identity_id IS NULL
             AND datetime(ia.created_at) IS NOT NULL
             AND datetime(ia.created_at) < datetime(?1)
-            AND (
-                ia.agent_identity_id IS NULL
-                OR ia.admission_id != (
-                    SELECT latest.admission_id
-                      FROM identity_admissions latest
-                     WHERE latest.agent_identity_id = ia.agent_identity_id
-                     ORDER BY datetime(latest.created_at) DESC,
-                              latest.created_at DESC,
-                              latest.admission_id DESC
-                     LIMIT 1
-                )
-            )
             AND NOT EXISTS (
                 SELECT 1 FROM a2a_envelopes e
                  WHERE e.issuer_admission_id = ia.admission_id

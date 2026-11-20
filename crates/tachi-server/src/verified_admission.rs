@@ -1266,7 +1266,31 @@ mod tests {
                     "placement/runner-alpha/connection-7",
                     memcore::UnverifiedAdmissionState::Unavailable,
                 )
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE identity_admissions SET created_at=?1
+                         WHERE admission_id='admission-bootstrap-unavailable'",
+                        [rfc3339_compat(at - SignedDuration::from_secs(31 * 86_400))],
+                    )
+                    .map_err(|error| error.to_string())?;
+                memcore::record_unverified_admission(
+                    store.connection(),
+                    "admission-newer-unavailable",
+                    "agent.remote.alpha",
+                    "placement/runner-alpha/another-connection",
+                    memcore::UnverifiedAdmissionState::Unavailable,
+                )
+                .map_err(|error| error.to_string())?;
+                memcore::gc_identity_admissions(
+                    store.connection(),
+                    memcore::StoreProfile::TachiFull,
+                    at,
+                    30,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
             })
             .unwrap();
         let error = admit_verified_agent_connection_at(

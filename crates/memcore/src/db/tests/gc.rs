@@ -596,8 +596,7 @@ fn gc_identity_admissions_prunes_aged_unreferenced_and_preserves_invariants() {
         params![recent],
     )
     .unwrap();
-    // 3. Old self_asserted superseded by newer unavailable (>30d too):
-    //    older self_asserted -> pruned; latest unavailable -> preserved!
+    // Historical locality and the newer unavailable state are both retained.
     conn.execute(
         "INSERT INTO identity_admissions
             (admission_id, agent_identity_id, connection_id, state, created_at)
@@ -607,8 +606,7 @@ fn gc_identity_admissions_prunes_aged_unreferenced_and_preserves_invariants() {
         params![older, old],
     )
     .unwrap();
-    // 4. Old verified + older self_asserted -> verified MUST stay even if older than 30d;
-    //    superseded older self_asserted is pruned.
+    // Verified evidence does not replace historical local admission evidence.
     conn.execute(
         "INSERT INTO identity_admissions
             (admission_id, agent_identity_id, connection_id, state, created_at)
@@ -690,8 +688,26 @@ fn gc_identity_admissions_prunes_aged_unreferenced_and_preserves_invariants() {
         0
     );
 
+    let recipient_before =
+        crate::db::a2a::resolve_a2a_recipient_eligibility(&conn, "agent-revoked")
+            .unwrap()
+            .expect("historical local admission permits offline mail");
     let pruned = gc_identity_admissions(&conn, StoreProfile::TachiFull, now, 30).unwrap();
-    assert_eq!(pruned, 3, "expected rej-old, rev-1-self, ver-older-sa only");
+    assert_eq!(pruned, 1, "only the unbound rejection is disposable");
+    assert_eq!(
+        crate::db::a2a::resolve_a2a_recipient_eligibility(&conn, "agent-revoked")
+            .unwrap()
+            .expect("GC must preserve offline recipient eligibility"),
+        recipient_before
+    );
+    assert!(crate::db::a2a::a2a_actor_is_current(
+        &conn,
+        &crate::db::a2a::A2aTransitionActor {
+            agent_identity_id: "agent-revoked".into(),
+            connection_id: "conn-rev-1".into(),
+        },
+    )
+    .unwrap());
 
     let mut stmt = conn
         .prepare("SELECT admission_id FROM identity_admissions ORDER BY admission_id")
@@ -711,8 +727,10 @@ fn gc_identity_admissions_prunes_aged_unreferenced_and_preserves_invariants() {
             "att-newer",
             "att-old",
             "rej-recent",
+            "rev-1-self",
             "rev-2-unavail",
             "ver-old",
+            "ver-older-sa",
         ]
     );
 }

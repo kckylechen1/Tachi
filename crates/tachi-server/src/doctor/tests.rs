@@ -1016,10 +1016,10 @@ fn global_store_ambiguity_names_stray_file_but_accepts_compat_symlink() {
 }
 
 #[test]
-fn freelist_bloat_warns_once_per_physical_store_when_threshold_exceeded() {
+fn freelist_bloat_distinguishes_copies_and_deduplicates_aliases() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("bloated.db");
-    let alias_path = dir.path().join("bloated-alias.db");
+    let copy_path = dir.path().join("bloated-copy.db");
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch(
@@ -1033,10 +1033,7 @@ fn freelist_bloat_warns_once_per_physical_store_when_threshold_exceeded() {
     assert!(stats.freelist_bytes() > 0 && stats.freelist_percent() >= 25);
     drop(conn);
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&db_path, &alias_path).unwrap();
-    #[cfg(not(unix))]
-    std::fs::copy(&db_path, &alias_path).unwrap();
+    std::fs::copy(&db_path, &copy_path).unwrap();
 
     let finding = |p: &Path| DoctorFinding {
         path: p.display().to_string(),
@@ -1053,14 +1050,23 @@ fn freelist_bloat_warns_once_per_physical_store_when_threshold_exceeded() {
         error: None,
         scope_hint: "project:test".to_string(),
     };
-    let findings = vec![finding(&db_path), finding(&alias_path)];
+    let mut findings = vec![finding(&db_path), finding(&copy_path)];
+    findings.push(finding(&db_path));
+    #[cfg(unix)]
+    {
+        let alias_path = dir.path().join("bloated-alias.db");
+        std::os::unix::fs::symlink(&db_path, &alias_path).unwrap();
+        findings.push(finding(&alias_path));
+    }
 
     // Production default threshold (10 MiB) ignores small DBs cleanly.
     assert!(freelist_bloat_warnings(&findings).is_empty());
 
-    // Lower threshold flags once per physical DB, naming `tachi repair vacuum`.
+    // Independent copies each warn; repeated paths and symlinks do not.
     let warnings = freelist_bloat_warnings_with_thresholds(&findings, 1024, 25);
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert_eq!(warnings[0].code, "high_freelist_bloat");
-    assert!(warnings[0].remediation.contains("tachi repair vacuum --db"));
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    for warning in warnings {
+        assert_eq!(warning.code, "high_freelist_bloat");
+        assert!(warning.remediation.contains("tachi repair vacuum --db"));
+    }
 }
