@@ -20,6 +20,7 @@
 mod autofix;
 mod classify;
 mod cross_domain;
+mod freelist;
 mod global_identity;
 mod render;
 mod scan;
@@ -35,6 +36,9 @@ pub use crate::doctor_types::{
 pub use classify::classify_one;
 #[cfg(test)]
 pub use classify::{scope_hint_for, scope_hint_for_in_home};
+pub use freelist::freelist_bloat_warnings;
+#[cfg(test)]
+pub(crate) use freelist::freelist_bloat_warnings_with_thresholds;
 pub use global_identity::global_store_ambiguity_warnings;
 pub use render::render_report;
 pub(crate) use scan::scan_strict_read_only;

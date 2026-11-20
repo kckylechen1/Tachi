@@ -59,6 +59,44 @@ fn actor(connection: &str) -> A2aTransitionActor {
 }
 
 #[test]
+fn identity_gc_preserves_project_recipient_and_existing_actor() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    seed(&store);
+    store
+        .connection()
+        .execute(
+            "UPDATE identity_admissions SET created_at='2026-08-01T00:00:00.000Z'
+             WHERE admission_id IN ('admission-sender', 'admission-recipient')",
+            [],
+        )
+        .unwrap();
+    record_a2a_project_admission(
+        store.connection(),
+        "newer-sender",
+        "sender",
+        "newer-connection-sender",
+        OTHER,
+    )
+    .unwrap();
+    crate::gc_identity_admissions(
+        store.connection(),
+        crate::StoreProfile::TachiFull,
+        "2026-11-20T00:00:00Z".parse().unwrap(),
+        30,
+    )
+    .unwrap();
+
+    let recipient = project_recipient(store.connection(), "recipient", PROJECT)
+        .unwrap()
+        .expect("an admission in another project must not erase historical mail eligibility");
+    assert_eq!(recipient.admission_id, "admission-recipient");
+    assert!(matches!(
+        insert_a2a_coordination(store.connection_mut(), &request(), PROJECT).unwrap(),
+        A2aInsertOutcome::Created { .. }
+    ));
+}
+
+#[test]
 fn project_send_replays_after_consumption_and_scrub_without_cross_project_disclosure() {
     let mut store = MemoryStore::open_in_memory().unwrap();
     seed(&store);

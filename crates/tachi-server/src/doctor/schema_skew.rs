@@ -100,7 +100,7 @@ pub fn schema_version_skew_warnings(findings: &[DoctorFinding]) -> Vec<DoctorWar
     warnings
 }
 
-fn is_probeable_tachi_db(finding: &DoctorFinding) -> bool {
+pub(super) fn is_probeable_tachi_db(finding: &DoctorFinding) -> bool {
     finding.error.is_none()
         && finding.schema_kind == "tachi"
         && matches!(

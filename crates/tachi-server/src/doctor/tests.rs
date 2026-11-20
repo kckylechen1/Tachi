@@ -1014,3 +1014,59 @@ fn global_store_ambiguity_names_stray_file_but_accepts_compat_symlink() {
     .unwrap();
     assert!(global_store_ambiguity_warnings(home.path()).is_empty());
 }
+
+#[test]
+fn freelist_bloat_distinguishes_copies_and_deduplicates_aliases() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("bloated.db");
+    let copy_path = dir.path().join("bloated-copy.db");
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE bloat (id INTEGER PRIMARY KEY, body TEXT);
+         WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 200)
+         INSERT INTO bloat(id, body) SELECT x, printf('%.*c', 1500, 'x') FROM cnt;
+         DELETE FROM bloat;",
+    )
+    .unwrap();
+    let stats = memcore::db::freelist_stats(&conn).unwrap();
+    assert!(stats.freelist_bytes() > 0 && stats.freelist_percent() >= 25);
+    drop(conn);
+
+    std::fs::copy(&db_path, &copy_path).unwrap();
+
+    let finding = |p: &Path| DoctorFinding {
+        path: p.display().to_string(),
+        classification: DbClassification::Healthy,
+        file_size: std::fs::metadata(p).unwrap().len(),
+        has_wal: false,
+        mem_count: Some(0),
+        vec_rowid_count: None,
+        none_domain_count: Some(0),
+        cross_domain_suspect_count: None,
+        cross_domain_suspect_sample: Vec::new(),
+        jobs: JobBreakdown::default(),
+        schema_kind: "tachi".to_string(),
+        error: None,
+        scope_hint: "project:test".to_string(),
+    };
+    let mut findings = vec![finding(&db_path), finding(&copy_path)];
+    findings.push(finding(&db_path));
+    #[cfg(unix)]
+    {
+        let alias_path = dir.path().join("bloated-alias.db");
+        std::os::unix::fs::symlink(&db_path, &alias_path).unwrap();
+        findings.push(finding(&alias_path));
+    }
+
+    // Production default threshold (10 MiB) ignores small DBs cleanly.
+    assert!(freelist_bloat_warnings(&findings).is_empty());
+
+    // Independent copies each warn; repeated paths and symlinks do not.
+    let warnings = freelist_bloat_warnings_with_thresholds(&findings, 1024, 25);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    for warning in warnings {
+        assert_eq!(warning.code, "high_freelist_bloat");
+        assert!(warning.remediation.contains("tachi repair vacuum --db"));
+    }
+}

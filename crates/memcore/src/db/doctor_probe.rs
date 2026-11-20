@@ -62,6 +62,46 @@ pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("pragma schema_version", [], |r| r.get(0))
 }
 
+/// Page allocation and dead-page (`freelist`) metrics from SQLite page-1 headers.
+#[cfg(any(feature = "admin", test))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FreelistStats {
+    pub page_size: u64,
+    pub page_count: u64,
+    pub freelist_count: u64,
+}
+
+#[cfg(any(feature = "admin", test))]
+impl FreelistStats {
+    pub fn total_bytes(self) -> u64 {
+        self.page_count.saturating_mul(self.page_size)
+    }
+
+    pub fn freelist_bytes(self) -> u64 {
+        self.freelist_count.saturating_mul(self.page_size)
+    }
+
+    pub fn freelist_percent(self) -> u64 {
+        self.freelist_count
+            .saturating_mul(100)
+            .checked_div(self.page_count)
+            .unwrap_or(0)
+    }
+}
+
+/// Read `PRAGMA page_size`, `page_count`, and `freelist_count` on an existing handle.
+#[cfg(any(feature = "admin", test))]
+pub fn freelist_stats(conn: &Connection) -> rusqlite::Result<FreelistStats> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let freelist_count: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    Ok(FreelistStats {
+        page_size: u64::try_from(page_size).unwrap_or(0),
+        page_count: u64::try_from(page_count).unwrap_or(0),
+        freelist_count: u64::try_from(freelist_count).unwrap_or(0),
+    })
+}
+
 /// Whether a table or view named `name` exists in the schema.
 ///
 /// #1041 B6 (codex round-4): returns the query's own `Result` rather than

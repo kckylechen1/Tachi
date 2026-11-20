@@ -71,6 +71,9 @@ pub(super) async fn run_doctor_command(
     // version (the incident shape), computed from the just-scanned findings.
     let schema_skew = crate::doctor::schema_version_skew_warnings(&report.findings);
     report.warnings.extend(schema_skew);
+    report
+        .warnings
+        .extend(crate::doctor::freelist_bloat_warnings(&report.findings));
 
     // tachi#1184 item 2: the build-resource patrol (private orphan
     // CARGO_TARGET_DIR-shaped dirs + managed-worktree inspection notes).

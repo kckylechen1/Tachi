@@ -760,3 +760,77 @@ pub fn stats(
         by_root_path,
     })
 }
+
+/// Prune aged, unreferenced rejection rows without an admitted identity.
+///
+/// Identity-bound rows remain append-only evidence for historical A2A locality,
+/// exact-connection authorization, and the verified-admission connection-reuse
+/// guard. Persistently referenced rejections are retained as well.
+///
+/// Only `Product` (`StoreProfile::TachiFull`) stores carry `identity_admissions`;
+/// `PortableKernel` stores return `Ok(0)`.
+#[cfg(any(feature = "admin", test))]
+pub fn gc_identity_admissions(
+    conn: &Connection,
+    profile: StoreProfile,
+    now: jiff::Timestamp,
+    max_age_days: i64,
+) -> Result<usize, MemoryError> {
+    if max_age_days < 0 {
+        return Err(MemoryError::InvalidArg(format!(
+            "gc_identity_admissions requires non-negative max_age_days, got {max_age_days}"
+        )));
+    }
+    if !profile.includes_product() {
+        return Ok(0);
+    }
+
+    let cutoff = crate::time_compat::millis_z(
+        now - jiff::SignedDuration::from_secs(max_age_days.saturating_mul(86_400)),
+    );
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let has_attachments = super::table_exists(&tx, "harness_session_attachments")?;
+    let attachment_guard = if has_attachments {
+        " AND NOT EXISTS (
+            SELECT 1 FROM harness_session_attachments h
+             WHERE h.admission_receipt_ref = ia.admission_id
+                OR h.admission_receipt_ref = ia.connection_id
+        )"
+    } else {
+        ""
+    };
+    let select_sql = format!(
+        "SELECT ia.admission_id
+           FROM identity_admissions ia
+          WHERE ia.state = 'rejected'
+            AND ia.agent_identity_id IS NULL
+            AND datetime(ia.created_at) IS NOT NULL
+            AND datetime(ia.created_at) < datetime(?1)
+            AND NOT EXISTS (
+                SELECT 1 FROM a2a_envelopes e
+                 WHERE e.issuer_admission_id = ia.admission_id
+                    OR e.recipient_admission_id = ia.admission_id
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM a2a_delivery_receipts r
+                 WHERE r.actor_admission_id = ia.admission_id
+            ){attachment_guard}"
+    );
+    let candidate_ids = {
+        let mut stmt = tx.prepare(&select_sql)?;
+        let rows = stmt
+            .query_map([&cutoff], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut deleted = 0usize;
+    if !candidate_ids.is_empty() {
+        let mut del = tx.prepare("DELETE FROM identity_admissions WHERE admission_id = ?1")?;
+        for id in &candidate_ids {
+            deleted += del.execute([id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(deleted)
+}
