@@ -5,7 +5,7 @@ use memcore::HubCapability;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tachi_hub::{capability_visibility_for_cap, skill_document_content, CapabilityVisibility};
+use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
 
 #[cfg(all(test, unix))]
 #[path = "export_ownership_tests.rs"]
@@ -36,7 +36,6 @@ fn empty_export_result(agent: &str, clean: bool) -> serde_json::Value {
 ///
 /// Supports:
 /// - **claude**: `~/.tachi/skills/<name>/SKILL.md` + symlinks to `~/.claude/skills/<name>`
-/// - **openclaw**: `~/.openclaw/plugins/tachi-skills.json` with hook configuration
 /// - **cursor**: `.cursor/rules/<name>.mdc` rule files in the working directory
 /// - **generic**: Raw SKILL.md files to a specified directory
 pub(crate) async fn handle_export_skills(
@@ -44,6 +43,17 @@ pub(crate) async fn handle_export_skills(
     params: ExportSkillsParams,
 ) -> Result<String, String> {
     let agent = params.agent.to_ascii_lowercase();
+    let exporter: fn(&[HubCapability], &ExportSkillsParams) -> Result<String, String> =
+        match agent.as_str() {
+            "claude" => export_for_claude,
+            "cursor" => export_for_cursor,
+            "generic" => export_for_generic,
+            other => {
+                return Err(format!(
+                    "Unsupported agent target '{other}'. Supported: claude, cursor, generic"
+                ));
+            }
+        };
     let vis_filter = params.visibility.to_ascii_lowercase();
 
     // ── 1. Collect all skills from global + project DBs ──────────────────────
@@ -123,15 +133,7 @@ pub(crate) async fn handle_export_skills(
     }
 
     // ── 5. Dispatch to agent-specific exporter ───────────────────────────────
-    match agent.as_str() {
-        "claude" => export_for_claude(&all_skills, &params),
-        "openclaw" => export_for_openclaw(&all_skills, &params),
-        "cursor" => export_for_cursor(&all_skills, &params),
-        "generic" => export_for_generic(&all_skills, &params),
-        other => Err(format!(
-            "Unsupported agent target '{other}'. Supported: claude, openclaw, cursor, generic"
-        )),
-    }
+    exporter(&all_skills, &params)
 }
 
 /// Extract skill name from ID (e.g. "skill:code-review" -> "code-review")
@@ -217,81 +219,6 @@ fn export_for_claude_to_dirs(
         "errors": errors,
         "publication_policy": "create_only; existing_entries_preserved",
         "cleanup": claude_cleanup_report(params.clean)
-    }))
-    .map_err(|e| format!("serialize: {e}"))
-}
-
-/// Export skills for OpenClaw: generate a tachi-skills.json plugin config.
-fn export_for_openclaw(
-    skills: &[HubCapability],
-    params: &ExportSkillsParams,
-) -> Result<String, String> {
-    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-    let output_dir = if let Some(ref dir) = params.output_dir {
-        PathBuf::from(dir)
-    } else {
-        home.join(".openclaw").join("plugins")
-    };
-
-    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
-
-    // Build OpenClaw plugin manifest with skill hooks
-    let skill_entries: Vec<serde_json::Value> = skills
-        .iter()
-        .filter_map(|cap| {
-            let name = skill_name_from_id(&cap.id);
-            let def: serde_json::Value = serde_json::from_str(&cap.definition).ok()?;
-            let description = if cap.description.is_empty() {
-                name.clone()
-            } else {
-                cap.description.clone()
-            };
-            let prompt =
-                if def.get("execution").and_then(serde_json::Value::as_str) == Some("document") {
-                    skill_document_content(&def)
-                        .ok()
-                        .map(serde_json::Value::from)
-                } else {
-                    def.get("prompt").or(def.get("template")).cloned()
-                };
-            Some(json!({
-                "id": cap.id,
-                "name": name,
-                "description": description,
-                "prompt": prompt,
-                "system": def.get("system").cloned(),
-                "model": def.get("model").cloned(),
-                "temperature": def.get("temperature").cloned(),
-                "trigger": format!("@tachi-skill-{}", name)
-            }))
-        })
-        .collect();
-
-    let manifest = json!({
-        "plugin": "tachi-skills",
-        "version": "1.0.0",
-        "description": "Tachi Hub skills exported for OpenClaw",
-        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
-        "hooks": {
-            "before_agent_start": {
-                "type": "skill-injection",
-                "skills": skill_entries
-            }
-        },
-        "skills": skill_entries
-    });
-
-    let manifest_path = output_dir.join("tachi-skills.json");
-    let content =
-        serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize manifest: {e}"))?;
-    std::fs::write(&manifest_path, &content)
-        .map_err(|e| format!("write {:?}: {e}", manifest_path))?;
-
-    serde_json::to_string(&json!({
-        "agent": "openclaw",
-        "exported": skills.len(),
-        "manifest": manifest_path.display().to_string(),
-        "skills": skill_entries.iter().map(|s| s["name"].clone()).collect::<Vec<_>>()
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
