@@ -161,10 +161,10 @@ pub(crate) fn collect_dispatches(
                 &created_at,
                 now,
             );
-            let reviewed = meta
-                .get("reviewed")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // Historical `reviewed` mixed explicit close and worker predicates
+            // with review. No independent review witness is bound to this row;
+            // retain the JSON bool but never promote that legacy claim.
+            let reviewed = false;
             let elapsed = crate::utils::parse_relaxed_datetime(&created_at)
                 .ok()
                 .map(|dt| {

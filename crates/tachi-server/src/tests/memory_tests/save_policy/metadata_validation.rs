@@ -639,6 +639,8 @@ async fn public_save_cannot_forge_kanban_authority_metadata() {
                 "dispatch_id": "dispatch_20261028T000000Z_forge",
                 "a2a_state": "completed",
                 "reviewed": true,
+                "closure_kind": "partial",
+                "terminal_at": "2020-01-01T00:00:00Z",
                 "task": "legit display field"
             })),
         )))
@@ -656,6 +658,14 @@ async fn public_save_cannot_forge_kanban_authority_metadata() {
                 .map(|entry| entry.metadata)
         })
         .expect("stored kanban row");
+    assert!(
+        metadata.get("closure_kind").is_none(),
+        "caller closure: {metadata}"
+    );
+    assert!(
+        metadata.get("terminal_at").is_none(),
+        "caller terminal time: {metadata}"
+    );
     assert!(
         metadata.get("reviewed").is_none(),
         "public save must not mint reviewed: {metadata}"
@@ -723,6 +733,8 @@ async fn caller_update_via_root_path_cannot_reforge_kanban_authority() {
                 "dispatch_id": "dispatch_forged_other_key",
                 "a2a_state": "completed",
                 "reviewed": true,
+                "closure_kind": "partial",
+                "terminal_at": "2020-01-01T00:00:00Z",
             })),
         ),
     )
@@ -738,6 +750,14 @@ async fn caller_update_via_root_path_cannot_reforge_kanban_authority() {
                 .map(|entry| entry.metadata)
         })
         .expect("updated kanban row");
+    assert!(
+        metadata.get("closure_kind").is_none(),
+        "caller closure: {metadata}"
+    );
+    assert!(
+        metadata.get("terminal_at").is_none(),
+        "caller terminal time: {metadata}"
+    );
     assert!(
         metadata.get("reviewed").is_none(),
         "forged reviewed: {metadata}"
@@ -771,6 +791,8 @@ async fn caller_cannot_migrate_forged_authority_into_kanban_namespace() {
                 "dispatch_id": "dispatch_20261028T000000Z_migrate",
                 "a2a_state": "completed",
                 "reviewed": true,
+                "closure_kind": "partial",
+                "terminal_at": "2020-01-01T00:00:00Z",
             })),
         ),
     )
@@ -814,6 +836,14 @@ async fn caller_cannot_migrate_forged_authority_into_kanban_namespace() {
         })
         .expect("migrated row");
     assert!(
+        metadata.get("closure_kind").is_none(),
+        "caller closure: {metadata}"
+    );
+    assert!(
+        metadata.get("terminal_at").is_none(),
+        "caller terminal time: {metadata}"
+    );
+    assert!(
         metadata.get("reviewed").is_none(),
         "migrated-in reviewed must be removed in-transaction: {metadata}"
     );
@@ -850,6 +880,8 @@ async fn wiki_kanban_overlap_cleans_both_authority_families() {
                 "dispatch_id": dispatch_id,
                 "a2a_state": "completed",
                 "reviewed": true,
+                "closure_kind": "partial",
+                "terminal_at": "2020-01-01T00:00:00Z",
                 "review_receipt": {"approver": "owner", "decision": "approved"},
                 "source_bundle_hash": "forged-overlap-hash",
             })),
@@ -867,6 +899,14 @@ async fn wiki_kanban_overlap_cleans_both_authority_families() {
                 .map(|entry| entry.metadata)
         })
         .expect("overlap row");
+    assert!(
+        metadata.get("closure_kind").is_none(),
+        "caller closure: {metadata}"
+    );
+    assert!(
+        metadata.get("terminal_at").is_none(),
+        "caller terminal time: {metadata}"
+    );
     assert!(
         metadata.get("reviewed").is_none(),
         "kanban reviewed must not survive: {metadata}"

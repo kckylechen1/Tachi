@@ -345,9 +345,9 @@ fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
 
 fn strip_kanban_authority_fields(metadata: &mut serde_json::Value) {
     if let serde_json::Value::Object(object) = metadata {
-        object.remove("dispatch_id");
-        object.remove("a2a_state");
-        object.remove("reviewed");
+        for key in KANBAN_AUTHORITY_KEYS {
+            object.remove(key);
+        }
     }
 }
 
@@ -369,7 +369,7 @@ const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
 
 /// Kanban work-state fields owned by the server's System kanban writers
 /// (#1454 F4): the status ledger's row key, outcome and close authority.
-const KANBAN_AUTHORITY_KEYS: [&str; 3] = ["dispatch_id", "a2a_state", "reviewed"];
+const KANBAN_AUTHORITY_KEYS: [&str; 4] = ["dispatch_id", "a2a_state", "reviewed", "closure_kind"];
 
 const ADJUDICATION_AUTHORITY_KEYS: [&str; 3] = [
     "adjudication_receipt",
@@ -862,6 +862,20 @@ async fn handle_save_memory_impl(
         // are unchanged.
         strip_kanban_authority_fields(&mut entry.metadata);
         metadata_removals.extend_from_slice(&KANBAN_AUTHORITY_KEYS);
+        // Ordinary cards own their terminal time; dispatch task lifecycles
+        // are host-observed, including id updates and namespace migrations.
+        let dispatch_path =
+            |path: &str| memcore::path_router::normalize_path(path).starts_with("/kanban/tasks/");
+        if dispatch_path(&entry.path)
+            || existing_entry
+                .as_ref()
+                .is_some_and(|old| dispatch_path(&old.path))
+        {
+            if let Some(object) = entry.metadata.as_object_mut() {
+                object.remove("terminal_at");
+            }
+            metadata_removals.push("terminal_at");
+        }
     }
 
     #[cfg(test)]

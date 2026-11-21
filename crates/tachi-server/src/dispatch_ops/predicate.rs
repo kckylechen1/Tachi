@@ -3,9 +3,8 @@
 //! The OS exit code is the only hard signal a dispatch produces, but it is not
 //! sufficient: a vendor can exit 0 (or a leader can self-report
 //! `outcome="success"`) while the actual contract deliverable is missing. That
-//! is a FALSE SUCCESS, and today it lands `TASK_STATE_COMPLETED` + `reviewed=true`
-//! by fiat. This module provides a single machine-checkable source of truth,
-//! evaluated at every site that is about to write COMPLETED:
+//! is a false success. This module checks the declared completion contract
+//! before writing COMPLETED. Completion is separate from independent review:
 //!
 //!   * Pass       — the declared predicate is satisfied → earned COMPLETED,
 //!                  `reviewed=false`: today's predicate kinds witness only
@@ -245,15 +244,10 @@ pub(crate) fn evaluate_completion_predicate_for_dispatch(
     Ok((predicate.is_some(), verdict))
 }
 
-/// Pure kanban state mapping for a completion, folding the predicate verdict in.
-///
-/// Returns `(kanban_state, reviewed, override_reason)`.
-///
-/// The predicate only re-decides the `success` outcome — the sole self-report
-/// that can *falsely* claim success. `failure`/`partial`/`aborted` keep their
-/// existing mapping and stay `reviewed=true` (an explicit `tachi_complete` is a
-/// deliberate, reviewed close). `override_reason` is `Some` only when the
-/// predicate intercepts a false success.
+/// Resolve execution state, not independent review. Explicit failure, partial
+/// and aborted outcomes close the run; neither that intent nor a predicate
+/// over worker-authored output can supply independent review evidence.
+/// Returns `(kanban_state, reviewed, override_reason)` for wire compatibility.
 pub(crate) fn resolve_completion_state(
     outcome: &str,
     verdict: &PredicateVerdict,
@@ -264,8 +258,7 @@ pub(crate) fn resolve_completion_state(
             // `ArtifactNonEmpty`) verify only worker-authored output or a
             // worker-written artifact: their positive witness is text the
             // measured party can write itself, so a Pass earns COMPLETED
-            // but never `reviewed` (#1454). A future predicate kind backed
-            // by non-self-authored evidence may earn reviewed=true here.
+            // but never independent review.
             PredicateVerdict::Pass => ("TASK_STATE_COMPLETED", false, None),
             PredicateVerdict::Fail(reason) => (
                 "TASK_STATE_FAILED",
@@ -278,10 +271,10 @@ pub(crate) fn resolve_completion_state(
             // could not be machine-verified, so it must not earn reviewed=true.
             PredicateVerdict::Unverified => ("TASK_STATE_COMPLETED", false, None),
         },
-        "failure" => ("TASK_STATE_FAILED", true, None),
-        "partial" => ("TASK_STATE_INPUT_REQUIRED", true, None),
-        "aborted" => ("TASK_STATE_CANCELED", true, None),
-        _ => ("TASK_STATE_FAILED", true, None),
+        "failure" => ("TASK_STATE_FAILED", false, None),
+        "partial" => ("TASK_STATE_INPUT_REQUIRED", false, None),
+        "aborted" => ("TASK_STATE_CANCELED", false, None),
+        _ => ("TASK_STATE_FAILED", false, None),
     }
 }
 
@@ -546,7 +539,7 @@ mod tests {
 
     #[test]
     fn resolve_state_matrix_non_success_ignores_predicate() {
-        // failure/partial/aborted keep their mapping and stay reviewed for every
+        // Explicit closes keep their execution mapping without review for every
         // verdict — the predicate only re-decides self-reported success.
         for verdict in [
             PredicateVerdict::Pass,
@@ -555,19 +548,19 @@ mod tests {
         ] {
             assert_eq!(
                 resolve_completion_state("failure", &verdict),
-                ("TASK_STATE_FAILED", true, None)
+                ("TASK_STATE_FAILED", false, None)
             );
             assert_eq!(
                 resolve_completion_state("partial", &verdict),
-                ("TASK_STATE_INPUT_REQUIRED", true, None)
+                ("TASK_STATE_INPUT_REQUIRED", false, None)
             );
             assert_eq!(
                 resolve_completion_state("aborted", &verdict),
-                ("TASK_STATE_CANCELED", true, None)
+                ("TASK_STATE_CANCELED", false, None)
             );
             assert_eq!(
                 resolve_completion_state("garbage", &verdict),
-                ("TASK_STATE_FAILED", true, None)
+                ("TASK_STATE_FAILED", false, None)
             );
         }
     }

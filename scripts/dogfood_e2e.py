@@ -2134,7 +2134,7 @@ def voyage_model_selection_reaches_memory_search_and_rerank(ctx: Context) -> Non
 
 from dogfood_recall_eval import register as register_recall_eval
 
-register_recall_eval(scenario, find_key)
+register_recall_eval(scenario, find_key, fixture_connection)
 
 
 @scenario("memory", "continuity", "projection-retirement")

@@ -812,6 +812,8 @@ fn completion_receipt_state_from_status(status: &Value) -> Result<CompletionRece
         .get("eval_ledger_id")
         .and_then(Value::as_str)
         .is_none_or(|value| value.trim().is_empty())
+        // Required legacy wire shape, not evidence of review. Both historical
+        // true and current false remain valid terminal-accounting receipts.
         || receipt.get("reviewed").and_then(Value::as_bool).is_none()
         || receipt
             .get("recorded_at")

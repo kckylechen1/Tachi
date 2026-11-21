@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import closing
 
 
-def register(scenario, find_key):
+def register(scenario, find_key, fixture_connection):
     @scenario("recall-eval-receipts")
     def recall_eval_receipts_bind_inputs_and_reject_drift(ctx):
         needle = f"RECEIPT_GATE_{ctx.tag}"
@@ -539,4 +540,121 @@ def register(scenario, find_key):
             and matches[0].get("adjudication_attribution_basis") == "fallback_unreceipted",
             briefing if ok else raw,
         )
+        ctx.done()
+
+    @scenario("completion-closure")
+    def explicit_completion_closes_without_independent_review(ctx):
+        """Synthetic persisted runs, real HTTP completion and consumer projections."""
+        session = ctx.connect()
+        db = ctx.daemon.app_home / "global" / "tachi-memory.db"
+        cases = {
+            "partial": ("partial", "TASK_STATE_INPUT_REQUIRED", "partial"),
+            "failure": ("failure", "TASK_STATE_FAILED", None),
+            "aborted": ("aborted", "TASK_STATE_CANCELED", None),
+            "success": ("success", "TASK_STATE_COMPLETED", None),
+            "predicate-pass": ("success", "TASK_STATE_COMPLETED", None),
+            "predicate-fail": ("success", "TASK_STATE_FAILED", None),
+        }
+        ids = {name: f"f5-{ctx.tag}-{name}" for name in [*cases, "legacy"]}
+        # Use the supported save for ordinary row creation. Only the stopped,
+        # disposable fixture is then seeded with historical host-owned metadata.
+        for name, did in ids.items():
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", kind="memory", storage_scope="global",
+                id=did, text=f"Dispatch Task\nTask: F5 synthetic {name} {ctx.tag}",
+                category="fact", path=f"/kanban/tasks/{did}", format="json",
+            )
+            ctx.require(f"seed {name} fixture row", ok and find_key(saved, "id") == did, raw)
+        ctx.daemon.stop()
+        with closing(fixture_connection(db, "rw")) as fixture, fixture:
+            for name, did in ids.items():
+                legacy = name == "legacy"
+                metadata = {
+                    "type": "a2a_task", "dispatch_id": did, "agent": "codex",
+                    "task": f"F5 synthetic {name} {ctx.tag}",
+                    "a2a_state": "TASK_STATE_INPUT_REQUIRED" if legacy else "TASK_STATE_WORKING",
+                    "reviewed": legacy,
+                }
+                if legacy:
+                    metadata.update(closure_kind="partial", terminal_at="2020-01-01T00:00:00Z")
+                fixture.execute("UPDATE memories SET metadata=? WHERE id=?", (json.dumps(metadata), did))
+                if not legacy:
+                    run = ctx.daemon.app_home / "runs" / did
+                    run.mkdir(parents=True)
+                    status = {"dispatch_id": did, "state": "TASK_STATE_WORKING", "agent": "codex"}
+                    if name.startswith("predicate-"):
+                        status["completion_predicate"] = {"type": "output_matches", "pattern": "MATCH"}
+                        (run / "result.md").write_text("MATCH" if name.endswith("pass") else "absent")
+                    (run / "status.json").write_text(json.dumps(status))
+        ctx.daemon.start()
+        ctx._session = None
+        ctx._bound = None
+        session = ctx.connect()
+
+        def metadata(did):
+            with closing(fixture_connection(db, "ro")) as observation:
+                return json.loads(observation.execute("SELECT metadata FROM memories WHERE id=?", (did,)).fetchone()[0])
+
+        for name, (outcome, state, closure) in cases.items():
+            did = ids[name]
+            ok, result, raw = session.call(
+                "tachi_task", action="complete", task=f"F5 synthetic {name} {ctx.tag}",
+                agent="codex", outcome=outcome, dispatch_id=did, scope="global", format="full",
+            )
+            ctx.require(f"{name} HTTP completion succeeds", ok, raw)
+            receipt = result.get("pipeline", {}).get("completion_receipt", {})
+            ctx.check(f"{name} completion receipt closes without review",
+                      receipt.get("state") == state and receipt.get("closure_kind") == closure
+                      and receipt.get("reviewed") is False, receipt)
+            status = json.loads((ctx.daemon.app_home / "runs" / did / "status.json").read_text())
+            canonical = status.get("resolved_completion", {})
+            ctx.check(f"{name} canonical receipt preserves closure without review",
+                      canonical.get("state") == state and canonical.get("closure_kind") == closure
+                      and canonical.get("reviewed") is False and bool(canonical.get("eval_ledger_id")), canonical)
+            row = metadata(did)
+            ctx.check(f"{name} Kanban preserves terminal lifecycle without review",
+                      row.get("a2a_state") == state and row.get("closure_kind") == closure
+                      and row.get("reviewed") is False and bool(row.get("terminal_at")), row)
+
+        partial = ids["partial"]
+        first_terminal = metadata(partial).get("terminal_at")
+        ok, replay, raw = session.call(
+            "tachi_task", action="complete", task=f"F5 synthetic partial {ctx.tag}",
+            agent="codex", outcome="partial", dispatch_id=partial, scope="global",
+        )
+        ctx.check("compact replay keeps receipt status and partial closure age",
+                  ok and replay.get("pipeline", {}).get("completion_receipt") == "persisted"
+                  and metadata(partial).get("terminal_at") == first_terminal
+                  and metadata(partial).get("closure_kind") == "partial"
+                  and metadata(partial).get("reviewed") is False, replay)
+        ok, board, raw = session.call("tachi_task", action="board", state_filter="all", format="full")
+        rows = find_key(board, "tasks") or []
+        ctx.check("expanded board retains the partial closure", ok and any(
+            row.get("dispatch_id") == partial and row.get("state") == "TASK_STATE_INPUT_REQUIRED"
+            and row.get("closure_kind") == "partial" for row in rows), board)
+        ok, active, raw = session.call("tachi_task", action="board", state_filter="active", format="full")
+        ctx.check("active board excludes explicit and legacy partial closes",
+                  ok and all(row.get("dispatch_id") not in (partial, ids["legacy"])
+                             for row in (find_key(active, "tasks") or [])), active)
+        ok, compact, raw = session.call("tachi_task", action="board")
+        ctx.check("compact board folds closed partial tasks", ok and partial not in raw, compact)
+        cli = ctx.daemon.cli("--no-project-db", "status", "--json", cwd=ctx.daemon.home)
+        ctx.require("status JSON is readable", cli.returncode == 0, cli.stdout + cli.stderr)
+        dispatches = find_key(json.loads(cli.stdout), "dispatches") or []
+        ours = [row for row in dispatches if ctx.tag in row.get("dispatch_id", "")]
+        ctx.check("status JSON never upgrades legacy or explicit closure to review",
+                  len(ours) == len(ids) and all(row.get("reviewed") is False for row in ours), ours)
+        ctx.check("legacy read leaves stored closure bytes unchanged",
+                  metadata(ids["legacy"]).get("reviewed") is True
+                  and metadata(ids["legacy"]).get("terminal_at") == "2020-01-01T00:00:00Z",
+                  metadata(ids["legacy"]))
+        ok, _, raw = session.call(
+            "tachi_memory", action="save", kind="memory", storage_scope="global",
+            id=partial, path="/", text="ordinary caller cannot replay host authority", format="json",
+            metadata={"dispatch_id": partial, "a2a_state": "TASK_STATE_INPUT_REQUIRED",
+                      "reviewed": True, "closure_kind": "partial", "terminal_at": "2000-01-01T00:00:00Z"},
+        )
+        ctx.check("ordinary id update cannot replay close or review authority",
+                  ok and all(key not in metadata(partial) for key in
+                             ("dispatch_id", "a2a_state", "reviewed", "closure_kind", "terminal_at")), raw)
         ctx.done()
