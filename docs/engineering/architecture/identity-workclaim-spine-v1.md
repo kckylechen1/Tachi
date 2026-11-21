@@ -2,7 +2,7 @@
 
 Status: frozen implementation contract for #1253
 Design owners: #1171, #1239, #894
-Depends on: #1170 only for a future `verified` admission adapter
+Remote adapter owner: #1171 under #1129
 
 ## Purpose
 
@@ -39,10 +39,12 @@ The stored admission state is exactly one of:
   transport evidence.
 - `unavailable`: no adapter can prove the asserted remote identity.
 
-There is no public request field that can set `verified`. Until #1170 provides
-device proof, remote admission is `unavailable`; the absence of proof is not a
-reason to manufacture a local identity or to label it verified. Display names
-are presentation data only.
+There is no public request field that can set `verified`. #1938 supplies the
+trusted writer; #1171 still owns the production remote verifier. Without that
+proof, remote admission is `unavailable`; the absence of proof is not a reason
+to manufacture a local identity or to label it verified. Display names are
+presentation data only. The [remote V1 proposal](remote-execution-v1.md) describes
+a future adapter and does not change this implemented local contract.
 
 AgentIdentity owns seat/capability. WorkClaim owns its per-work role. Presence
 of a connection and freshness of a WorkClaim lease are separate signals.
