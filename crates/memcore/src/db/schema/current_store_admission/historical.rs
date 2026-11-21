@@ -1,47 +1,55 @@
-//! Explicit frozen reader for the D7 E39 -> synthetic E40/E41 regression suite.
+//! Frozen Portable inventories for D7 and the v41–43 compatibility band.
 //! Ordinary catalogue overrides never change the shipped inventory cache.
 
 use super::*;
 use std::cell::Cell;
 
 thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
+    static VERSION: Cell<Option<u32>> = const { Cell::new(None) };
 }
 static V39_PORTABLE: OnceLock<RequiredInventory> = OnceLock::new();
+static V43_PORTABLE: OnceLock<RequiredInventory> = OnceLock::new();
 
-pub(super) fn enabled() -> bool {
-    ENABLED.with(Cell::get)
+pub(super) fn version() -> Option<u32> {
+    VERSION.with(Cell::get)
 }
 
 pub(crate) fn with_historical_d7<T>(run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            ENABLED.with(|flag| flag.set(self.0));
-        }
-    }
-    let _restore = Restore(ENABLED.with(|flag| flag.replace(true)));
-    crate::db::migrations::catalogue::test_support::with_prefix(39, run)
+    with_historical_portable_inventory(39, run)
 }
 
-pub(super) fn inventory() -> Result<&'static RequiredInventory, MemoryError> {
-    if let Some(inventory) = V39_PORTABLE.get() {
+pub(crate) fn with_historical_portable_inventory<T>(version: u32, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<u32>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            VERSION.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(VERSION.with(|flag| flag.replace(Some(version))));
+    crate::db::migrations::catalogue::test_support::with_prefix(version, run)
+}
+
+pub(super) fn inventory(version: u32) -> Result<&'static RequiredInventory, MemoryError> {
+    let cache = match version {
+        39 => &V39_PORTABLE,
+        43 => &V43_PORTABLE,
+        _ => unreachable!("unsupported historical inventory"),
+    };
+    if let Some(inventory) = cache.get() {
         return Ok(inventory);
     }
     let built = std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                crate::db::migrations::catalogue::test_support::with_prefix(39, || {
-                    build_required_inventory(StoreProfile::PortableKernel, 39)
+                crate::db::migrations::catalogue::test_support::with_prefix(version, || {
+                    build_required_inventory(StoreProfile::PortableKernel, version)
                 })
             })
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })?;
-    let _ = V39_PORTABLE.set(built);
-    Ok(V39_PORTABLE
-        .get()
-        .expect("complete historical v39 inventory"))
+    let _ = cache.set(built);
+    Ok(cache.get().expect("complete historical inventory"))
 }
 
 #[test]

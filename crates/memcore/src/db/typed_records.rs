@@ -42,9 +42,17 @@ BEGIN
     SELECT RAISE(ABORT, 'typed record revisions are immutable');
 END
 "#;
+const RECORD_DELETE_V41: &str = r#"
+CREATE TRIGGER typed_records_no_delete
+BEFORE DELETE ON typed_records
+BEGIN
+    SELECT RAISE(ABORT, 'typed record revisions are immutable');
+END
+"#;
 const RECORD_DELETE: &str = r#"
 CREATE TRIGGER typed_records_no_delete
 BEFORE DELETE ON typed_records
+WHEN tachi_typed_record_erasure_enabled() = 0
 BEGIN
     SELECT RAISE(ABORT, 'typed record revisions are immutable');
 END
@@ -66,9 +74,17 @@ BEGIN
     SELECT RAISE(ABORT, 'typed record lineage is immutable');
 END
 "#;
+const LINEAGE_DELETE_V41: &str = r#"
+CREATE TRIGGER typed_record_supersessions_no_delete
+BEFORE DELETE ON typed_record_supersessions
+BEGIN
+    SELECT RAISE(ABORT, 'typed record lineage is immutable');
+END
+"#;
 const LINEAGE_DELETE: &str = r#"
 CREATE TRIGGER typed_record_supersessions_no_delete
 BEFORE DELETE ON typed_record_supersessions
+WHEN tachi_typed_record_erasure_enabled() = 0
 BEGIN
     SELECT RAISE(ABORT, 'typed record lineage is immutable');
 END
@@ -135,11 +151,29 @@ pub(crate) fn expected_trigger(name: &str) -> Option<(&'static str, &'static str
         .find(|(expected, _, _)| name.eq_ignore_ascii_case(expected))
 }
 
-pub(crate) fn install(conn: &Connection) -> Result<(), MemoryError> {
+pub(crate) fn v41_delete_trigger(name: &str) -> Option<&'static str> {
+    match name {
+        "typed_records_no_delete" => Some(RECORD_DELETE_V41),
+        "typed_record_supersessions_no_delete" => Some(LINEAGE_DELETE_V41),
+        _ => None,
+    }
+}
+
+pub(crate) fn migrate_v44(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute_batch(
+        "DROP TRIGGER main.typed_records_no_delete;
+                        DROP TRIGGER main.typed_record_supersessions_no_delete;",
+    )?;
+    conn.execute_batch(RECORD_DELETE)?;
+    conn.execute_batch(LINEAGE_DELETE)?;
+    Ok(())
+}
+
+pub(crate) fn install_v41(conn: &Connection) -> Result<(), MemoryError> {
     validate_kind_rowid_layout(conn)?;
     conn.execute_batch(TABLES_SQL)?;
-    for (_, _, sql) in TRIGGERS {
-        conn.execute_batch(sql)?;
+    for (name, _, sql) in TRIGGERS {
+        conn.execute_batch(v41_delete_trigger(name).unwrap_or(sql))?;
     }
     Ok(())
 }

@@ -190,6 +190,7 @@ pub(crate) fn extend_deadline_for_committed_completion(
 
 pub(crate) struct ConnectionAuthorizationState {
     typed_dml: AtomicBool,
+    typed_record_erasure: AtomicBool,
     canonical_supersession_edge: AtomicBool,
     schema_migration: AtomicBool,
     planner_maintenance: AtomicBool,
@@ -239,6 +240,7 @@ pub(crate) fn install_exact_reader_progress(
 
 enum AuthorizationKind {
     TypedDml,
+    TypedRecordErasure,
     CanonicalSupersessionEdge,
     SchemaMigration,
     PlannerMaintenance,
@@ -255,6 +257,10 @@ impl Drop for ReservedReferenceWriteAuthorization {
     fn drop(&mut self) {
         match self.kind {
             AuthorizationKind::TypedDml => self.flag.typed_dml.store(false, Ordering::SeqCst),
+            AuthorizationKind::TypedRecordErasure => self
+                .flag
+                .typed_record_erasure
+                .store(false, Ordering::SeqCst),
             AuthorizationKind::CanonicalSupersessionEdge => self
                 .flag
                 .canonical_supersession_edge
@@ -281,6 +287,7 @@ pub(crate) fn register_reserved_reference_write_guard(
 ) -> rusqlite::Result<ReservedReferenceWriteFlag> {
     let flag = Arc::new(ConnectionAuthorizationState {
         typed_dml: AtomicBool::new(false),
+        typed_record_erasure: AtomicBool::new(false),
         canonical_supersession_edge: AtomicBool::new(false),
         schema_migration: AtomicBool::new(false),
         planner_maintenance: AtomicBool::new(false),
@@ -301,6 +308,25 @@ pub(crate) fn register_reserved_reference_write_guard(
                 function_flag.typed_dml.load(Ordering::SeqCst)
                     || function_flag.schema_migration.load(Ordering::SeqCst),
             ))
+        },
+    )?;
+    let erasure = Arc::clone(&flag);
+    conn.create_scalar_function(
+        "tachi_typed_record_erasure_enabled",
+        0,
+        FunctionFlags::SQLITE_UTF8,
+        move |_| Ok(erasure.typed_record_erasure.load(Ordering::SeqCst)),
+    )?;
+    conn.create_scalar_function(
+        "tachi_typed_record_time",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(ctx
+                .get_raw(0)
+                .as_str()
+                .ok()
+                .and_then(crate::typed_records::time_sort_key))
         },
     )?;
     let canonical_edge_flag = Arc::clone(&flag);
@@ -577,6 +603,14 @@ unsafe extern "C" fn reserved_reference_authorizer(
         };
     }
 
+    if action == rusqlite::ffi::SQLITE_DELETE
+        && !accessor.is_null()
+        && (sqlite_identifier_eq(arg1, b"typed_records")
+            || sqlite_identifier_eq(arg1, b"typed_record_supersessions"))
+    {
+        return rusqlite::ffi::SQLITE_DENY;
+    }
+
     let protected_memory_write = (action == rusqlite::ffi::SQLITE_INSERT
         && sqlite_identifier_eq(arg1, b"memories"))
         || (action == rusqlite::ffi::SQLITE_UPDATE
@@ -705,6 +739,8 @@ pub(crate) fn validate_persistent_trigger_inventory(
             row.get::<_, Option<String>>(2)?,
         ))
     })?;
+    let schema_version = crate::db::migrations::read_schema_version(conn)?
+        .min(crate::db::migrations::supported_schema_version());
     let mut found = std::collections::HashSet::new();
     for row in rows {
         let (name, table, sql) = row?;
@@ -720,10 +756,13 @@ pub(crate) fn validate_persistent_trigger_inventory(
                 .or_else(|| crate::db::adjudication_provenance::expected_trigger(&name))
                 .or_else(|| crate::db::typed_records::expected_trigger(&name))
         {
+            let sql = sql.as_deref().map(normalize_trigger_sql);
+            let historical = schema_version < 44
+                && crate::db::typed_records::v41_delete_trigger(&name)
+                    .is_some_and(|old| sql == Some(normalize_trigger_sql(old)));
             if name != canonical_name
                 || table != canonical_table
-                || sql.as_deref().map(normalize_trigger_sql)
-                    != Some(normalize_trigger_sql(canonical_sql))
+                || (!historical && sql != Some(normalize_trigger_sql(canonical_sql)))
             {
                 return Err(MemoryError::InvalidArg(format!(
                     "unsafe persistent trigger inventory: trigger '{name}' does not match the canonical '{canonical_name}' definition"
@@ -841,6 +880,18 @@ pub(crate) fn authorize_reserved_reference_write(
     Ok(ReservedReferenceWriteAuthorization {
         flag: Arc::clone(flag),
         kind: AuthorizationKind::TypedDml,
+    })
+}
+
+pub(crate) fn authorize_typed_record_erasure(
+    flag: &ReservedReferenceWriteFlag,
+) -> Result<ReservedReferenceWriteAuthorization, MemoryError> {
+    flag.typed_record_erasure
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| MemoryError::InvalidArg("typed record erasure is already active".into()))?;
+    Ok(ReservedReferenceWriteAuthorization {
+        flag: Arc::clone(flag),
+        kind: AuthorizationKind::TypedRecordErasure,
     })
 }
 

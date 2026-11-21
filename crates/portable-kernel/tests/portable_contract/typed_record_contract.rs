@@ -156,3 +156,276 @@ fn hypermem_gate_fixture_round_trips_through_the_real_portable_kernel() {
         assert_eq!(stored.links, record.links);
     }
 }
+
+fn host_kind(name: &str, version: u32) -> RecordKind {
+    RecordKind {
+        id: RecordKindId {
+            name: name.into(),
+            version,
+        },
+        key_schema: json!({"type":"object","properties":{"agent_id":{}, "ended_at":{}},
+            "required":["agent_id"],"additionalProperties":false}),
+        payload_schema: json!({"type":"string"}),
+    }
+}
+
+fn append(
+    store: &mut MemoryStore,
+    writer: &RecordWriter,
+    kind: &RecordKindId,
+    id: &str,
+    keys: serde_json::Value,
+    predecessor: Option<&str>,
+) -> portable_kernel::TypedRecordWrite {
+    store
+        .append_typed_record(
+            writer,
+            &TypedRecordInput {
+                id: id.into(),
+                kind: kind.clone(),
+                keys,
+                payload: json!("private payload"),
+                links: vec![],
+            },
+            predecessor,
+        )
+        .unwrap()
+}
+
+#[test]
+fn scoped_purge_removes_only_matching_rows_and_incident_edges_in_one_commit() {
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("purge.db");
+    let old = host_kind("episode", 1);
+    let new = host_kind("episode", 2);
+    let writer =
+        RecordWriter::from_host_config("host", "personal", vec![old.id.clone(), new.id.clone()])
+            .unwrap();
+    let mut store = open(&path, "personal", true, vec![old.clone(), new.clone()]);
+    let a = json!({"agent_id":"a"});
+    let b = json!({"agent_id":"b"});
+    append(&mut store, &writer, &old.id, "b-first", b.clone(), None);
+    append(
+        &mut store,
+        &writer,
+        &old.id,
+        "b-old",
+        b.clone(),
+        Some("b-first"),
+    );
+    append(
+        &mut store,
+        &writer,
+        &new.id,
+        "a-one",
+        a.clone(),
+        Some("b-old"),
+    );
+    let receipt = append(&mut store, &writer, &new.id, "a-two", a, Some("a-one"))
+        .receipt
+        .unwrap();
+    let retained = append(&mut store, &writer, &new.id, "b-new", b, Some("a-two")).record;
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    portable_kernel::db::ensure_reserved_reference_write_guard(&raw).unwrap();
+    for (table, update, message) in [
+        (
+            "typed_records",
+            "revision=revision",
+            "typed record revisions are immutable",
+        ),
+        (
+            "typed_record_supersessions",
+            "target_id=target_id",
+            "typed record lineage is immutable",
+        ),
+    ] {
+        for sql in [
+            format!("DELETE FROM {table}"),
+            format!("UPDATE {table} SET {update}"),
+        ] {
+            let err = raw.execute(&sql, []).unwrap_err();
+            assert_eq!(err.to_string(), message, "{sql}");
+        }
+    }
+    let scope = BTreeMap::from([("agent_id".into(), "a".into())]);
+    assert!(store
+        .purge_typed_records(&writer, &BTreeMap::new())
+        .is_err());
+    assert!(store
+        .purge_typed_records(&writer, &BTreeMap::from([("agent.id".into(), "a".into())]))
+        .is_err());
+    for denied in [
+        RecordWriter::from_host_config("host", "other", vec![old.id.clone(), new.id.clone()])
+            .unwrap(),
+        RecordWriter::from_host_config("host", "personal", vec![new.id.clone()]).unwrap(),
+    ] {
+        assert!(store.purge_typed_records(&denied, &scope).is_err());
+    }
+    // Fail the record delete after lineage removal has run.
+    raw.execute_batch(
+        "CREATE TRIGGER stop_purge BEFORE DELETE ON typed_records
+                       BEGIN SELECT RAISE(ABORT, 'test rollback'); END;",
+    )
+    .unwrap();
+    assert!(store
+        .purge_typed_records(&writer, &scope)
+        .unwrap_err()
+        .to_string()
+        .contains("test rollback"));
+    assert_eq!(
+        store
+            .get_typed_record("a-one")
+            .unwrap()
+            .unwrap()
+            .superseded_by
+            .as_deref(),
+        Some("a-two")
+    );
+    raw.execute_batch("DROP TRIGGER stop_purge").unwrap();
+    let result = store.purge_typed_records(&writer, &scope).unwrap();
+    assert_eq!((result.erased_records, result.erased_lineage), (2, 3));
+    for erased in ["a-one", "a-two"] {
+        assert!(store.get_typed_record(erased).unwrap().is_none());
+    }
+    assert!(store
+        .get_typed_record("b-old")
+        .unwrap()
+        .unwrap()
+        .superseded_by
+        .is_none());
+    assert_eq!(
+        store
+            .get_typed_record("b-first")
+            .unwrap()
+            .unwrap()
+            .superseded_by
+            .as_deref(),
+        Some("b-old")
+    );
+    assert_eq!(store.get_typed_record("b-new").unwrap().unwrap(), retained);
+    assert_eq!(
+        raw.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    let evidence: String = raw.query_row("SELECT value_json FROM hard_state WHERE namespace='memory_supersession_receipts' AND key=?1",
+        [&receipt.receipt_id], |row| row.get(0)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&evidence).unwrap(),
+        serde_json::to_value(receipt).unwrap()
+    );
+    assert!(!evidence.contains("private payload"));
+}
+
+#[test]
+fn time_window_filters_and_verifies_the_selected_revisions() {
+    use portable_kernel::TypedRecordQuery;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("list.db");
+    let kind = host_kind("episode", 1);
+    let other = host_kind("episode", 2);
+    let writer =
+        RecordWriter::from_host_config("host", "personal", vec![kind.id.clone(), other.id.clone()])
+            .unwrap();
+    let mut store = open(&path, "personal", true, vec![kind.clone(), other.clone()]);
+    let keys = |agent: &str, time: &str| json!({"agent_id":agent,"ended_at":time});
+    let first = append(
+        &mut store,
+        &writer,
+        &kind.id,
+        "predecessor",
+        keys("a", "2026-10-31T23:59:59.999999Z"),
+        None,
+    );
+    for (id, agent, time, version, previous) in [
+        (
+            "latest",
+            "a",
+            "2026-11-01T01:00:00.000001+02:00",
+            &kind.id,
+            Some("predecessor"),
+        ),
+        ("day", "a", "2026-10-31", &kind.id, None),
+        ("below", "a", "2026-10-30", &kind.id, None),
+        ("wrong-agent", "b", "2026-11-01", &kind.id, None),
+        ("wrong-version", "a", "2026-11-01", &other.id, None),
+        ("above", "a", "2026-11-02", &kind.id, None),
+    ] {
+        append(
+            &mut store,
+            &writer,
+            version,
+            id,
+            keys(agent, time),
+            previous,
+        );
+    }
+    let mut query = TypedRecordQuery {
+        kind: Some(kind.id.clone()),
+        key_filters: BTreeMap::from([("agent_id".into(), "a".into())]),
+        time_key: Some("ended_at".into()),
+        since: Some("2026-10-31".into()),
+        until: Some("2026-11-01".into()),
+        limit: 1,
+        ..Default::default()
+    };
+    let list = |q: &TypedRecordQuery| store.list_typed_records(q).unwrap();
+    assert_eq!(list(&query)[0].id, "latest");
+    query.include_superseded = true;
+    let rows = list(&query);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].superseded_by.as_deref(), Some("latest"));
+    assert_eq!(rows[0].id, "predecessor");
+    query.limit = 10;
+    query.until = Some("2026-10-31T23:00:00.000000Z".into());
+    assert_eq!(
+        list(&query)
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["day"]
+    );
+    query.time_key = None;
+    query.since = Some(first.record.created_at.clone());
+    query.until = query.since.clone();
+    let rows = list(&query);
+    assert!(rows.iter().any(|row| row.id == "predecessor"));
+    assert!(rows
+        .iter()
+        .all(|row| row.created_at == first.record.created_at));
+
+    for invalid in [
+        TypedRecordQuery {
+            time_key: Some("a.b".into()),
+            ..Default::default()
+        },
+        TypedRecordQuery {
+            since: Some("yesterday".into()),
+            ..Default::default()
+        },
+        TypedRecordQuery {
+            limit: 0,
+            ..Default::default()
+        },
+        TypedRecordQuery {
+            limit: usize::MAX,
+            ..Default::default()
+        },
+    ] {
+        assert!(store.list_typed_records(&invalid).is_err());
+    }
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER typed_records_no_update;
+                      UPDATE typed_records SET payload_json='null' WHERE id='day'",
+    )
+    .unwrap();
+    let error = store
+        .list_typed_records(&TypedRecordQuery::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("content digest"));
+}

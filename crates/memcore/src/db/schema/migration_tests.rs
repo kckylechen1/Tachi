@@ -626,7 +626,7 @@ fn v39_upgrade_and_dirty_row_work_roll_back_with_stamp_on_injected_failure() {
         .query_row(
             "SELECT COUNT(*) FROM hard_state
              WHERE namespace = 'migrations'
-               AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance')",
+               AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure')",
             [],
             |r| r.get(0),
         )

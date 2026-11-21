@@ -251,6 +251,53 @@ pub struct TypedRecord {
     pub superseded_by: Option<String>,
 }
 
+/// Exact kind/version and string keys, ordered by descending time then ID.
+/// Bounds are inclusive RFC3339 instants or ISO dates (midnight UTC).
+/// With a custom time key, missing or non-date values are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedRecordQuery {
+    pub kind: Option<RecordKindId>,
+    pub key_filters: BTreeMap<String, String>,
+    pub time_key: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub include_superseded: bool,
+    /// Must be between 1 and 1000 inclusive.
+    pub limit: usize,
+}
+
+impl Default for TypedRecordQuery {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            key_filters: BTreeMap::new(),
+            time_key: None,
+            since: None,
+            until: None,
+            include_superseded: false,
+            limit: 100,
+        }
+    }
+}
+
+/// Canonical sort key for query bounds and the connection-local SQL function.
+pub(crate) fn time_sort_key(raw: &str) -> Option<Vec<u8>> {
+    let instant: jiff::Timestamp = if raw.len() == 10 {
+        format!("{raw}T00:00:00Z").parse().ok()?
+    } else {
+        raw.parse().ok()?
+    };
+    // SQLite compares blobs bytewise. Count from MIN so times before year zero sort correctly.
+    let nanos = instant.as_nanosecond() - jiff::Timestamp::MIN.as_nanosecond();
+    Some(nanos.to_be_bytes().to_vec())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedRecordPurgeReceipt {
+    pub erased_records: usize,
+    pub erased_lineage: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypedRecordWrite {
     pub record: TypedRecord,

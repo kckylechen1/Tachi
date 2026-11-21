@@ -441,13 +441,13 @@ fn v43_backfills_pre_v43_actor_rows_and_replays_with_zero_changes() {
         .unwrap();
     });
 
-    drop(
+    crate::db::migrations::catalogue::test_support::with_prefix(43, || {
         crate::MemoryStore::open_with_context(
             path.to_str().unwrap(),
             &crate::db::DbOpenContext::open_existing_allow("test:v43-backfill"),
         )
-        .expect("authorized v42 -> v43 migration"),
-    );
+        .expect("authorized v42 -> v43 migration");
+    });
 
     let conn = Connection::open(&path).unwrap();
     assert_eq!(

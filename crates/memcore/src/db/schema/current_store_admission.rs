@@ -15,7 +15,7 @@ use crate::error::MemoryError;
 #[cfg(test)]
 mod historical;
 #[cfg(test)]
-pub(crate) use historical::with_historical_d7;
+pub(crate) use historical::{with_historical_d7, with_historical_portable_inventory};
 
 struct RequiredObject {
     kind: String,
@@ -50,8 +50,10 @@ pub(crate) fn required_inventory(
     profile: StoreProfile,
 ) -> Result<&'static RequiredInventory, MemoryError> {
     #[cfg(test)]
-    if profile == StoreProfile::PortableKernel && historical::enabled() {
-        return historical::inventory();
+    if profile == StoreProfile::PortableKernel {
+        if let Some(version) = historical::version() {
+            return historical::inventory(version);
+        }
     }
     let cache = match profile {
         StoreProfile::PortableKernel => &PORTABLE,
@@ -88,6 +90,7 @@ pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
         41 => include_str!("goldens/required-v41.json"),
         42 => include_str!("goldens/required-v42.json"),
         43 => include_str!("goldens/required-v43.json"),
+        44 => include_str!("goldens/required-v44.json"),
         _ => {
             return Err(MemoryError::InvalidArg(format!(
                 "required schema inventory is missing version {version}"
@@ -120,11 +123,11 @@ fn build_required_inventory(
     };
     let version = version.to_string();
     #[cfg(test)]
-    if version == "39" && profile == StoreProfile::PortableKernel {
+    if matches!(version.as_str(), "39" | "43") && profile == StoreProfile::PortableKernel {
         assert_eq!(
             super::inventory::classified_inventory(&reference).required,
             pinned[&version][profile_key]["required"],
-            "the historical reader must retain the complete frozen v39 shape",
+            "the historical reader must retain the complete frozen historical shape",
         );
     }
     let required = pinned[&version][profile_key]["required"]

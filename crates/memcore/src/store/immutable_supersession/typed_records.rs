@@ -1,72 +1,82 @@
 //! Strict revisions use the existing transaction/receipt boundary, with an
 //! append-only lineage ledger instead of mutating the predecessor row.
 
+use std::collections::BTreeMap;
+
+use rusqlite::{params_from_iter, types::Value as SqlValue};
+
 use super::receipts::persist_supersession_receipt;
 use super::*;
-use crate::typed_records::{invalid, RECORD_KINDS_NAMESPACE};
+use crate::typed_records::{invalid, time_sort_key, RECORD_KINDS_NAMESPACE};
 use crate::{
     canonical_json, canonical_json_digest_hex, RecordKindId, RecordRegistry, RecordWriter,
-    TypedRecord, TypedRecordInput, TypedRecordTarget, TypedRecordWrite,
+    TypedRecord, TypedRecordInput, TypedRecordPurgeReceipt, TypedRecordQuery, TypedRecordTarget,
+    TypedRecordWrite,
 };
 
 const ROUTE: &str = "typed_record_revision_v1";
 
+const RECORD_SELECT: &str =
+    "SELECT r.id,r.kind,r.kind_version,r.keys_json,r.payload_json,r.links_json,
+            r.revision,r.content_sha256,r.writer,r.created_at,s.target_id
+     FROM typed_records r LEFT JOIN typed_record_supersessions s ON s.source_id=r.id";
+
+fn parse_record(row: &rusqlite::Row<'_>) -> Result<TypedRecord, MemoryError> {
+    let record = TypedRecord {
+        id: row.get(0)?,
+        kind: RecordKindId {
+            name: row.get(1)?,
+            version: row.get(2)?,
+        },
+        keys: serde_json::from_str(&row.get::<_, String>(3)?)?,
+        payload: serde_json::from_str(&row.get::<_, String>(4)?)?,
+        links: serde_json::from_str(&row.get::<_, String>(5)?)?,
+        revision: row.get(6)?,
+        content_sha256: row.get(7)?,
+        writer: row.get(8)?,
+        created_at: row.get(9)?,
+        superseded_by: row.get(10)?,
+    };
+    let input = TypedRecordInput {
+        id: record.id.clone(),
+        kind: record.kind.clone(),
+        keys: record.keys.clone(),
+        payload: record.payload.clone(),
+        links: record.links.clone(),
+    };
+    if canonical_json_digest_hex(&serde_json::to_value(input)?) != record.content_sha256 {
+        return Err(invalid(
+            "typed record content digest does not match its immutable identity",
+        ));
+    }
+    Ok(record)
+}
+
 fn read_record(conn: &Connection, id: &str) -> Result<Option<TypedRecord>, MemoryError> {
-    let row = conn
-        .query_row(
-            "SELECT r.id,r.kind,r.kind_version,r.keys_json,r.payload_json,r.links_json,
-                r.revision,r.content_sha256,r.writer,r.created_at,s.target_id
-         FROM typed_records r LEFT JOIN typed_record_supersessions s ON s.source_id=r.id
-         WHERE r.id=?1",
-            [id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u32>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                ))
-            },
-        )
-        .optional()?;
-    row.map(|row| {
-        let record = TypedRecord {
-            id: row.0,
-            kind: RecordKindId {
-                name: row.1,
-                version: row.2,
-            },
-            keys: serde_json::from_str(&row.3)?,
-            payload: serde_json::from_str(&row.4)?,
-            links: serde_json::from_str(&row.5)?,
-            revision: row.6,
-            content_sha256: row.7,
-            writer: row.8,
-            created_at: row.9,
-            superseded_by: row.10,
-        };
-        let input = TypedRecordInput {
-            id: record.id.clone(),
-            kind: record.kind.clone(),
-            keys: record.keys.clone(),
-            payload: record.payload.clone(),
-            links: record.links.clone(),
-        };
-        if canonical_json_digest_hex(&serde_json::to_value(input)?) != record.content_sha256 {
-            return Err(invalid(
-                "typed record content digest does not match its immutable identity",
-            ));
-        }
-        Ok(record)
-    })
-    .transpose()
+    let mut stmt = conn.prepare(&format!("{RECORD_SELECT} WHERE r.id=?1"))?;
+    let mut rows = stmt.query([id])?;
+    rows.next()?.map(parse_record).transpose()
+}
+
+fn key_path(name: &str) -> Result<String, MemoryError> {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(invalid(
+            "typed record key names require ASCII letters, digits or underscores",
+        ));
+    }
+    Ok(format!("$.{name}"))
+}
+
+fn key_conditions(filters: &BTreeMap<String, String>) -> Result<Vec<String>, MemoryError> {
+    filters
+        .keys()
+        .map(|key| {
+            let path = key_path(key)?;
+            Ok(format!(
+                "json_type(r.keys_json,'{path}')='text' AND json_extract(r.keys_json,'{path}')=?"
+            ))
+        })
+        .collect()
 }
 
 fn freeze_registry(conn: &Connection, registry: &RecordRegistry) -> Result<(), MemoryError> {
@@ -302,6 +312,132 @@ impl MemoryStore {
         }
         self.with_immutable_supersession_transaction(|operation| {
             operation.append_record(&registry, writer, input, predecessor, &role)
+        })
+    }
+
+    /// Return the latest matching revisions, verifying each stored content digest.
+    pub fn list_typed_records(
+        &self,
+        query: &TypedRecordQuery,
+    ) -> Result<Vec<TypedRecord>, MemoryError> {
+        if !(1..=1000).contains(&query.limit) {
+            return Err(invalid(
+                "typed record query limit must be between 1 and 1000",
+            ));
+        }
+        let mut conditions = key_conditions(&query.key_filters)?;
+        let mut args: Vec<SqlValue> = query
+            .key_filters
+            .values()
+            .cloned()
+            .map(SqlValue::Text)
+            .collect();
+        if let Some(kind) = &query.kind {
+            kind.validate()?;
+            conditions.push("r.kind=? AND r.kind_version=?".into());
+            args.extend([kind.name.clone().into(), kind.version.into()]);
+        }
+        if !query.include_superseded {
+            conditions.push("s.target_id IS NULL".into());
+        }
+        let time = match &query.time_key {
+            Some(key) => {
+                let path = key_path(key)?;
+                format!("tachi_typed_record_time(json_extract(r.keys_json,'{path}'))")
+            }
+            None => "tachi_typed_record_time(r.created_at)".into(),
+        };
+        conditions.push(format!("{time} IS NOT NULL"));
+        let bound = |raw: &str| {
+            time_sort_key(raw).ok_or_else(|| invalid("invalid typed record time bound"))
+        };
+        let since = query.since.as_deref().map(bound).transpose()?;
+        let until = query.until.as_deref().map(bound).transpose()?;
+        if matches!((&since, &until), (Some(start), Some(end)) if start > end) {
+            return Err(invalid("typed record since must not exceed until"));
+        }
+        for (operator, value) in [(">=", since), ("<=", until)] {
+            if let Some(value) = value {
+                conditions.push(format!("{time} {operator} ?"));
+                args.push(value.into());
+            }
+        }
+        args.push((query.limit as i64).into());
+        let sql = format!(
+            "{RECORD_SELECT} WHERE {} ORDER BY {time} DESC, r.id DESC LIMIT ?",
+            conditions.join(" AND ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(args))?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(parse_record(row)?);
+        }
+        Ok(records)
+    }
+
+    /// Erase matching revisions and their incoming/outgoing lineage. Durable
+    /// supersession receipts keep only identity and digest evidence.
+    pub fn purge_typed_records(
+        &mut self,
+        writer: &RecordWriter,
+        key_filters: &BTreeMap<String, String>,
+    ) -> Result<TypedRecordPurgeReceipt, MemoryError> {
+        if key_filters.is_empty() {
+            return Err(invalid(
+                "typed record erasure requires at least one exact key filter",
+            ));
+        }
+        let conditions = key_conditions(key_filters)?.join(" AND ");
+        let matched = format!("SELECT r.id FROM typed_records r WHERE {conditions}");
+        let edges = "source_id IN matched OR target_id IN matched";
+        let role = self.db_label.clone();
+        let registry = self
+            .policy
+            .record_registry
+            .clone()
+            .ok_or_else(|| invalid("host record registry is absent"))?;
+        if writer.role != role {
+            return Err(invalid(
+                "typed erasure requires a writer for the admitted role",
+            ));
+        }
+        self.with_immutable_supersession_transaction(|operation| {
+            let tx = &operation.tx;
+            if db::store_identity::store_role_stamp(tx)?.as_deref() != Some(&role) {
+                return Err(invalid("typed store role changed after handle admission"));
+            }
+            // Check both endpoints before removing any lineage.
+            let kinds = format!("WITH matched AS ({matched}), edges AS (
+                    SELECT source_id,target_id FROM typed_record_supersessions WHERE {edges})
+                SELECT DISTINCT kind,kind_version FROM typed_records WHERE id IN (
+                    SELECT id FROM matched UNION SELECT source_id FROM edges UNION SELECT target_id FROM edges)");
+            let mut stmt = tx.prepare(&kinds)?;
+            let mut rows = stmt.query(params_from_iter(key_filters.values()))?;
+            while let Some(row) = rows.next()? {
+                let kind = RecordKindId {
+                    name: row.get(0)?,
+                    version: row.get(1)?,
+                };
+                writer.require(&role, &kind)?;
+                if !registry.definitions().any(|definition| definition.id == kind) {
+                    return Err(invalid(format!("unregistered record kind {}", kind.stamp_key())));
+                }
+            }
+
+            let _guard = db::authorize_typed_record_erasure(&operation.reserved_reference_write)?;
+            let erased_lineage = tx.execute(
+                &format!("WITH matched AS ({matched}) DELETE FROM typed_record_supersessions WHERE {edges}"),
+                params_from_iter(key_filters.values()),
+            )?;
+            let erased_records = tx.execute(
+                &format!("DELETE FROM typed_records AS r WHERE {conditions}"),
+                params_from_iter(key_filters.values()),
+            )?;
+            Ok(TypedRecordPurgeReceipt {
+                erased_records,
+                erased_lineage,
+            })
         })
     }
 
