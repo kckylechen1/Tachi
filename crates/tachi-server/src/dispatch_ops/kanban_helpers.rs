@@ -170,22 +170,15 @@ pub(crate) async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -
     None
 }
 
-/// Update kanban task state.
-///
-/// `reviewed` flips the `metadata.reviewed` flag on the kanban row. The
-/// status dashboard surfaces completed/success dispatches without this
-/// flag as "unreviewed". Today only the explicit non-success closes
-/// (failure/partial/aborted) set it from the completion path: a satisfied
-/// predicate no longer does, because its witness is worker-authored
-/// output/artifact text (#1454). The watchdog auto-close path must NOT
-/// set it either, so human operators can distinguish reviewed closes
-/// from auto-closed ones.
+/// Project execution/closure facts. Only an explicit partial close carries
+/// `closure_kind=partial`; an ordinary INPUT_REQUIRED transition stays open.
+/// Completion and lifecycle writers never establish independent review.
 pub(crate) async fn update_kanban_state(
     server: &MemoryServer,
     dispatch_id: &str,
     new_state: &str,
     eval_id: Option<&str>,
-    reviewed: Option<bool>,
+    closure_kind: Option<&str>,
 ) -> Result<(), String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
     // Use exact path SQL query instead of semantic search to avoid
@@ -221,7 +214,7 @@ pub(crate) async fn update_kanban_state(
             &mut meta,
             new_state,
             eval_id,
-            reviewed,
+            closure_kind,
             &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         )?;
         crate::memory_search_ops::handle_save_memory(
@@ -266,7 +259,7 @@ fn apply_kanban_transition(
     meta: &mut Value,
     new_state: &str,
     eval_id: Option<&str>,
-    reviewed: Option<bool>,
+    closure_kind: Option<&str>,
     now: &str,
 ) -> Result<(), String> {
     let obj = meta
@@ -285,10 +278,10 @@ fn apply_kanban_transition(
     if let Some(eid) = eval_id {
         obj.insert("eval_ledger_id".to_string(), json!(eid));
     }
-    if let Some(flag) = reviewed {
-        obj.insert("reviewed".to_string(), json!(flag));
-    }
-    if new_state == "TASK_STATE_INPUT_REQUIRED" && reviewed == Some(true) {
+    // Legacy true values mixed close intent with review; a lifecycle replay
+    // cannot carry that ambiguity forward as independent review evidence.
+    obj.insert("reviewed".to_string(), json!(false));
+    if new_state == "TASK_STATE_INPUT_REQUIRED" && closure_kind == Some("partial") {
         obj.insert("closure_kind".to_string(), json!("partial"));
     } else {
         obj.remove("closure_kind");
@@ -357,7 +350,7 @@ pub(crate) async fn close_kanban_row_on_early_exit(
         return;
     }
     if let Err(kanban_err) =
-        update_kanban_state(server, dispatch_id, "TASK_STATE_FAILED", None, Some(false)).await
+        update_kanban_state(server, dispatch_id, "TASK_STATE_FAILED", None, None).await
     {
         eprintln!(
             "[dispatch] failed to mark dispatch {} FAILED in kanban after early exit ({}): {}",
@@ -372,7 +365,7 @@ mod terminal_time_tests {
 
     #[test]
     fn terminal_replay_preserves_age_and_reopening_clears_it() {
-        let mut meta = json!({"a2a_state": "TASK_STATE_WORKING"});
+        let mut meta = json!({"a2a_state": "TASK_STATE_WORKING", "reviewed": true});
         let closed = "2026-07-01T00:00:00Z";
         apply_kanban_transition(&mut meta, "TASK_STATE_COMPLETED", None, None, closed).unwrap();
         assert_eq!(meta["terminal_at"], closed);
@@ -380,7 +373,7 @@ mod terminal_time_tests {
             &mut meta,
             "TASK_STATE_COMPLETED",
             Some("eval-1"),
-            Some(true),
+            None,
             "2026-08-01T00:00:00Z",
         )
         .unwrap();
@@ -389,6 +382,10 @@ mod terminal_time_tests {
             "delivery replay must not renew retention"
         );
         assert_eq!(meta["eval_ledger_id"], "eval-1");
+        assert_eq!(
+            meta["reviewed"], false,
+            "replay cannot carry legacy review authority"
+        );
         apply_kanban_transition(
             &mut meta,
             "TASK_STATE_WORKING",
@@ -439,19 +436,35 @@ mod terminal_time_tests {
             &mut meta,
             "TASK_STATE_INPUT_REQUIRED",
             None,
-            Some(true),
+            Some("partial"),
             "2026-07-02T00:00:00Z",
         )
         .unwrap();
         assert_eq!(meta["terminal_at"], "2026-07-02T00:00:00Z");
+        assert_eq!(meta["closure_kind"], "partial");
+        assert_eq!(meta["reviewed"], false);
+        assert!(
+            memcore::db::is_kanban_gc_candidate(
+                "fact",
+                "/kanban/tasks/fixture",
+                &meta.to_string(),
+                "2026-01-01T00:00:00Z",
+                "2027-01-01T00:00:00Z",
+                30,
+            )
+            .unwrap(),
+            "partial closure retains its existing GC lifecycle"
+        );
         apply_kanban_transition(
             &mut meta,
             "TASK_STATE_INPUT_REQUIRED",
             None,
-            Some(true),
+            Some("partial"),
             "2026-07-03T00:00:00Z",
         )
         .unwrap();
         assert_eq!(meta["terminal_at"], "2026-07-02T00:00:00Z");
+        assert_eq!(meta["closure_kind"], "partial");
+        assert_eq!(meta["reviewed"], false);
     }
 }

@@ -29,6 +29,7 @@ fn packaged_shared_daemon_lifecycle_and_eval_http_dogfood() {
     common::assert_dogfood_scenario(concat!(
         "retired_hub_mcp_proxy_and_virtual_capabilities_are_rejected,",
         "continuity_projection_retirement,",
+        "explicit_completion_closes_without_independent_review,",
         "recall_eval_receipts_bind_inputs_and_reject_drift,",
         "recall_eval_contracts_fail_closed_and_status_is_private",
     ));

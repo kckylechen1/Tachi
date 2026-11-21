@@ -782,8 +782,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             pending_completion_recovery = false;
             receipt_terminal_state = Some("TASK_STATE_FAILED");
             if let Err(error) =
-                update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, Some(false))
-                    .await
+                update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, None).await
             {
                 tracing::warn!(dispatch_id = %d_id, %error, "native Staff lifecycle failure kanban update failed");
             }
@@ -881,8 +880,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     eprintln!("[watchdog] false-success intercepted: {reason}");
                 }
                 if let Err(error) =
-                    update_kanban_state(&server_clone, &d_id, kanban_state, None, Some(reviewed))
-                        .await
+                    update_kanban_state(&server_clone, &d_id, kanban_state, None, None).await
                 {
                     eprintln!(
                         "[watchdog] failed to mark dispatch {} {} in kanban: {}",
@@ -980,7 +978,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     &d_id,
                     "TASK_STATE_FAILED",
                     Some(&eval_id),
-                    Some(false),
+                    None,
                 )
                 .await
                 {
@@ -1238,14 +1236,8 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             managed_cancel_completion,
             Some(crate::managed_run_control::CancelCompletion::Confirmed { .. })
         ) {
-            if let Err(error) = update_kanban_state(
-                &server_clone,
-                &d_id,
-                "TASK_STATE_CANCELED",
-                None,
-                Some(false),
-            )
-            .await
+            if let Err(error) =
+                update_kanban_state(&server_clone, &d_id, "TASK_STATE_CANCELED", None, None).await
             {
                 eprintln!(
                     "[watchdog] failed to mark cancelled dispatch {}: {}",
@@ -1260,14 +1252,8 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 || *reason == "persist_failed"
                 || *reason == "result_persist_failed"
             {
-                if let Err(error) = update_kanban_state(
-                    &server_clone,
-                    &d_id,
-                    "TASK_STATE_FAILED",
-                    None,
-                    Some(false),
-                )
-                .await
+                if let Err(error) =
+                    update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, None).await
                 {
                     eprintln!(
                         "[watchdog] failed to mark managed terminal failure {}: {}",

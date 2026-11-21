@@ -108,6 +108,14 @@ fn collect_dispatches_excludes_recall_cache_rows() {
 
     let dispatches = collect_dispatches(&db, None);
     assert_eq!(dispatches.len(), 1, "got: {dispatches:?}");
+    assert!(
+        !dispatches[0].reviewed,
+        "legacy close flags are not review evidence"
+    );
+    assert_eq!(
+        serde_json::to_value(&dispatches[0]).unwrap()["reviewed"],
+        false
+    );
     assert_eq!(dispatches[0].dispatch_id, "20260609T000");
     assert_eq!(dispatches[0].agent, "codex");
     assert_eq!(dispatches[0].task, "real worker task");
@@ -145,6 +153,14 @@ fn collect_dispatches_includes_project_db_rows() {
 
     let dispatches = collect_dispatches(&global_db, Some(&project_db));
     assert_eq!(dispatches.len(), 1, "got: {dispatches:?}");
+    assert!(
+        !dispatches[0].reviewed,
+        "legacy close flags are not review evidence"
+    );
+    assert_eq!(
+        serde_json::to_value(&dispatches[0]).unwrap()["reviewed"],
+        false
+    );
     assert_eq!(dispatches[0].dispatch_id, "20260609T000");
     assert_eq!(dispatches[0].task, "project worker task");
 }

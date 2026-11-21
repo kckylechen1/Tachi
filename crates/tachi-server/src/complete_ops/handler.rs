@@ -1625,20 +1625,9 @@ pub(crate) async fn handle_tachi_complete(
         // erred. Fail-safe — degrades to a warn, never fails completion.
         crate::claims_ops::release_claim_for_dispatch(server, did, "complete");
 
-        // #878-A: gate the COMPLETED/reviewed write behind a machine-checkable
-        // completion predicate declared at dispatch time. A self-reported
-        // outcome="success" lands COMPLETED, but never earns reviewed=true
-        // from the predicate alone: today's predicate kinds witness only
-        // worker-authored output/artifact text (#1454). An unsatisfied
-        // predicate (Fail) intercepts the false success and routes the row
-        // to FAILED. No predicate (Unverified) also lands COMPLETED with
-        // reviewed=false — matching the watchdog's
-        // conservative posture. failure/partial/aborted keep their mapping and
-        // stay reviewed (an explicit tachi_complete is a deliberate close).
-        //
-        // Reuse the verdict computed above (#773 ②) — the outcome row and the
-        // kanban row MUST agree on the same machine verdict, so it is resolved
-        // once. `completion_verdict` is always Some inside this dispatch_id arm.
+        // Reuse the execution verdict for the outcome, canonical receipt and
+        // kanban projection. Explicit close and predicate completion are not
+        // independent review evidence.
         let CompletionVerdict {
             declared,
             verdict_tag,
@@ -1692,7 +1681,11 @@ pub(crate) async fn handle_tachi_complete(
             did,
             new_state,
             Some(&eval_memory_id),
-            Some(reviewed_flag),
+            if new_state == "TASK_STATE_INPUT_REQUIRED" {
+                Some("partial")
+            } else {
+                None
+            },
         )
         .await
         {

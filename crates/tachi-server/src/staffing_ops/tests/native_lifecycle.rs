@@ -120,7 +120,7 @@ async fn assert_retained_kernel_lifecycle(vendor_sandbox: bool, fence_failure: O
                 dispatch_id,
                 "TASK_STATE_COMPLETED",
                 None,
-                Some(false),
+                None,
             )
             .await
             .unwrap();
@@ -129,7 +129,7 @@ async fn assert_retained_kernel_lifecycle(vendor_sandbox: bool, fence_failure: O
             let mut status: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             if prior == "receipt" {
                 status["resolved_completion"] = serde_json::json!({
-                    "state": "TASK_STATE_COMPLETED", "eval_ledger_id": "fixture-success",
+                    "state": "TASK_STATE_COMPLETED", "closure_kind": null, "eval_ledger_id": "fixture-success",
                     "reviewed": false, "recorded_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 });
             } else {

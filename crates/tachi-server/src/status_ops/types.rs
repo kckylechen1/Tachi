@@ -78,6 +78,7 @@ pub(crate) struct DispatchStatus {
     pub(crate) task: String,
     pub(crate) outcome: String,
     pub(crate) elapsed: String,
+    /// Independent review only; legacy close/predicate flags do not qualify.
     pub(crate) reviewed: bool,
 }
 
