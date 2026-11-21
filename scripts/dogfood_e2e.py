@@ -1502,6 +1502,13 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
     def finish(session, dispatch, status):
         ok, payload, raw = session.call("tachi_staff", action="finish", dispatch_id=dispatch,
                                        expected_status_revision=revision(status), format="json")
+        ctx.check("finish acceptance returns the committed working receipt, not premature completion",
+                  ok and payload.get("state") == "TASK_STATE_WORKING"
+                  and payload.get("dispatch_id") == dispatch
+                  and payload.get("status_revision") == revision(status) + 1
+                  and payload.get("controller_epoch_id") == status.get("managed_run_identity", {}).get("controller_epoch_id")
+                  and payload.get("session", {}).get("session_id") == status.get("native_session", {}).get("session_id")
+                  and payload.get("session", {}).get("phase") == "finished", payload if ok else raw)
         return ok, wait(session, dispatch, lambda value: find_key(value, "state") == "TASK_STATE_COMPLETED"), raw
 
     try:
@@ -1527,6 +1534,10 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ctx.require("native start reaches a supervised terminal-turn boundary",
                find_key(status, "phase") == "awaiting_instruction"
                     and bool(requests) and all(row["home"] == expected_home for row in requests), status)
+        ctx.check("supervised idle is canonical working, not a fabricated input request",
+                  status.get("state") == "TASK_STATE_WORKING"
+                  and status.get("native_session", {}).get("supervised") is True
+                  and status.get("native_session", {}).get("phase") == "awaiting_instruction", status)
         session_id = find_key(status, "session_id")
         run_dir = daemon.app_home / "runs" / dispatch
         report = (run_dir / "result.md").read_text()
@@ -1558,9 +1569,17 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=dispatch,
                               expected_status_revision=revision(status) - 1, task="stale")
         ctx.check("native continuation rejects a stale receipt revision", not ok and "stale" in raw, raw)
-        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=dispatch,
-                              expected_status_revision=revision(status), task="Check the result once more.")
+        ok, accepted, raw = owner.call("tachi_staff", action="continue", dispatch_id=dispatch,
+                                      expected_status_revision=revision(status),
+                                      task="Check the result once more.", format="json")
         ctx.check("owning controller accepts a correction as the next turn", ok, raw)
+        ctx.check("continue acceptance returns state identity and revision from the accepted receipt",
+                  ok and accepted.get("state") == "TASK_STATE_WORKING"
+                  and accepted.get("dispatch_id") == dispatch
+                  and accepted.get("status_revision") == revision(status) + 1
+                  and accepted.get("controller_epoch_id") == status.get("managed_run_identity", {}).get("controller_epoch_id")
+                  and accepted.get("session", {}).get("phase") == "instruction_accepted"
+                  and accepted.get("session", {}).get("session_id") == session_id, accepted if ok else raw)
         status = idle(owner, dispatch, 2)
         ctx.check("correction retains the same native session",
                   find_key(status, "turn") == 2 and find_key(status, "session_id") == session_id, status)

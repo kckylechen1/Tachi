@@ -144,6 +144,15 @@ original owner on the owning daemon while `native_session.phase` is
 eighth write turn finishes automatically. Cancellation is valid during a running
 turn or at a boundary and uses the existing owned-child termination finalizer.
 
+A supervised turn boundary keeps canonical `state=TASK_STATE_WORKING`; it is not
+a `TASK_STATE_INPUT_REQUIRED` request or an authorization to invent the next instruction.
+Successful `continue` and `finish` responses carry `state`, `dispatch_id`,
+`status_revision`, `controller_epoch_id`, and the existing `session` projection
+(including `session_id`) from the same committed revision. A `finish` acknowledgement
+has session phase `finished` while the canonical run is still working; read
+`status` for the later terminal result rather than treating the acknowledgement
+as completion. The facade's `status` field describes the tool call, not run state.
+
 The launch-bound mailbox recipient is `staff:<dispatch_id>`. Its existing global
 mailbox admission is scoped to the bound project. Intake occurs only between
 terminal turns and counts against the same turn ceiling. The consumed mailbox

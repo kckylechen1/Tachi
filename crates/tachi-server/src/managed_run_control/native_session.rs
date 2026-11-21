@@ -157,6 +157,7 @@ pub(crate) fn update_phase(
             &fence,
         )?;
         let projection = json!({
+            "state": status["state"],
             "dispatch_id": dispatch_id, "status_revision": status["status_revision"],
             "controller_epoch_id": server.controller_epoch, "session": status["native_session"],
         });
