@@ -1,31 +1,30 @@
 # Issue Refinery and Memory Knowledge Lanes
 
-**Status:** proposed canonical architecture, owner-approved direction 2026-07-13
+**Status:** retained evidence/recall contracts with historical July 2026 proposals
+**Product-boundary reconciliation:** 2026-11-21
 
-**Contracts:** [#1002](https://github.com/kckylechen1/tachi/issues/1002), [#1043](https://github.com/kckylechen1/tachi/issues/1043), [#1059](https://github.com/kckylechen1/tachi/issues/1059), [#950](https://github.com/kckylechen1/tachi/issues/950)
+**Original design references:** [#1002](https://github.com/kckylechen1/tachi/issues/1002), [#1043](https://github.com/kckylechen1/tachi/issues/1043), [#1059](https://github.com/kckylechen1/tachi/issues/1059), [#950](https://github.com/kckylechen1/tachi/issues/950)
 
 **Related:** [`project-cycle-memory-spine.md`](./project-cycle-memory-spine.md), [`dispatch-lifecycle.md`](./dispatch-lifecycle.md), [`recall-quality-architecture.md`](./recall-quality-architecture.md)
+
+The original direction was owner-approved on 2026-07-13. The evidence envelope,
+field ownership, and recall/knowledge-delivery contracts below remain relevant
+to their admitted consumers. The original delivery sequence is not a current
+backlog: §8 and §10 record the later retirement of lesson forge and #950's
+establishment/overturn path. This update does not change persisted vocabulary
+or claim that every target `V1` shape has shipped.
 
 ## 1. Decision
 
 Issue refinement and long-term memory use one evidence lifecycle, but they do not
 share authority.
 
-```text
-GitHub issue / PR snapshot       repo doc/spec @ blob SHA       code + verification
-           \                            |                            /
-            +---------------- Evidence bundle ---------------------+
-                                      |
-                              proposal + refutation
-                                      |
-                             leader/owner adjudication
-                                      |
-              +-----------------------+------------------------+
-              |                       |                        |
-       GitHub disposition       active wiki/guide       lesson/precedent candidate
-                                                               |
-                                                     #950 establishment gate
-```
+| Evidence input | Reviewed output | Authority boundary |
+|---|---|---|
+| GitHub issue/PR snapshot | Work disposition | Issue/PR state and the required owner decision |
+| Repository doc/spec at a blob SHA | Accepted design or principle | Reviewed versioned repository document |
+| Code revision and verification | Implementation evidence | The observed revision and verification receipt |
+| Evidence bundle and refutation | Wiki/guide or lesson/precedent candidate | Advisory projection; no automatic establishment |
 
 The durable rule is:
 
@@ -38,15 +37,17 @@ The durable rule is:
 - memory owns atomic evidence and working context;
 - wiki owns reviewed, human-readable knowledge projections;
 - guides own reusable playbooks;
-- #950 alone establishes or overturns precedents.
+- reviewed, versioned repository docs/specs own accepted principles; #950's
+  establishment/overturn workflow is retired, and captured candidates stay
+  advisory.
 
 Memory, wiki, model output, and GitHub merged/closed state cannot promote
 themselves into a higher authority class.
 
-## 2. Why the current lane model is retired
+## 2. Why lane names do not establish authority
 
-`Extract`, `Reasoning`, `Distill`, and `Summary` currently mix three unrelated
-concerns:
+The original `Extract`, `Reasoning`, `Distill`, and `Summary` lane model mixed
+three unrelated concerns:
 
 1. provider/model configuration;
 2. authority to make a judgment;
@@ -177,7 +178,12 @@ The allowed authority/adjudication combinations are closed, not free-form:
 | verification | observation, approved |
 | advisory | observation, proposal, approved; never established |
 | playbook | proposal, approved; never established |
-| precedent | proposal, established; establishment only through #950 |
+| precedent | proposal; historical `established` vocabulary remains readable, but there is no active #950 establishment writer |
+
+These stored labels do not grant current authority. Retained precedent
+candidates expose `effective_authority_complete=false`; even a historical raw
+`authority_complete=true` is not an establishment receipt. See §8 for the
+current S4 boundary.
 
 An `EngineReceiptV1` records requested role, effective provider, effective model
 and version, fallback chain, degraded state, latency, and tool access. Unknown
@@ -307,7 +313,7 @@ Field ownership matters more than a single global precedence rule:
 | implementation evidence | commit + verification receipt |
 | delivery state | reachability from owner-controlled main/release ref + release evidence |
 | explanatory lesson/runbook | reviewed wiki/guide projection |
-| precedent establishment/overturn | #950 adjudication record |
+| accepted principle or rule revision | reviewed versioned repo doc/spec; historical precedent candidates do not establish or overturn it |
 
 ## 6. Recall and ask are evidence composition
 
@@ -615,27 +621,38 @@ This is a request/receipt contract. Automatic host compaction hooks, native
 Skill installation/symlink reconciliation, and Guide execution feedback are
 separate integrations; this delivery path does not claim those capabilities.
 
-## 8. Distill campaign and precedent boundary
+## 8. Retained capture and retired distill/precedent paths
 
-#1043 remains a router for three separately observable contracts:
+The July D2 forge, D4 re-forge, and D5 decoration sequence is historical, not a
+current campaign. [PR #2333](https://github.com/kckylechen1/Tachi/pull/2333)
+removed the lesson-forge pipeline. The old 50-row D2 pilot, bulk #1059 ingestion,
+and re-forge expansion are not unfinished delivery gates for that retired path.
+Any retained post-rank explanation remains advisory; it does not grant authority
+or reopen the campaign.
 
-- **D2:** forge selected, grounded source bundles into
-  `situation → proposed ruling → why → how to apply → refs` candidates; run a
-  50-row old-vs-new A/B pilot and a cold-start behavior discrimination test.
-- **D4:** turn recalled-but-unhelpful, contradicted, stale, overturned, or
-  outcome-mismatched evidence into `ReforgeRequestV1`; append a new candidate
-  rather than editing history.
-- **D5:** add `recall_reason` and `pattern_context` after ranking only, under
-  #774's frozen contract. It does not change query, pool, score, or authority.
+The owner retired [#950](https://github.com/kckylechen1/Tachi/issues/950)'s
+pending-to-established promotion, veto/overturn, and adjudication-time recall
+work, including #1077 and #1078. Accepted principles belong in reviewed,
+versioned repository docs/specs. There is no current establishment writer to
+complete under the old sequence.
 
-#1059 is one read-only GitHub source adapter after #1041. It preserves issue,
-PR, comment, merge, revert, and verification provenance and emits lesson or
-precedent candidates. It does not mirror GitHub as a second truth store and it
-does not establish a precedent.
+Completion-time precedent candidate capture still exists. It is separate from
+lesson forge: candidates remain pending/advisory and do not gain authority by
+being captured, recalled, or attached to a merged PR. The S4 read boundary
+under [#2012](https://github.com/kckylechen1/Tachi/issues/2012), including
+[PR #2374](https://github.com/kckylechen1/Tachi/pull/2374), exposes
+`effective_authority_complete=false`. A raw historical
+`authority_complete=true` records source shape, not a trusted adjudication
+receipt. A positive authority producer/consumer would require a separate
+current contract; its absence is not permission to revive #950.
 
-#950 owns free-text principle decomposition, pending-to-established promotion,
-outcome validation, owner veto/overturn, and adjudication-time recall. A lesson
-candidate maps into #950's existing ruling record only at that gate.
+Session source capture, explicit host-owned outcome labels, typed events,
+continuity projections, and daily batch distillation remain supported.
+[PR #2382](https://github.com/kckylechen1/Tachi/pull/2382) retired automatic
+label/advice producers and the old per-capture distill worker; it did not retire
+those retained paths. The source, evidence, recall, and knowledge-delivery
+contracts elsewhere in this document apply to their current consumers without
+reinstating the removed producers.
 
 ## 9. Evaluation surface and the native/Tachi line
 
@@ -663,14 +680,17 @@ The #1066 `register → observe → adjudicate → get` lifecycle records carrie
 separately from leader/reviewer judgment. `tachi_task(action="complete")` may
 project referenced `eval_run_ids` into the existing append-only eval path. The
 surface does not invent a pass when a native host cannot expose its model
-identity, and only adjudicated, evidence-usable rows feed routing/card evolution.
+identity. Evaluation receipts do not reinstate automatic card evolution or
+routing advice, retired by [PR #2336](https://github.com/kckylechen1/Tachi/pull/2336)
+and [PR #2382](https://github.com/kckylechen1/Tachi/pull/2382).
 
-Use a native subagent when the host already owns the bounded task, low-latency
-parallelism matters, and model identity is not part of the proof. Use Tachi
-dispatch when the run needs an explicit provider/model, durable resumability,
-cross-host pickup, a controlled tool/sandbox profile, or a reproducible ledger.
-For cross-model verification, an unknown native model is not an independent
-seat; use an explicitly identified Tachi/external lane.
+Use the host's native subagent by default for ordinary local delegation. Staff
+start requires an admitted profile and an explicit `staffing_reason`:
+`explicit_user_request`, `durable_cross_session`, `cross_device_remote`, or
+`native_subagent_unavailable`. Tachi supervises managed native sessions through
+the installed harness protocol. A requested profile/model is not proof of the
+effective engine; an unknown native model is not an independent cross-model
+verification seat.
 
 Evaluation is by capability and artifact, not legacy lane name:
 
@@ -679,27 +699,28 @@ Evaluation is by capability and artifact, not legacy lane name:
 - verifier: refutation catch rate, independence receipt, false-pass rate;
 - renderer: typed-field fidelity and deterministic rebuild;
 - recall: exact-anchor hit, authority precision, claim coverage, MRR/recall;
-- D2/D4/D5: cold-start behavior change, usefulness feedback, and no ranking
-  mutation by D5.
+- historical D2/D4/D5 proposals used cold-start behavior change, usefulness
+  feedback, and no ranking mutation by D5; those measures do not reopen the
+  retired campaign.
 
-## 10. Delivery sequence and kill gates
+## 10. Current delivery disposition
 
-1. #1002: immutable source resolver, typed evidence/disposition packets, manual
-   reference replay, proposal-only apply boundary.
-2. #1071: recall evidence envelopes and RED corpus — exact #1002 anchor, old-distill
-   crowding, missing snapshot, same-results-but-wrong-source, provider timeout,
-   and truncated synthesis.
-3. #1072: wiki lifecycle/provenance visibility and candidate-review-apply boundary.
-4. #1073 plus the #1059 pilot after #1041.
-5. #1076 principle decomposition, then #1077 establishment/overturn gate.
-6. #1074 D4 re-forge queue.
-7. #1078 adjudication recall, then #1075 D5 post-rank decoration.
-8. #1066 `tachi_agent_eval` external/native intake after engine receipts are
-   available.
+| Area | Current disposition |
+|---|---|
+| Evidence envelopes, source grounding, field ownership, recall and knowledge delivery | Retained contracts for admitted consumers; use current code and leaf evidence for implementation status |
+| Recall quality | [#2113](https://github.com/kckylechen1/Tachi/issues/2113) needs reviewed real queries and measured outcomes; the old example corpus below is not that evidence |
+| Lesson forge, D2 pilot, bulk ingestion, re-forge campaign | Retired under PR #2333; no revival through the old delivery sequence |
+| #950 / #1077 / #1078 establishment, overturn, adjudication recall | Owner-retired; accepted principles remain in versioned repo docs/specs |
+| Completion candidate capture and S4 reads | Retained advisory path; positive authority work needs its own current producer/consumer contract |
+| Native/external evaluation receipts | Preserve carrier facts and reviewed outcomes without restoring retired routing/card advice |
 
-### 10.1 Frozen RED corpus
+### 10.1 Historical recall discriminators
 
-| Case | RED on current behavior | Required GREEN |
+These were the original failure examples. They remain useful review questions,
+but this table does not assert that each case is RED on current `main`. Current
+work needs a reproduced failure or the reviewed real-query evidence in #2113.
+
+| Case | Historical failure | Required behavior |
 |---|---|---|
 | exact `#1002` current-work query | advisory memories/wiki rank without a #1002 snapshot while confidence is high | resolved #1002 snapshot is present; advisory rows cannot outrank the required anchor |
 | missing issue/doc anchor | high confidence or a dispatch recommendation is still possible | `grounding_status=missing_anchor`, confidence is not high, no dispatch recommendation |
@@ -708,19 +729,9 @@ Evaluation is by capability and artifact, not legacy lane name:
 | synthesis provider timeout/fallback | top-level remains `completed` while nested synthesis timed out; effective engine and degraded state are absent | evidence survives, but overall result is `partial/preview-only` with timeout/fallback receipt and unchanged evidence confidence |
 | truncated synthesis | `completed/high/gaps=[]` | `partial`, explicit truncation gap, unchanged evidence confidence |
 
-The D2 pilot uses 50 preselected source rows and a predeclared target decision per
-row. For each candidate, an independent adjudicator blind to arm identity scores
-three cold runs with the candidate and three without it. A candidate passes only
-when at least two of three treated runs make the reference-aligned material choice,
-the baseline does not already do so in at least two of three runs, and unsupported
-claim rate does not increase. Failing candidates are rejected, not averaged away;
-the pilot reports yield and cost before any bulk run.
-
-If D2 cannot prove that a cold-start agent changes a material decision, stop D2
-expansion, bulk #1059 ingestion, and the D2-derived parts of D4/D5. Do not scale
-those paths to compensate for a candidate shape that has no behavioral value.
-#950 remains valid for directly captured leader rulings and is not killed by a
-D2 failure.
+The old D2 pilot and its expansion gates are retired with the producer. Captured
+leader rulings remain advisory evidence; #950 is not an alternative authority
+path around that retirement.
 
 Explicitly abandoned:
 

@@ -1,12 +1,19 @@
 # Tachi Continuity Memory Architecture
 
-**Status:** architecture design + first implementation slice
-**Date:** 2026-07-19
-**Last code-alignment audit:** 2026-07-19
+**Status:** retained continuity contracts with historical design proposals
+**Original design date:** 2026-07-19
+**Product-boundary reconciliation:** 2026-11-21
+
+The evidence and authority invariants below remain design constraints. The
+current product disposition is in §6 and §10; the historical roadmap in §7 is
+not an execution queue. This reconciliation covers the retained/retired product
+boundaries, not a new acceptance claim for every original design proposal.
+
 **Related docs:**
+
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md) — original design + cold review
 - [`memory-soul-architecture.md`](./memory-soul-architecture.md) — reviewed operating-identity projection over continuity evidence
-- [`../../wiki/agent/tachi/Tachi-图书馆架构设计.md`](../../wiki/agent/tachi/Tachi-图书馆架构设计.md) — Karpathy LLM Wiki mapping
+- [`Tachi-图书馆架构设计.md`](../../../wiki/agent/tachi/Tachi-图书馆架构设计.md) — Karpathy LLM Wiki mapping
 - [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md) — host runtime event contract
 
 ---
@@ -166,11 +173,12 @@ repeatedly exposed the difference between a fresh-install test and a legacy
 migration proof. These events can support an AgentSoul proposal such as
 "when persistence schemas change, actively seek a legacy-path discriminator."
 
-The continuity ledger owns the events and outcomes. Engineering precedent owns
-the concrete migration rule. AgentSoul may project the reviewed, cross-event
-judgment disposition. Event frequency alone cannot promote it, and a later
-counterexample must remain attached as counterevidence rather than disappear
-behind the projection.
+The continuity ledger owns the events and outcomes. A reviewed, versioned
+repository doc/spec owns the concrete migration rule; the #950 precedent
+establishment path is retired. An AgentSoul proposal may describe the
+cross-event judgment disposition, but does not acquire authority from event
+frequency. A later counterexample must remain attached as counterevidence
+rather than disappear behind a projection.
 
 ### 1.3 Success is measured by recovery quality, not retained token volume
 
@@ -517,13 +525,24 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
 - The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts and agent-profile proposals (the `skill_candidate` review artifact is retired by #1690 C3).
 - Canonical exact-ID deletion of a continuity projection retires that identity in the same store (#2299). The row must carry the `external:tachi_event_projection` source and a recognized `projection-<kind>-<key>` identity; a path prefix or metadata field alone does not confer retirement. Deletion and a minimal, permanent `hard_state` marker commit together. Manual projection, background replay, and dry runs report `reason="projection_retired"` without graph or promotion work. Final insert/upsert/snapshot-import admission checks the marker inside the writer transaction, so a stale projector read cannot recreate a row after deletion commits. Generic state APIs cannot create, replace, or clear a retirement marker; TTL maintenance cannot remove it, and source `tachi_events` remain unchanged. A distinct projection identity remains eligible. Deletions made before the updated kernel have no retrospective retirement marker. This mechanism does not supply cross-store/backup-restore privacy erasure. Moving a domain from a previously routed store to another store retains the existing #1115 location-tracking limitation.
-- Complete skill system: `hub_register`, `tachi_skill(action='run'|'discover')`, builtin skills. The standalone skill-run alias, skill recommendation, and generative skill evolution are retired by #1690 C3.
+- Hub retains skill/plugin asset management and document delivery. The upstream MCP proxy and Prompt Skill execution path are retired; an asset's presence does not make it an ordinary agent tool. See [PR #2337](https://github.com/kckylechen1/Tachi/pull/2337).
 
-### Missing / gaps
+### Current dispositions and conditional follow-ups
 
-1. **P0 current-truth reducer — first slice implemented (#1696), integration slices open**: `tachi-params::current_truth` now provides the §1.2 core — the typed `AssertionV1` vocabulary with predicate-scoped authority admission, the append-only SQLite assertion store with immutable-revision idempotency, the deterministic `current | superseded | conflicted | unknown` reducer, stale-handoff evaluation, the derived open-action projection, and the #1693 consumer read surface (fixtures only). Still missing, as deliberate follow-up slices: the live GitHub adapter over the bounded `gh` read path (today only test fakes implement `GithubRefreshAdapter`), the `tachi_events` observation→assertion bridge, the caller-admission surface binding issuers to authority classes, and any production consumer (#1693's Work Read Model is itself fixture-blocked). Current timeline projections are not a substitute for any of this.
-2. **Agent MD crystallization is only first-slice**: the `tachi_profile` tool that used to import/render/context profile packs and target `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Cursor, and OpenClaw files was retired from the MCP surface under #757, superseded by the memory-line promotion path (#950, #534). `tachi_event action="promote"` can emit an `agent_profile.proposal` event for a mature pattern, but it does not yet render or write host Agent MD files.
-3. **No cross-process A2A transport**: a local read-only `a2a` evidence bundle and `action=a2a` poll surface exist, but there is no daemon pub/sub API, no independent cold-seat host profile, and no transport-level evidence/open-question feed.
+1. **CurrentTruth is a retained historical read surface, not a live refresh backlog.** The typed assertion store, revision-aware reducer, stale-handoff evaluation, and derived action projection landed under [#1696](https://github.com/kckylechen1/Tachi/issues/1696). The owner-selected read-only freeze retains recorded revisions and reports `retired_writer_frozen`; it does not invent fresh observations. Local claim/project Work views and shared canonical Staff reads are implemented, including [PR #2172](https://github.com/kckylechen1/Tachi/pull/2172). They are not fixture-only. Live read-only GitHub status snapshots remain available separately and do not refresh the persistent CurrentTruth store. [#1693](https://github.com/kckylechen1/Tachi/issues/1693) is conditional diagnosis of an observed consumer gap; [#1953](https://github.com/kckylechen1/Tachi/issues/1953) is not an active refresh-writer task.
+2. **Profile proposals do not authorize a new rendering or precedent pipeline.** The `tachi_profile` surface was retired under #757. Retained `tachi_event action="promote"` may create an `agent_profile.proposal`, but that event is not a host Agent MD write. The #950 establishment path is retired, and this historical design does not reopen it.
+3. **Same-host A2A delivery exists; remote delivery has a separate contract.** [PR #2294](https://github.com/kckylechen1/Tachi/pull/2294) delivered the same-host mailbox and turn-intake path. The local continuity evidence bundle is a separate read model. Verified remote dispatch/resume remains scoped by [#1129](https://github.com/kckylechen1/Tachi/issues/1129); the old blanket claim that cross-process A2A is absent is no longer accurate.
+
+### Historical design questions
+
+Earlier revisions recorded the questions below. They are retained as design
+history, not as a newly verified inventory of current defects or a delivery queue.
+Any follow-up needs a present consumer, current code evidence, and an admitted
+leaf. In particular, [PR #2382](https://github.com/kckylechen1/Tachi/pull/2382)
+retired automatic outcome labels and advice producers; session source capture,
+explicit host-owned outcome labels, projections, and daily batch distillation
+remain supported.
+
 4. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus, thresholds, and an operator-visible calibration status.
 5. **Maturity gates are partially implemented**: projection reports and `tachi_event action="promote"` expose external-validation / cold-seat-review gate status. The gate still does not auto-promote drafts or proposals to final wiki or Agent MD writes (the listed-skill promotion leg is **retired by #1690 C3** — no generated skills exist, so there is no listed-skill target to promote).
 6. **Pattern evidence is append-only but downstream interpretation remains partial**: `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs when it has a real flow id (closure-time `hit` evidence was retired by the 2026-10-22 `gh_ops` removal). Missing flow identity produces a typed skip. `tachi_search scope="patterns"` and `tachi_event action=context` are read-only. These internal receipts do not project or change counters. The explicit legacy feedback action can still emit counter-mutating `hit` / `miss` / `stale` signals. Ordinary briefing/context use still does not automatically decide hit/miss without downstream outcome evidence.
@@ -534,7 +553,13 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ---
 
-## 7. Architectural roadmap
+## 7. Historical architectural roadmap
+
+These phases describe the original design sequence. They do not override §6's
+current dispositions or authorize rebuilding retired automatic labelers,
+advice producers, skill generation, or the persistent GitHub refresh writer.
+The named model choices and unfinished phases are historical proposals, not
+current runtime or deployment claims.
 
 ### Phase 1 — Calibration and model tiering
 
@@ -661,16 +686,22 @@ behavior (kept for record):
 
 ---
 
-## 10. Summary
+## 10. Current product boundary
 
-Tachi already has a continuity observation substrate: the `tachi_events` ledger, projection machinery, counters, guardrails, typed timeline/bonding read-model slices, wiki references, pattern-derived wiki/runbook + agent-profile review artifacts (skill candidates are retired by #1690 C3), lifecycle/GitHub evidence surfaces, and — since #1696's first slice — the revision-aware current-truth core (`tachi-params::current_truth`: typed assertion store, `current | superseded | conflicted | unknown` reducer, stale-handoff law, derived open-action projection, #1693 consumer read surface). It does **not** yet have the current-truth **integration slices** (live GitHub adapter, caller-admission surface, `tachi_events` bridge, production consumer) or an exposed profile-pack rendering surface. Remaining work is reconciliation integration, loop closure, calibration, stronger schemas, causal endpoint resolution, and final promotion:
+Tachi retains typed event capture, explicit host-owned outcome labels, continuity
+projections, wiki references, and daily batch distillation. Automatic outcome
+labelers, advice producers, and skill generation are retired. A stored proposal
+or historical roadmap item does not reopen those producers.
 
-- Finish the **current-truth integration slices** (live adapter over the bounded `gh` read path, caller admission binding issuers to authority classes, the `tachi_events` observation→assertion bridge, and the #1693 production consumer) before treating timeline/handoff output as current state; the reducer core itself now exists.
-- Extend **automatic pattern hit/miss feedback** beyond search/context/complete into briefing runtime and outcome-backed hit/miss classification.
-- Extend **maturity gates** from explicit readiness reporting into final promotion enforcement for wiki/Agent MD writes (the listed-skill promotion leg is retired by #1690 C3 — no generated skills exist).
-- Add **Agent MD crystallization** so mature continuity patterns become reviewed profile proposals that can be rendered for each host.
-- Harden **timeline and bonding read models** from schema-marked/validated output into standalone Rust domain types and richer automatic causal endpoint resolution; explicit existing-ID causal edges already persist.
-- Extend the local **A2A evidence/open-thread bundle** and poll surface into cross-process transport while preserving the cold seat.
-- Keep the **over-fit brake and cold seat** as un-revocable safeguards.
+Current-state reads use the source appropriate to the claim: canonical local
+Staff/Work state for local execution, read-only GitHub snapshots for live
+repository status, and recorded revisions with honest stale/unavailable states
+for historical CurrentTruth reconciliation. The retained reducer is not an
+authorization to rebuild a persistent GitHub refresh writer.
 
-The result is a system that learns the user's alignment, surfaces it when relevant, and turns it into durable knowledge and reviewed wiki/runbook + agent-profile artifacts — the skill-crystallization leg is retired by #1690 C3 — without losing the ability to be challenged or corrected.
+Further work follows current leaves: reviewed real-query recall evidence under
+[#2113](https://github.com/kckylechen1/Tachi/issues/2113), a concrete reproduced
+consumer gap before #1693 work, and the minimal verified-remote contract under
+#1129. Pattern promotion, Agent MD rendering, and the historical phases above
+require their own current scope. The evidence, authority, over-fit, and cold-seat
+constraints remain applicable to any admitted implementation.
