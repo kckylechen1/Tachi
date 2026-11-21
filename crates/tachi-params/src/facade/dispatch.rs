@@ -47,7 +47,8 @@ pub struct DispatchMcpAccessParams {
 /// self-reported `outcome="success"` (and a watchdog exit-code-0 auto-close)
 /// only lands `TASK_STATE_COMPLETED` if the predicate is
 /// satisfied; an unsatisfied predicate intercepts the false success and routes
-/// the run to `TASK_STATE_FAILED`. Two forms are supported (#878-A).
+/// the run to `TASK_STATE_FAILED`. Neither result establishes independent review.
+/// Two forms are supported (#878-A).
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompletionPredicate {
@@ -179,8 +180,8 @@ pub struct TachiDispatchParams {
 
     /// Machine-checkable contract predicate. When set, self-reported success
     /// (and watchdog exit-0 auto-close) must satisfy this predicate to land a
-    /// `TASK_STATE_COMPLETED` (without independent review); otherwise the run is intercepted as a
-    /// false success and routed to `TASK_STATE_FAILED` (#878-A).
+    /// `TASK_STATE_COMPLETED` (without independent review); otherwise the run
+    /// is intercepted as a false success and routed to `TASK_STATE_FAILED`.
     #[serde(default)]
     pub completion_predicate: Option<CompletionPredicate>,
 

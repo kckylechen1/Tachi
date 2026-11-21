@@ -578,18 +578,22 @@ def register(scenario, find_key, fixture_connection):
                 if legacy:
                     metadata.update(closure_kind="partial", terminal_at="2020-01-01T00:00:00Z")
                 fixture.execute("UPDATE memories SET metadata=? WHERE id=?", (json.dumps(metadata), did))
-                if not legacy:
-                    run = ctx.daemon.app_home / "runs" / did
-                    run.mkdir(parents=True)
-                    status = {"dispatch_id": did, "state": "TASK_STATE_WORKING", "agent": "codex"}
-                    if name.startswith("predicate-"):
-                        status["completion_predicate"] = {"type": "output_matches", "pattern": "MATCH"}
-                        (run / "result.md").write_text("MATCH" if name.endswith("pass") else "absent")
-                    (run / "status.json").write_text(json.dumps(status))
         ctx.daemon.start()
         ctx._session = None
         ctx._bound = None
         session = ctx.connect()
+
+        # Seed run artifacts after startup: orphan recovery legitimately
+        # rewrites WORKING runs found during startup and would erase predicates.
+        for name, did in ids.items():
+            if name != "legacy":
+                run = ctx.daemon.app_home / "runs" / did
+                run.mkdir(parents=True)
+                status = {"dispatch_id": did, "state": "TASK_STATE_WORKING", "agent": "codex"}
+                if name.startswith("predicate-"):
+                    status["completion_predicate"] = {"type": "output_matches", "pattern": "MATCH"}
+                    (run / "result.md").write_text("MATCH" if name.endswith("pass") else "absent")
+                (run / "status.json").write_text(json.dumps(status))
 
         def metadata(did):
             with closing(fixture_connection(db, "ro")) as observation:
@@ -644,7 +648,7 @@ def register(scenario, find_key, fixture_connection):
         ours = [row for row in dispatches if ctx.tag in row.get("dispatch_id", "")]
         ctx.check("status JSON never upgrades legacy or explicit closure to review",
                   len(ours) == len(ids) and all(row.get("reviewed") is False for row in ours), ours)
-        ctx.check("legacy read leaves stored closure bytes unchanged",
+        ctx.check("legacy read leaves stored closure unchanged",
                   metadata(ids["legacy"]).get("reviewed") is True
                   and metadata(ids["legacy"]).get("terminal_at") == "2020-01-01T00:00:00Z",
                   metadata(ids["legacy"]))

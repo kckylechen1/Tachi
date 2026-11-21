@@ -1475,33 +1475,35 @@ mod tests {
     #[test]
     fn partial_receipt_beats_missing_kanban_and_exit_zero() {
         let temp = tempfile::tempdir().expect("temporary run directory");
-        std::fs::write(
-            temp.path().join("status.json"),
-            serde_json::json!({
-                "resolved_completion": {
-                    "state": "TASK_STATE_INPUT_REQUIRED",
-                    "closure_kind": "partial",
-                    "eval_ledger_id": "eval-partial-receipt",
-                    "reviewed": true,
-                    "recorded_at": "2026-07-19T00:00:00Z",
-                }
-            })
-            .to_string(),
-        )
-        .expect("write resolved completion receipt");
+        for reviewed in [false, true] {
+            std::fs::write(
+                temp.path().join("status.json"),
+                serde_json::json!({
+                    "resolved_completion": {
+                        "state": "TASK_STATE_INPUT_REQUIRED",
+                        "closure_kind": "partial",
+                        "eval_ledger_id": "eval-partial-receipt",
+                        "reviewed": reviewed,
+                        "recorded_at": "2026-07-19T00:00:00Z",
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write resolved completion receipt");
 
-        let receipt_terminal_state = resolved_completion_terminal_state(temp.path())
-            .expect("read partial completion receipt");
-        assert_eq!(
-            receipt_terminal_state,
-            Some("TASK_STATE_INPUT_REQUIRED"),
-            "a valid partial receipt must remain terminal when kanban is missing"
-        );
-        assert_eq!(
-            terminal_status_state(receipt_terminal_state, None, None, Some(0)),
-            "TASK_STATE_INPUT_REQUIRED",
-            "receipt-backed partial must beat missing kanban and an exit-zero fallback"
-        );
+            let receipt_terminal_state = resolved_completion_terminal_state(temp.path())
+                .expect("read partial completion receipt");
+            assert_eq!(
+                receipt_terminal_state,
+                Some("TASK_STATE_INPUT_REQUIRED"),
+                "a valid partial receipt must remain terminal when kanban is missing"
+            );
+            assert_eq!(
+                terminal_status_state(receipt_terminal_state, None, None, Some(0)),
+                "TASK_STATE_INPUT_REQUIRED",
+                "receipt-backed partial must beat missing kanban and an exit-zero fallback"
+            );
+        }
 
         std::fs::write(
             temp.path().join("status.json"),
