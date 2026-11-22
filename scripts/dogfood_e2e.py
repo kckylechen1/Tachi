@@ -148,6 +148,26 @@ class McpSession:
         return not result.get("isError", False), payload, text
 
 
+def modern_tasks_call(url: str, identity: dict, action: str, **arguments) -> dict:
+    """ReiClaw's stateless modern request, including the Tasks extension."""
+    meta = {**identity, "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {"io.modelcontextprotocol/tasks": {}}}}
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+               "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "tachi_staff"}
+    for header, field in (("X-Tachi-Agent-Identity", "tachiAgentIdentity"), ("X-Tachi-Project", "tachiProject"),
+                          ("X-Tachi-Profile", "tachiProfile"), ("X-Tachi-Client", "tachiClient")):
+        if field in identity:
+            headers[header] = identity[field]
+    request = urllib.request.Request(url, headers=headers, method="POST", data=json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "_meta": meta, "name": "tachi_staff", "arguments": {"action": action, "format": "json", **arguments}}}).encode())
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read().decode()
+        events = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:") and line[5:].strip()]
+        return json.loads(events[-1] if events else raw)
+
+
 class TaskHints:
     """A real legacy GET /mcp stream, consumed exactly as wake hints."""
 
@@ -1543,6 +1563,47 @@ def native_status_transitions_wake_the_legacy_sse_owner(ctx: Context) -> None:
     finally:
         if hints:
             hints.close()
+        daemon.stop()
+    ctx.done()
+
+
+@scenario("tasks", "result-parity", shared_daemon=False)
+def modern_and_legacy_historical_result_parity(ctx: Context) -> None:
+    root = ctx.daemon.home / f"result-parity-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    identity = {"tachiAgentIdentity": f"result-owner-{ctx.tag}", "tachiProfile": "standard", "tachiClient": "reiclaw"}
+    try:
+        daemon.start()
+        legacy = McpSession(daemon.url, {"X-Tachi-Agent-Identity": identity["tachiAgentIdentity"],
+                                       "X-Tachi-Profile": "standard", "X-Tachi-Client": "reiclaw"}, version="2025-11-25")
+        dispatch = f"historical-{ctx.tag}"
+        run = daemon.app_home / "runs" / dispatch
+        run.mkdir(parents=True)
+        (run / "status.json").write_text(json.dumps({"dispatch_id": dispatch, "state": "TASK_STATE_COMPLETED"}))
+        (run / "result.md").write_text("Historical report 中文\n" + "x" * 65000)
+        ok, expected, raw = legacy.call("tachi_staff", action="result", dispatch_id=dispatch, format="json")
+        ctx.require("legacy historical result is available", ok, raw)
+        response = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        result = response.get("result", {})
+        ctx.require("modern historical result completes synchronously", result.get("resultType") == "complete", response)
+        actual = json.loads("".join(part.get("text", "") for part in result.get("content", [])))
+        ctx.check("modern and legacy canonical result bodies are identical", actual == expected, actual)
+        ctx.check("historical report retains the 64 KiB bound and truncation flag",
+                  len(actual["result"]["body"].encode()) <= 65536 and actual["result"]["truncated"] is False, actual["result"])
+        sidecar = run / "mcp-tasks.json"
+        ctx.check("historical synchronous read mints no binding", not sidecar.exists(), str(sidecar))
+        sidecar.write_text("{broken")
+        denied = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        ctx.check("a corrupt existing binding cannot fall back to history",
+                  denied.get("error", {}).get("message") == "task unavailable", denied)
+        sidecar.unlink()
+        (run / "result.md").write_text("x" * 70000)
+        legacy_ok, _, legacy_raw = legacy.call("tachi_staff", action="result", dispatch_id=dispatch, format="json")
+        modern = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        ctx.check("both protocols preserve oversized report refusal", not legacy_ok
+                  and ("error" in modern or modern.get("result", {}).get("isError") is True),
+                  {"legacy": legacy_raw, "modern": modern})
+    finally:
         daemon.stop()
     ctx.done()
 

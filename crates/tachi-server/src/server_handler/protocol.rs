@@ -497,7 +497,7 @@ impl ServerHandler for MemoryServer {
                     .and_then(serde_json::Value::as_str)
                     == Some("json")
             {
-                return crate::mcp_tasks::begin_result(server, &params);
+                return crate::mcp_tasks::begin_compatible_result(server, &params);
             }
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
