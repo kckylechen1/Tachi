@@ -1,0 +1,173 @@
+# Remote task admission and refusal receipts
+
+This is an inbound implementation slice for #1940 and #1934 on top of the
+[mutual-TLS gateway](remote-admission.md). It validates and durably records a
+bounded request, then returns an authenticated **execution-unavailable refusal**.
+It does not launch a worker, allocate a local WorkClaim, reserve resources or
+claim that the requested revision was fetched or verified.
+
+## Configure the destination
+
+The gateway keeps its existing explicit identity, certificate, private key, CA
+and private home configuration. To expose the remote profile, add a public HTTPS
+origin and repository/job grants to each enrolled peer that may submit or read
+tasks:
+
+```json
+{
+  "public_endpoint": "https://mac-gateway.example",
+  "peers": [{
+    "agent_identity_id": "agent-cloud",
+    "host_id": "cloud-host",
+    "public_key_sha256": "<enrolled DER SPKI SHA-256>",
+    "repositories": [{
+      "repository": "owner/repository",
+      "jobs": ["review_revision", "verify_pr"]
+    }]
+  }]
+}
+```
+
+This fragment extends the complete gateway configuration; it is not a standalone
+file. Missing `repositories` means no remote task grant. A repository identifier
+is an exact, case-sensitive `owner/name`, not a clone URL or filesystem path.
+Grants authorize only this request/receipt surface. They do not authorize local
+execution or establish an origin claim's validity.
+
+Configuration is a process-start snapshot. To change enrollment, repository
+grants, host identity or the trust domain, update the protected operator file and
+restart the gateway. Removing a grant hides historical tasks from that peer as
+well as refusing new submissions and replays. Key revocation remains the existing
+live, durable `a2a remote revoke` operation and does not wait for restart.
+
+The store is Product schema **45**; Portable remains **44**. A pre-existing Product
+store must cross the normal explicit migration gate. Use
+`tachi --allow-schema-migration a2a remote serve --config /absolute/gateway.json`
+only for the operator-selected store after normal backup/deployment preparation.
+Ordinary startup still denies implicit migrations. This migration extends the
+existing A2A envelope/receipt pair and retains its local rows and constraints.
+
+## Wire profile
+
+The authenticated routes are `GET /.well-known/agent-card.json` and `POST /rpc`.
+The gateway never mounts the local MCP router. AgentCard advertises the A2A 1.0
+JSON-RPC binding, owner mTLS, both required extension URIs and unavailable
+execution. Its JSON follows the normative
+[A2A v1.0.0 protobuf model](https://github.com/a2aproject/A2A/blob/v1.0.0/specification/a2a.proto),
+including `securityRequirements` and `mtlsSecurityScheme`.
+
+Every RPC requires these headers:
+
+```text
+Content-Type: application/a2a+json
+A2A-Version: 1.0
+A2A-Extensions: urn:tachi:a2a:ext:delegation:v1,urn:tachi:a2a:ext:provenance-receipt:v1
+```
+
+`application/json` is also accepted. Compressed bodies, unknown extension URIs,
+duplicate JSON keys and requests above 32 KiB are refused. Version/extension
+negotiation happens before business processing. Errors do not echo rejected
+business input. Request IDs are nonnegative safe integers or bounded opaque
+tokens; notifications and batches are outside this profile.
+
+`SendMessage` accepts one `ROLE_USER` message with one `{ "data": ... }` Part and
+`configuration.returnImmediately: true`. It returns `{ "task": ... }` under the
+JSON-RPC result. Task/context IDs are assigned by the destination; incoming task
+continuations, metadata, text/file Parts and arbitrary job fields are refused.
+
+The business object contains exactly:
+
+| Field | Contract |
+| --- | --- |
+| `kind` | `tachi.remote_job/v1` |
+| `sender`, `recipient`, `trust_domain` | Exact admitted peer and destination bindings; bounded identifiers |
+| `idempotency_key`, `nonce` | Distinct opaque tokens of 1–128 bytes |
+| `issued_at`, `expires_at` | UTC `Z` timestamps, a positive start window no longer than 15 minutes |
+| `repository` | Exact repository in this peer's configured grant |
+| `head_sha` | A 40- or 64-character lowercase commit ID; recorded as input, not asserted fetched |
+| `origin_claim` | `{ "claim_id": "...", "transition_version": 0 }`; revision is an integer at most 2^53−1 |
+| `job` | `review_revision` or `verify_pr`, also present in the repository grant |
+| `pull_request` | A positive 32-bit integer, required only for `verify_pr` |
+| `question` | Optional UTF-8 text up to 4 KiB, only for `review_revision` |
+| `context` | Optional closed static snapshot below, only for `review_revision` |
+
+Optional fields must be omitted when unused; explicit null values are refused.
+`verify_pr` rejects `question` and `context` even if empty. A context contains only
+`source_ref`, `source_revision`, `text`, and `sha256` of the UTF-8 text, and its
+serialized size is at most 16 KiB. References are bounded opaque tokens. The
+gateway never fetches them or writes their contents into memory/recall stores.
+Known credential patterns and hidden-reasoning delimiters are rejected. This
+screening does not replace the origin's future explicit selection/redaction and
+current-claim egress gate; no origin submission/export CLI is provided here.
+
+The immutable digest covers every admitted business field, including the nonce,
+start window and optional context. It excludes the JSON-RPC/message IDs and the
+transport connection. The closed schema uses fixed ASCII keys, Unicode strings
+and nonnegative safe integers; recursively sorted JSON therefore matches RFC
+8785 on this restricted domain. The implementation does not expose a general JCS
+canonicalizer or accept floating-point authority fields.
+
+## Persistence and reconciliation
+
+The remote namespace is distinct from local mailbox project digests. A sender's
+`idempotency_key` identifies one durable remote task across repositories. An exact
+replay returns that same task and its original receipts; changed business bytes
+conflict. A nonce cannot be moved to a different key within a sender/domain.
+Admission, recipient binding, current repository/job grant and replay writes are
+checked in the same existing SQLite transaction. Expired first submissions are
+refused; an already recorded task remains readable and replayable after its start
+window, subject to current authority.
+
+For a new allowed input, one transaction records the envelope, a `received`
+receipt and an `authorization_refused` receipt with reason
+`execution_unavailable`. The A2A state is `TASK_STATE_REJECTED`. The receipt includes
+the original input digest, origin/destination, repository/head, origin claim
+revision, local gateway admission reference and monotonic revision. Local claim
+and run references are explicitly absent. No start, terminal-process or cleanup
+fact is invented.
+
+`GetTask` returns the current bounded receipt snapshot with `historyLength: 0`.
+`ListTasks` accepts `pageSize` (1–100, default 20), `pageToken`,
+`historyLength: 0` and `includeArtifacts: false`. Other filters are outside this
+first profile. It filters ownership/domain/destination/host/grants before returning
+tasks, totals or a cursor. The opaque cursor is an already authorized task ID;
+knowing or editing a cursor grants no authority, and reconnecting as the same
+principal can resume a page.
+
+Another enrolled peer cannot get, cancel or subscribe to a task by ID. Missing
+and unauthorized IDs have the same `TaskNotFoundError`. For an authorized task,
+`CancelTask` returns `TaskNotCancelableError` because this slice has already
+refused execution; `SubscribeToTask` reports unsupported streaming for the terminal
+task. Neither manufactures a cancellation or launch outcome.
+
+Bodies use the existing maintenance class: terminal content is scrubbed after
+90 days, while immutable header/digest/receipt tombstones remain for replay.
+Receipt JSON is authoritative only as an observation over the authenticated
+gateway channel; an exported unsigned copy is not independent proof.
+
+## Verification and remaining activation work
+
+The existing dogfood runner exercises real TLS, protocol negotiation, closed
+business input, concurrent first submission, cross-repository key collisions,
+nonce reuse, a deliberately unread acknowledgment, reconnect/restart recovery,
+cross-peer task/cursor access, grant removal, key revocation and no claim/execution
+artifact creation:
+
+```sh
+python3 scripts/dogfood_e2e.py --tachi /absolute/candidate --only remote-admission
+```
+
+This code does not enable remote execution. The following remain required:
+
+- The origin's current local claim/revision/owner authorization check, durable
+  frozen submission, bounded retry and authenticated observation persistence.
+- Destination repository-to-project mapping, fetched-object/PR head checks,
+  local claim/grant/resource reservation and an explicit execution admission
+  adapter that preserves canonical sealed-flow guards.
+- Managed native and externally owned DGX2 lifecycle adapters, with truthful
+  start, cancellation, terminal and cleanup evidence and crash reconciliation.
+- Named operator/relay/endpoints, gateway-versus-worker OS/API isolation and
+  actual owner-Mac/DGX2 acceptance. A private same-UID key does not prove this.
+
+The existing GitHub-owned DGX2 acceptance workflow remains in service. These
+refusal receipts do not grant merge or owner acceptance and do not replace it.

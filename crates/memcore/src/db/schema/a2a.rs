@@ -1,6 +1,9 @@
 //! The retained mailbox schema and its versioned migrations.
 use super::*;
 
+mod remote;
+pub(crate) use remote::migrate_v45_remote_mailbox;
+
 const KIND_CHECK: &str = "CHECK (kind IN ('turn_response/v1','coordination/v1'))";
 const IDEMPOTENCY_CHECK: &str =
     "UNIQUE (issuer_agent_identity_id, canonical_project, idempotency_key)";
@@ -55,11 +58,11 @@ pub(crate) fn validate_a2a_mailbox_v31_schema(conn: &Connection) -> Result<(), M
 }
 
 pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), MemoryError> {
-    let version = if super::super::version_policy::VersionHeader::read(conn)?.stored >= 42 {
-        42
-    } else {
-        32
-    };
+    let stored = super::super::version_policy::VersionHeader::read(conn)?.stored;
+    if stored >= 45 {
+        return remote::validate(conn);
+    }
+    let version = if stored >= 42 { 42 } else { 32 };
     validate_a2a_mailbox_schema_version(conn, version)
 }
 
@@ -341,7 +344,7 @@ mod tests {
             )
             .expect("snapshot the current mailbox tables and indexes");
         let mutant = canonical.replacen(
-            ddl::A2A_BODY_SIZE_V32_CHECK_CLAUSE,
+            remote::BODY_CHECK,
             "CHECK (body IS NULL OR length(CAST(body AS BLOB)) <= 4096)",
             1,
         );
@@ -358,7 +361,7 @@ mod tests {
         )
         .expect_err("current schema must reject, not repair, widened body DDL");
         assert!(
-            error.to_string().contains("incomplete current schema v42"),
+            error.to_string().contains("incomplete current schema v45"),
             "{error}"
         );
         assert!(

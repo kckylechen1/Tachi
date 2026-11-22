@@ -2,9 +2,10 @@
 
 Implementation slice for #1171 under #1129. The gateway authenticates remote
 peers through real mutual TLS and records `mtls-peer/v1` evidence in the existing
-Product admission ledger. **It does not accept remote jobs, expose MCP, launch
-workers or establish a deployed execution boundary.** #1940 and #1934 own those
-subsequent integrations.
+Product admission ledger. **It does not expose MCP, launch
+workers or establish a deployed execution boundary.** The subsequent
+[remote task receipt slice](remote-task-receipts.md) adds bounded request
+validation and durable refusal; execution integrations remain #1934 work.
 
 ## Operator configuration
 
@@ -38,8 +39,9 @@ identities, real certificate paths and public-key digests before use:
 The configured home is the explicit Product runtime home; the existing store
 is `home/global.db`. No project or implicit default store is selected. An older
 store still requires the existing explicit `--allow-schema-migration` flag.
-This method addition changes no DDL or schema version. Test against an isolated
-home or an authorized stopped copy, never an incidental live user store.
+The original method addition changed no schema. The remote task receipt slice
+uses Product schema 45 / Portable 44. Test against an isolated home or an
+authorized stopped copy, never an incidental live user store.
 
 The home, config and private key must belong to the gateway OS account and have
 no group/other permissions (`0700` directory, `0600` files). Certificate and CA
@@ -79,8 +81,9 @@ The client checks the CA, hostname and enrolled destination SPKI during TLS,
 before sending an HTTP request. It disables redirects and ambient proxies,
 then checks the response identity, host, domain and method/version bindings.
 
-The only served application route is authenticated `GET /health`. It reports
-the caller's own admission/connection IDs and `execution: unavailable`.
+Authenticated `GET /health` reports the caller's own admission/connection IDs and
+`execution: unavailable`. The task profile adds `/rpc` and an authenticated
+AgentCard; its configuration and boundaries are documented separately above.
 No `/mcp`, Vault or arbitrary local router is mounted. `--global-db`,
 `--project-db`, `--profile` and `--daemon` are rejected for this entry point;
 the explicit gateway config owns those choices. Project/user dotenv startup

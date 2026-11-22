@@ -1,6 +1,12 @@
 use super::admission::Connection;
 use super::config::{public_key_digest, GatewayConfig};
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -35,6 +41,13 @@ pub(super) async fn serve(
     tls.alpn_protocols = vec![b"http/1.1".to_vec()];
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     let listener = TcpListener::bind(config.bind).await?;
+    // This is the gateway's own operator-selected local principal. The remote
+    // caller is admitted separately from its TLS proof on each connection.
+    crate::claims_ops::admit_agent_connection(
+        &server,
+        Some(config.agent_identity_id.clone()),
+        true,
+    )?;
     println!(
         "{}",
         json!({"remote_gateway_listening":listener.local_addr()?.to_string(),"execution":"unavailable"})
@@ -62,6 +75,8 @@ pub(super) async fn serve(
                     };
                     let router = Router::new()
                         .route("/health", get(health))
+                        .route("/rpc", post(super::rpc::handle))
+                        .route("/.well-known/agent-card.json", get(super::rpc::agent_card))
                         .with_state(connection);
                     let service = TowerToHyperService::new(router);
                     let _ = tokio::time::timeout(

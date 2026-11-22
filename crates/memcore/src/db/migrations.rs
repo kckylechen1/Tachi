@@ -12,7 +12,7 @@
 //! [`check_schema_version_gate`] and must be bridged to `v39+` using an
 //! archived pre-squash binary. Fresh empty databases (`user_version == 0`)
 //! initialize the complete baseline schema directly and stamp
-//! [`EXPECTED_SCHEMA_VERSION`] (`44` for both profiles).
+//! [`EXPECTED_SCHEMA_VERSION`] (`45` for Product; Portable remains `44`).
 //!
 //! Active shipped migrations:
 //! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
@@ -23,6 +23,7 @@
 //!   append-only trigger triples on `dispatch_adjudications` and
 //!   `mirror_eval_adjudications` (#2012).
 //! - v44: scoped erasure guards on typed revisions and lineage (Portable).
+//! - v45: remote job rejection/replay headers and receipts in the Product A2A mailbox.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -1048,7 +1049,7 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         // Remove v40 column/sentinels so v40 has real DDL work to perform and roll back.
         conn.execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure')",
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure', 'v45_remote_job_mailbox')",
             params![MIGRATION_NS],
         )
         .unwrap();

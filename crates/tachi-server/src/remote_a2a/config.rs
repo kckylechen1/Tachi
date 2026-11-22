@@ -1,3 +1,4 @@
+use super::profile::{repository_id, JobKind};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -9,11 +10,20 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct RepositoryGrant {
+    pub repository: String,
+    pub jobs: Vec<JobKind>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Peer {
     pub agent_identity_id: String,
     pub host_id: String,
     pub public_key_sha256: String,
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub repositories: Vec<RepositoryGrant>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -30,6 +40,7 @@ pub(super) struct GatewayConfig {
     pub private_key: PathBuf,
     pub peer_ca: PathBuf,
     pub peers: Vec<Peer>,
+    pub public_endpoint: Option<String>,
 }
 
 pub(super) fn identifier(value: &str) -> bool {
@@ -62,6 +73,9 @@ impl GatewayConfig {
             return Err("invalid remote gateway identity, schema or enrollment count".into());
         }
         protected_path(&config.home, true)?;
+        if let Some(endpoint) = &config.public_endpoint {
+            validate_endpoint(endpoint)?;
+        }
         let mut keys = HashSet::new();
         let mut identities = HashSet::new();
         for peer in &config.peers {
@@ -80,18 +94,25 @@ impl GatewayConfig {
                 return Err("invalid or ambiguous remote peer enrollment".into());
             }
             if let Some(endpoint) = &peer.endpoint {
-                let url = url::Url::parse(endpoint)?;
-                if url.scheme() != "https"
-                    || url.host_str().is_none()
-                    || !url.username().is_empty()
-                    || url.password().is_some()
-                    || url.query().is_some()
-                    || url.fragment().is_some()
-                    || url.path() != "/"
+                validate_endpoint(endpoint)?;
+            }
+            let mut repositories = HashSet::new();
+            if peer.repositories.len() > 64
+                || (!peer.repositories.is_empty() && config.public_endpoint.is_none())
+            {
+                return Err(
+                    "remote repository grants need a bounded set and explicit public endpoint"
+                        .into(),
+                );
+            }
+            for grant in &peer.repositories {
+                let jobs: HashSet<_> = grant.jobs.iter().collect();
+                if !repository_id(&grant.repository)
+                    || !repositories.insert(&grant.repository)
+                    || jobs.is_empty()
+                    || jobs.len() != grant.jobs.len()
                 {
-                    return Err(
-                        "remote peer endpoint must be an HTTPS origin without credentials".into(),
-                    );
+                    return Err("invalid or ambiguous remote repository grant".into());
                 }
             }
         }
@@ -125,6 +146,21 @@ impl GatewayConfig {
         }
         Ok(roots)
     }
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<(), Box<dyn Error>> {
+    let url = url::Url::parse(endpoint)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err("remote endpoint must be an HTTPS origin without credentials".into());
+    }
+    Ok(())
 }
 
 fn read_operator_file(path: &Path, private: bool) -> Result<Vec<u8>, Box<dyn Error>> {

@@ -12,7 +12,9 @@ import ssl
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -201,6 +203,196 @@ def _pin_endpoint(ca: Path, server_leaf: dict, port: int, payload: dict):
     return server, thread, count
 
 
+_DELEGATION = "urn:tachi:a2a:ext:delegation:v1"
+_PROVENANCE = "urn:tachi:a2a:ext:provenance-receipt:v1"
+_RPC_HEADERS = {"Content-Type": "application/a2a+json", "A2A-Version": "1.0",
+                "A2A-Extensions": f"{_DELEGATION},{_PROVENANCE}"}
+
+
+def _rpc(client, method, params, headers=None, raw=None):
+    body = raw if raw is not None else json.dumps(
+        {"jsonrpc": "2.0", "id": "dogfood-rpc", "method": method, "params": params})
+    return _request(client, "/rpc", headers=_RPC_HEADERS if headers is None else headers,
+                    method="POST", body=body.encode())
+
+
+def _message(job, message_id="message-1"):
+    return {"message": {"messageId": message_id, "role": "ROLE_USER", "parts": [{"data": job}]},
+            "configuration": {"returnImmediately": True, "historyLength": 0}}
+
+
+def _remote_task_rows(db):
+    with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=5)) as conn:
+        return conn.execute("SELECT envelope_id,idempotency_key,body_digest,current_state,state_version "
+                            "FROM a2a_envelopes WHERE kind='tachi.remote_job/v1' ORDER BY 1").fetchall()
+
+
+def _start_gateway(ctx, gateway, config):
+    with gateway.log.open("w") as log:
+        gateway.process = subprocess.Popen(
+            [str(gateway.tachi), "a2a", "remote", "serve", "--config", str(config)],
+            env=gateway.env, cwd=gateway.home, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    _wait_ready(ctx, gateway)
+
+
+def _remote_tasks(ctx, gateway, ca, leaves, alpha, beta, db):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    first = {"kind": "tachi.remote_job/v1", "sender": "agent-cloud", "recipient": "agent-mac",
+             "trust_domain": "dogfood:remote", "idempotency_key": "job-first", "nonce": "nonce-first",
+             "issued_at": now.isoformat().replace("+00:00", "Z"),
+             "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+             "repository": "owner/example", "head_sha": "a" * 40,
+             "origin_claim": {"claim_id": "origin-claim", "transition_version": 4},
+             "job": "review_revision", "question": "Review the selected revision."}
+
+    def send(client, job, message_id="message-1"):
+        status, result = _rpc(client, "SendMessage", _message(job, message_id))
+        ctx.require("remote submission returns a Task", status == 200
+                    and "task" in result.get("result", {}), result)
+        return result["result"]["task"]
+
+    status, card = _request(alpha, "/.well-known/agent-card.json")
+    ctx.check("authenticated AgentCard advertises the closed JSON-RPC profile",
+              status == 200 and card.get("supportedInterfaces", [{}])[0].get("protocolBinding") == "JSONRPC"
+              and card.get("supportedInterfaces", [{}])[0].get("protocolVersion") == "1.0"
+              and card.get("securitySchemes", {}).get("owner_mtls") == {"mtlsSecurityScheme": {}}
+              and {entry["uri"] for entry in card.get("capabilities", {}).get("extensions", [])
+                   if entry.get("required")} == {_DELEGATION, _PROVENANCE}, card)
+    before = _remote_task_rows(db)
+    for headers, expected in (({**_RPC_HEADERS, "A2A-Extensions": _DELEGATION}, -32008),
+                              ({**_RPC_HEADERS, "A2A-Version": "0.3"}, -32009)):
+        status, result = _rpc(alpha, "SendMessage", _message(first), headers=headers)
+        ctx.check("unsupported protocol negotiation is rejected before persistence",
+                  status == 200 and result.get("error", {}).get("code") == expected
+                  and _remote_task_rows(db) == before, result)
+    task = send(alpha, first)
+    provenance = task.get("metadata", {}).get(_PROVENANCE, {})
+    ctx.check("destination refusal distinguishes received from authorization and start",
+              task.get("status", {}).get("state") == "TASK_STATE_REJECTED"
+              and provenance.get("local_claim") is None and provenance.get("local_run_id") is None
+              and provenance.get("origin_claim") == first["origin_claim"]
+              and provenance.get("revision") == 2
+              and [receipt.get("fact") for receipt in provenance.get("receipts", [])]
+                  == ["received", "authorization_refused"]
+              and provenance["receipts"][-1].get("detail") == {"reason": "execution_unavailable"}, task)
+    canonical = json.dumps(first, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ctx.check("receipt binds the complete immutable business digest",
+              provenance.get("input_digest") == hashlib.sha256(canonical).hexdigest(), provenance)
+    replay = send(alpha, first, "different-message-id")
+    ctx.check("message IDs do not change durable business replay", replay == task, replay)
+
+    race = {**first, "idempotency_key": "job-race", "nonce": "nonce-race"}
+    def racing_sender():
+        with closing(_client(ca, gateway.port, leaves["cloud"])) as client:
+            return _rpc(client, "SendMessage", _message(race))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: racing_sender(), range(2)))
+    race_ids = [result.get("result", {}).get("task", {}).get("id") for _, result in results]
+    ctx.check("concurrent first submissions allocate one durable task",
+              all(status == 200 for status, _ in results) and race_ids[0] is not None
+              and race_ids[0] == race_ids[1]
+              and sum(row[1] == "job-race" for row in _remote_task_rows(db)) == 1, results)
+
+    before = _remote_task_rows(db)
+    conflicts = [("cross-repository key reuse", {**first, "repository": "owner/other"}),
+                 ("changed head with same key", {**first, "head_sha": "b" * 40}),
+                 ("nonce reuse under a new key", {**first, "idempotency_key": "job-other-key"})]
+    for label, changed in conflicts:
+        status, result = _rpc(alpha, "SendMessage", _message(changed))
+        ctx.check(label + " is refused without rewriting history",
+                  status == 200 and result.get("error", {}).get("code") == -32602
+                  and _remote_task_rows(db) == before, result)
+
+    lost = {**first, "idempotency_key": "job-lost-ack", "nonce": "nonce-lost-ack"}
+    with closing(_client(ca, gateway.port, leaves["cloud"])) as client:
+        raw = json.dumps({"jsonrpc": "2.0", "id": "lost-ack", "method": "SendMessage",
+                          "params": _message(lost)})
+        client.request("POST", "/rpc", body=raw.encode(), headers=_RPC_HEADERS)
+        deadline = time.monotonic() + 5
+        observed = []
+        while time.monotonic() < deadline:
+            observed = [row for row in _remote_task_rows(db) if row[1] == "job-lost-ack"]
+            if observed:
+                break
+            time.sleep(0.01)
+        ctx.require("destination commits before the intentionally unread acknowledgment",
+                    len(observed) == 1, observed)
+        # Closing without getresponse models the response being lost to the origin.
+    with closing(_client(ca, gateway.port, leaves["cloud"])) as client:
+        recovered = send(client, lost)
+    ctx.check("fresh TLS connection reconciles a lost acknowledgment without a new task",
+              recovered.get("id") == observed[0][0]
+              and sum(row[1] == "job-lost-ack" for row in _remote_task_rows(db)) == 1, recovered)
+
+    for method in ("GetTask", "CancelTask", "SubscribeToTask"):
+        status, foreign = _rpc(beta, method, {"id": task["id"]})
+        _, missing = _rpc(beta, method, {"id": "remote-task-missing"})
+        ctx.check(f"another enrolled principal cannot {method} a task by ID",
+                  status == 200 and foreign == missing
+                  and foreign.get("error", {}).get("code") == -32001, foreign)
+    _, empty = _rpc(beta, "ListTasks", {"pageSize": 1, "historyLength": 0})
+    ctx.check("listing filters unauthorized tasks before totals or cursors",
+              empty.get("result") == {"tasks": [], "totalSize": 0, "pageSize": 1, "nextPageToken": ""}, empty)
+    _, foreign_cursor = _rpc(beta, "ListTasks", {"pageSize": 1, "pageToken": task["id"]})
+    ctx.check("a foreign pagination cursor grants no task access",
+              foreign_cursor.get("error", {}).get("code") == -32602, foreign_cursor)
+    for method, expected in (("CancelTask", -32002), ("SubscribeToTask", -32004)):
+        _, result = _rpc(alpha, method, {"id": task["id"]})
+        ctx.check(f"terminal refusal does not fabricate {method} success",
+                  result.get("error", {}).get("code") == expected, result)
+
+    before = _remote_task_rows(db)
+    expired = {**first, "idempotency_key": "expired-first", "nonce": "expired-nonce",
+               "issued_at": "2000-01-01T00:00:00Z", "expires_at": "2000-01-01T00:10:00Z"}
+    dgx = {key: value for key, value in first.items() if key != "question"}
+    dgx.update(sender="agent-second", job="verify_pr", pull_request=42,
+               idempotency_key="job-dgx", nonce="nonce-dgx")
+    invalid = [("expired first submission", alpha, expired),
+               ("worker-selected command", alpha, {**first, "command": "whoami"}),
+               ("DGX2 memory context", beta, {**dgx, "context": {"source_ref": "note:private",
+                    "source_revision": "v1", "text": "Selected note",
+                    "sha256": hashlib.sha256(b"Selected note").hexdigest()}}),
+               ("DGX2 review question", beta, {**dgx, "question": ""}),
+               ("spoofed sender in business data", beta, first),
+               ("wrong audience domain", alpha, {**first, "trust_domain": "another-owner"})]
+    for label, client, invalid_job in invalid:
+        _, result = _rpc(client, "SendMessage", _message(invalid_job))
+        ctx.check(label + " is refused before durable submission",
+                  "error" in result and _remote_task_rows(db) == before, result)
+    duplicate = json.dumps({"jsonrpc": "2.0", "id": "duplicate", "method": "SendMessage",
+                            "params": _message(first)})
+    duplicate = duplicate.replace('"sender": "agent-cloud"',
+                                  '"sender": "agent-second", "sender": "agent-cloud"')
+    _, result = _rpc(alpha, "SendMessage", {}, raw=duplicate)
+    ctx.check("duplicate authority fields are rejected before JSON object collapse",
+              "error" in result and _remote_task_rows(db) == before, result)
+
+    ids, cursor, pages = [], None, []
+    for _ in range(4):
+        params = {"pageSize": 1, "historyLength": 0, "includeArtifacts": False}
+        if cursor:
+            params["pageToken"] = cursor
+        _, result = _rpc(alpha, "ListTasks", params)
+        page = result.get("result", {})
+        pages.append(page)
+        ids.extend(entry["id"] for entry in page.get("tasks", []))
+        cursor = page.get("nextPageToken")
+        if not cursor:
+            break
+    ctx.check("bounded pagination returns each authorized task exactly once",
+              len(ids) == len(set(ids)) == 3 and not cursor
+              and all(page.get("totalSize") == 3 for page in pages), pages)
+    beta_task = send(beta, dgx)
+    with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as conn:
+        counts = {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  for table in ("session_claims", "harness_session_attachments", "dispatch_outcomes")}
+    ctx.check("rejected remote jobs create no local claims or execution artifacts",
+              all(count == 0 for count in counts.values()), counts)
+    return dgx, beta_task
+
+
 def register_scenarios(scenario, Daemon, free_port):
     @scenario("remote-admission", "a2a-remote", "identity", shared_daemon=False)
     def remote_admission_enforces_tls_identity_and_revocation(ctx):
@@ -219,10 +411,13 @@ def register_scenarios(scenario, Daemon, free_port):
             "schema_version": "tachi.remote_gateway.v1", "agent_identity_id": "agent-mac",
             "host_id": "host-mac", "issuer_id": "issuer-dogfood", "trust_domain": domain,
             "home": str(gateway.app_home), "bind": f"127.0.0.1:{gateway.port}",
+            "public_endpoint": f"https://localhost:{gateway.port}",
             "certificate": leaves["server"]["certificate"],
             "private_key": leaves["server"]["private_key"], "peer_ca": str(ca),
             "peers": [{"agent_identity_id": identity, "host_id": host,
-                       "public_key_sha256": leaves[name]["public_key_sha256"]}
+                       "public_key_sha256": leaves[name]["public_key_sha256"],
+                       "repositories": [{"repository": repo, "jobs": ["review_revision", "verify_pr"]}
+                                        for repo in ("owner/example", "owner/other")]}
                       for name, identity, host in peers],
         }
         origin_config = {
@@ -279,13 +474,7 @@ def register_scenarios(scenario, Daemon, free_port):
                 conn.execute("INSERT INTO processed_events (event_hash,event_id,worker,created_at) "
                              "VALUES (?,?,?,?)", marker)
                 conn.commit()
-            with gateway.log.open("w") as log:
-                gateway.process = subprocess.Popen(
-                    [str(gateway.tachi), "a2a", "remote", "serve", "--config", str(gateway_path)],
-                    env=gateway.env, cwd=gateway.home, stdout=log, stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            _wait_ready(ctx, gateway)
+            _start_gateway(ctx, gateway, gateway_path)
             # Give ordinary startup replay time to act before checking isolation.
             time.sleep(0.5)
             before = _snapshot(db)
@@ -356,6 +545,8 @@ def register_scenarios(scenario, Daemon, free_port):
                       {"returncode": result.returncode, "http_requests": counts["requests"],
                        "output": _output(result)})
 
+            dgx_request, dgx_task = _remote_tasks(ctx, gateway, ca, leaves, alpha, beta, db)
+
             before_revoke = _snapshot(db)
             result = cli(gateway, "revoke", gateway_path, "--admission", alpha_health["peer"]["admission_id"])
             ctx.require("operator CLI appends mTLS key revocation", result.returncode == 0
@@ -364,6 +555,10 @@ def register_scenarios(scenario, Daemon, free_port):
                         alpha.sock is alpha_socket, "same socket before post-revocation request")
             denied, evidence = _refused(alpha)
             ctx.check("revoked key loses authority on an existing keep-alive connection", denied, evidence)
+            task_rows = _remote_task_rows(db)
+            rpc_status, rpc_denial = _rpc(alpha, "ListTasks", {})
+            ctx.check("revocation also removes RPC read and submission authority",
+                      rpc_status == 403 and _remote_task_rows(db) == task_rows, rpc_denial)
             fresh = connection(leaves["cloud"])
             denied, evidence = _refused(fresh)
             fresh.close()
@@ -385,6 +580,33 @@ def register_scenarios(scenario, Daemon, free_port):
                                         "FROM processed_events WHERE event_hash=?", (marker[0],)).fetchall()
             ctx.check("gateway and revoke do not replay unrelated background jobs",
                       retained == [marker], {"unchanged_pending_job": retained == [marker]})
+
+            for client in clients:
+                client.close()
+            gateway.stop()
+            _start_gateway(ctx, gateway, gateway_path)
+            resumed = connection(leaves["second"])
+            _, readback = _rpc(resumed, "GetTask", {"id": dgx_task["id"], "historyLength": 0})
+            _, replay = _rpc(resumed, "SendMessage", _message(dgx_request, "restart-replay"))
+            ctx.check("gateway restart retains exact task receipts and replay identity",
+                      readback.get("result") == dgx_task
+                      and replay.get("result", {}).get("task") == dgx_task
+                      and _remote_task_rows(db) == task_rows, {"get": readback, "replay": replay})
+            resumed.close()
+            gateway.stop()
+            gateway_config["peers"][1]["repositories"] = []
+            _private_text(gateway_path, json.dumps(gateway_config))
+            _start_gateway(ctx, gateway, gateway_path)
+            ungranted = connection(leaves["second"])
+            _, readback = _rpc(ungranted, "GetTask", {"id": dgx_task["id"]})
+            _, listed = _rpc(ungranted, "ListTasks", {})
+            _, replay = _rpc(ungranted, "SendMessage", _message(dgx_request))
+            ctx.check("removing a repository grant hides old tasks and prevents replay disclosure",
+                      readback.get("error", {}).get("code") == -32001
+                      and listed.get("result", {}).get("totalSize") == 0
+                      and listed.get("result", {}).get("tasks") == []
+                      and "error" in replay and _remote_task_rows(db) == task_rows,
+                      {"get": readback, "list": listed, "replay": replay})
         finally:
             for client in clients:
                 client.close()
