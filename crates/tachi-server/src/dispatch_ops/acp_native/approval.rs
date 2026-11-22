@@ -271,6 +271,7 @@ impl NativeAcpApprovalContext {
                 },
             )
         };
+        self.server.task_notifications.notify(dispatch);
         let deadline = tokio::time::Instant::from_std(guard.expires);
         let mut revisions = tokio::time::interval(Duration::from_secs(1));
         let decision = loop {

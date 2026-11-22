@@ -69,6 +69,77 @@ fn admit(server: &MemoryServer, action: &str) -> Result<ResultOwner, rmcp::Error
     current_owner(server)
 }
 
+pub(crate) fn notification_owner(server: &MemoryServer) -> Result<ResultOwner, rmcp::ErrorData> {
+    admit(server, "result")
+}
+
+/// A hint never mints a result handle, reads result.md, or supplies input authority.
+pub(crate) fn status_notification(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<rmcp::model::ServerNotification>, rmcp::ErrorData> {
+    use rmcp::model::{ServerNotification, TaskStatusNotification, TaskStatusNotificationParams};
+    let owner = notification_owner(server)?;
+    let anchor = anchor_for(server, dispatch_id)?;
+    let (binding, status) = {
+        let lock = anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(unix)]
+        anchor.validate_current_path().map_err(|_| unavailable())?;
+        let binding = read_binding(&anchor, &owner, dispatch_id)?;
+        let status = read_status(&anchor, dispatch_id)?;
+        (binding, status)
+    };
+    let payload = match status["state"].as_str() {
+        Some("TASK_STATE_COMPLETED") => TaskPayload::Completed {
+            result: Default::default(),
+        },
+        Some("TASK_STATE_FAILED") => TaskPayload::Failed {
+            error: serde_json::from_value(
+                json!({"code":-32000,"message":"Run failed; read canonical staff status."}),
+            )
+            .map_err(|_| unavailable())?,
+        },
+        Some("TASK_STATE_CANCELED") => TaskPayload::Cancelled,
+        Some("TASK_STATE_INPUT_REQUIRED") => TaskPayload::InputRequired {
+            input_requests: Default::default(),
+        },
+        Some("TASK_STATE_WORKING")
+            if status["native_session"]["phase"] == "awaiting_instruction"
+                && status["native_session"]["supervised"] == true =>
+        {
+            TaskPayload::InputRequired {
+                input_requests: Default::default(),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let task_id = if let Some(result) = binding.result {
+        if dispatch_from_task(&result.task_id)? != dispatch_id {
+            return Err(unavailable());
+        }
+        result.task_id
+    } else {
+        let key = serde_json::to_vec(&(dispatch_id, &binding.owner)).map_err(|_| unavailable())?;
+        format!(
+            "{TASK_PREFIX}{dispatch_id}:{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &key).simple()
+        )
+    };
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
+    let updated = status["updated_at"]
+        .as_str()
+        .filter(|stamp| crate::utils::parse_rfc3339(stamp).is_ok())
+        .unwrap_or(&now);
+    let mut task = Task::new(task_id, payload.status(), updated, updated).with_ttl_ms(TTL_MS);
+    task.status_message = Some("Wake hint only; read canonical tachi_staff status.".into());
+    Ok(Some(ServerNotification::TaskStatusNotification(
+        TaskStatusNotification::new(TaskStatusNotificationParams::from(DetailedTask::new(
+            task, payload,
+        ))),
+    )))
+}
+
 /// Called once before the launcher can execute a worker. Historical/unbound
 /// runs remain usable through their existing facade; they gain no Tasks grant.
 pub(crate) fn prepare_run_binding(

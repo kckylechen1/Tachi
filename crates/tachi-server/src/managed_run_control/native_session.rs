@@ -156,6 +156,9 @@ pub(crate) fn update_phase(
             &serde_json::to_vec_pretty(&status).map_err(|e| e.to_string())?,
             &fence,
         )?;
+        drop(fence);
+        drop(_guard);
+        server.task_notifications.notify(dispatch_id);
         let projection = json!({
             "state": status["state"],
             "dispatch_id": dispatch_id, "status_revision": status["status_revision"],
