@@ -1698,7 +1698,7 @@ mod tests {
                 supported,
                 "persisted policy {method}/{version}/{scope}",
             );
-            let result = attach_harness_session(&mut conn, &input, &verified_host, 30 * 60);
+            let result = attach_harness_session(&conn, &input, &verified_host, 30 * 60);
             if !supported {
                 result.expect_err("unsupported receipt policy cannot authorize an attachment");
                 let count: i64 = conn
@@ -1721,7 +1721,7 @@ mod tests {
                          strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
                 ["d".repeat(64)],
             ).unwrap();
-            attach_harness_session(&mut conn, &input, &verified_host, 30 * 60)
+            attach_harness_session(&conn, &input, &verified_host, 30 * 60)
                 .expect_err("an exact attachment replay must recheck current verified authority");
             assert_eq!(attachment_row_bytes(&conn), before);
         }
