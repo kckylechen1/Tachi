@@ -3,6 +3,7 @@ use super::*;
 use crate::managed_run_control::AnchoredRunStatus;
 use std::path::PathBuf;
 
+mod notifications;
 mod reconnect;
 
 const PROJECT: &str = "mcp-task-http-project";

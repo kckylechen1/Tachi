@@ -820,6 +820,9 @@ async fn launch_canonical_dispatch(
     }
 
     // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
+    #[cfg(any(unix, windows))]
+    let _status_hint =
+        crate::server_state::task_notifications::NotifyOnDrop::new(server, Some(&dispatch_id));
     // Seed the receipt before prompt assembly or backend preparation so
     // pollers can observe the admitted assignment immediately.
     let harness_server_url =

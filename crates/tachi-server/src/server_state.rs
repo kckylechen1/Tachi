@@ -4,6 +4,8 @@ mod capabilities;
 mod init;
 mod runtime;
 mod tachi_server;
+#[cfg(any(unix, windows))]
+pub(crate) mod task_notifications;
 
 pub(crate) use self::cache::{
     CachedResult, CACHEABLE_TOOLS, CACHE_INVALIDATING_TOOLS, TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL,

@@ -30,6 +30,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import queue
 import shutil
 import signal
 import socket
@@ -59,7 +60,7 @@ RETIRED_TOOLS = ("tachi_tune",)
 class McpSession:
     """One MCP session over the daemon's streamable HTTP endpoint."""
 
-    def __init__(self, url: str, headers: dict[str, str] | None = None):
+    def __init__(self, url: str, headers: dict[str, str] | None = None, version: str = "2025-06-18"):
         self.url = url
         self.headers = {
             "Content-Type": "application/json",
@@ -74,7 +75,7 @@ class McpSession:
                 "id": self._id(),
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": version,
                     "capabilities": {},
                     "clientInfo": {"name": "tachi-dogfood-e2e", "version": "1"},
                 },
@@ -145,6 +146,62 @@ class McpSession:
         except ValueError:
             payload = text
         return not result.get("isError", False), payload, text
+
+
+class TaskHints:
+    """A real legacy GET /mcp stream, consumed exactly as wake hints."""
+
+    def __init__(self, session: McpSession):
+        self.session = session
+        self.events = queue.Queue()
+        self.response = urllib.request.urlopen(urllib.request.Request(
+            session.url, headers={**session.headers, "Accept": "text/event-stream",
+                                  "Mcp-Session-Id": session.session_id}, method="GET"), timeout=30)
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            for line in self.response:
+                if line.startswith(b"data:"):
+                    data = line[5:].strip()
+                    if not data:
+                        continue
+                    try:
+                        value = json.loads(data)
+                    except ValueError:
+                        continue
+                    if isinstance(value, dict) and value.get("method") == "notifications/tasks":
+                        self.events.put(value)
+        except OSError:
+            pass
+
+    def wait(self, dispatch: str, status: str, seconds: float = 10) -> dict:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                event = self.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            params = event.get("params", {})
+            task_id = params.get("taskId", "")
+            suffix = task_id.removeprefix(f"tachi-result:{dispatch}:")
+            if (event.get("jsonrpc") == "2.0" and "id" not in event
+                    and task_id.startswith(f"tachi-result:{dispatch}:")
+                    and len(suffix) == 32 and all(c in "0123456789abcdef" for c in suffix)
+                    and params.get("status") == status):
+                return event
+        return {}
+
+    def close(self):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    self.session.url, headers={**self.session.headers,
+                                               "Mcp-Session-Id": self.session.session_id}, method="DELETE"), timeout=5):
+                pass
+        finally:
+            self.reader.join(timeout=2)
+            self.response.close()
 
 
 # ── Isolated daemon and fixture ──────────────────────────────────────────────
@@ -1447,6 +1504,46 @@ def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> Non
                                  task="plan a bounded feature", staffing_reason="explicit_user_request")
     ctx.check("legacy planning advice cannot authorize native Staff", not ok
               and "no admitted native Staff Session" in raw, raw)
+    ctx.done()
+
+
+@scenario("tasks", "task-push", shared_daemon=False)
+def native_status_transitions_wake_the_legacy_sse_owner(ctx: Context) -> None:
+    root = ctx.daemon.home / f"task-push-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    native_fixture(daemon, root)
+    hints = None
+    try:
+        daemon.start()
+        headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"push-owner-{ctx.tag}",
+                   "X-Tachi-Profile": "standard", "X-Tachi-Client": "reiclaw"}
+        owner = McpSession(daemon.url, headers)
+        hints = TaskHints(McpSession(daemon.url, headers, version="2025-11-25"))
+        ok, result, raw = owner.call("tachi_staff", action="start", profile="codex_sol_review",
+                                     task="Read the repository and report.", staffing_reason="explicit_user_request", format="json")
+        dispatch = find_key(result, "dispatch_id") if ok else None
+        ctx.require("native task started for SSE acceptance", bool(dispatch), raw)
+        hint = hints.wait(dispatch, "input_required")
+        ctx.require("legacy SSE receives a supervised pause wake hint", bool(hint), hint)
+        ok, status, raw = owner.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+        ctx.check("wake hint preserves canonical supervised WORKING state", ok
+                  and status.get("state") == "TASK_STATE_WORKING"
+                  and status.get("native_session", {}).get("phase") == "awaiting_instruction", status if ok else raw)
+        sidecar = daemon.app_home / "runs" / dispatch / "mcp-tasks.json"
+        ctx.check("SSE pause does not mint a result handle", json.loads(sidecar.read_text()).get("result") is None, sidecar.read_text())
+        ok, result, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                                     expected_status_revision=status["status_revision"], format="json")
+        ctx.require("owner finishes the supervised session", ok, raw)
+        hint = hints.wait(dispatch, "completed")
+        ctx.require("committed native completion emits a wake hint", bool(hint), hint)
+        ok, status, raw = owner.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+        ctx.check("completion hint is confirmed by canonical status", ok and status.get("state") == "TASK_STATE_COMPLETED", status if ok else raw)
+        ctx.check("terminal hint still does not mint a result handle", json.loads(sidecar.read_text()).get("result") is None, sidecar.read_text())
+    finally:
+        if hints:
+            hints.close()
+        daemon.stop()
     ctx.done()
 
 

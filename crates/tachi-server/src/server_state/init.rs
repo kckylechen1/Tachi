@@ -331,6 +331,8 @@ impl MemoryServer {
 
         let server = Self {
             #[cfg(any(unix, windows))]
+            task_notifications: Arc::new(super::task_notifications::Registry::default()),
+            #[cfg(any(unix, windows))]
             native_acp_approvals: Arc::new(crate::dispatch_ops::NativeAcpApprovals::default()),
             managed_run_controls: Arc::new(
                 crate::managed_run_control::ManagedRunControlRegistry::default(),

@@ -1116,6 +1116,11 @@ pub(crate) async fn handle_tachi_complete(
     refuse_native_worker_completion(server, params.dispatch_id.as_deref())?;
     ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
     let _ = admit_managed_completion(server, params.dispatch_id.as_deref(), false)?;
+    #[cfg(any(unix, windows))]
+    let _status_hint = crate::server_state::task_notifications::NotifyOnDrop::new(
+        server,
+        params.dispatch_id.as_deref(),
+    );
     let resolved_flow_id = params
         .dispatch_id
         .as_deref()
