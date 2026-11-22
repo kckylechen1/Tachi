@@ -260,8 +260,9 @@ fn fresh_portable_at_product_bump_stops_at_rollback_floor() {
 #[test]
 fn portable_band_refuses_missing_old_or_claimed_product_sentinel_before_backup() {
     for (version, key) in [
-        (41_u32, "v41_host_typed_records"),
-        (43, "v39_mirror_eval_identity"),
+        (44_u32, "v41_host_typed_records"),
+        (44, "v39_mirror_eval_identity"),
+        (44, "v44_typed_record_erasure"),
     ] {
         let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
         let conn = Connection::open(&path).unwrap();
@@ -310,12 +311,12 @@ fn portable_pending_recovers_missing_any_index_and_product_bump_restart_is_curre
     );
     assert_eq!(
         take_invocations(),
-        1,
-        "selection runs pending v41 Portable body and vacuously stamps v39 baseline"
+        2,
+        "selection runs pending v41 and v44 Portable bodies and vacuously stamps v39 baseline"
     );
     assert_eq!(
         crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
-        41
+        44
     );
     super::current_store_admission::with_historical_d7(|| {
         let (_dir2, path2) = fixture(StoreProfile::PortableKernel);
@@ -381,7 +382,7 @@ fn preflight_identity_and_header_are_observed_from_one_wal_commit() {
         .borrow_mut()
         .take()
         .expect("actual preflight reads recorded");
-    assert_eq!(header.stored, 41);
+    assert_eq!(header.stored, 44);
     assert_eq!(
         header.probe,
         crate::db::version_policy::ProfileProbe::Portable
@@ -455,6 +456,13 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
 
 #[test]
 fn portable_band_to_full_pending_needs_actual_backup_coverage() {
+    super::current_store_admission::with_historical_portable_inventory(
+        43,
+        check_band_to_full_pending,
+    );
+}
+
+fn check_band_to_full_pending() {
     let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
     stamp_and_mark(&path, 41);
     take_invocations();
@@ -490,7 +498,7 @@ fn portable_band_to_full_pending_needs_actual_backup_coverage() {
 #[test]
 fn empty_to_markerless_portable_band_requires_marker_fallback_backup() {
     let (_source_dir, source) = shipped_fixture(StoreProfile::PortableKernel);
-    stamp_and_mark(&source, 41);
+    stamp_and_mark(&source, 44);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tachi-memory.db");
     drop(Connection::open(&path).unwrap());
@@ -512,7 +520,7 @@ fn empty_to_markerless_portable_band_requires_marker_fallback_backup() {
         error,
         MemoryError::SchemaChangedDuringOpen {
             preflight: 0,
-            current: 41,
+            current: 44,
             ..
         }
     ));
@@ -521,13 +529,13 @@ fn empty_to_markerless_portable_band_requires_marker_fallback_backup() {
     assert!(!super::migration_marker_path(&path).exists());
     assert_eq!(
         crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
-        41
+        44
     );
 }
 
 #[test]
 fn malformed_portable_index_refuses_in_transaction_and_rolls_back() {
-    for version in [39, 41] {
+    for version in [39, 44] {
         let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
         let raw = Connection::open(&path).unwrap();
         raw.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0 AND superseded_by IS NULL;").unwrap();
@@ -567,7 +575,7 @@ fn portable_band_without_later_product_sentinels_does_not_create_them() {
     let raw = Connection::open(&path).unwrap();
     raw.execute_batch("DELETE FROM hard_state WHERE namespace='migrations' AND key IN ('v42_coordination_mailbox','v43_adjudication_provenance');").unwrap();
     drop(raw);
-    stamp_and_mark(&path, 41);
+    stamp_and_mark(&path, 44);
     let before = sentinels(&Connection::open(&path).unwrap());
     take_invocations();
     let store = MemoryStore::open_with_context(
@@ -578,7 +586,7 @@ fn portable_band_without_later_product_sentinels_does_not_create_them() {
     assert_eq!(take_invocations(), 0);
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection()).unwrap(),
-        41
+        44
     );
     assert_eq!(sentinels(store.connection()), before);
     assert!(backups(&path).is_empty());
@@ -595,7 +603,7 @@ fn portable_pending_with_missing_typed_records_migrates_before_output_validation
         &context(StoreProfile::PortableKernel, true),
     )
     .unwrap();
-    assert_eq!(take_invocations(), 1);
+    assert_eq!(take_invocations(), 2);
     let has_typed_records: i64 = store
         .connection()
         .query_row(
@@ -605,10 +613,10 @@ fn portable_pending_with_missing_typed_records_migrates_before_output_validation
         )
         .unwrap();
     assert_eq!(has_typed_records, 1);
-    crate::db::migrations::validate_portable_schema_integrity(store.connection(), 41).unwrap();
+    crate::db::migrations::validate_portable_schema_integrity(store.connection(), 44).unwrap();
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection()).unwrap(),
-        41
+        44
     );
     assert_eq!(backups(&path).len(), 1);
 }
@@ -660,7 +668,7 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
     assert!(matches!(
         error,
         MemoryError::SchemaChangedDuringOpen {
-            preflight: 43,
+            preflight: 44,
             current: 39,
             ..
         }
@@ -672,7 +680,7 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
 #[test]
 fn status_probe_changes_no_database_or_sidecars_and_refuses_pending_wal() {
     let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
-    stamp_and_mark(&path, 41);
+    stamp_and_mark(&path, 44);
     let before = std::fs::read(&path).unwrap();
     let marker = std::fs::read(super::migration_marker_path(&path)).unwrap();
     let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap())
@@ -681,7 +689,7 @@ fn status_probe_changes_no_database_or_sidecars_and_refuses_pending_wal() {
         .collect();
     assert!(matches!(
         crate::store_version_status(&path, StoreProfile::PortableKernel.into()),
-        crate::StoreVersionStatus::Current { stamp: 41 }
+        crate::StoreVersionStatus::Current { stamp: 44 }
     ));
     assert!(matches!(
         crate::store_version_status(&path, StoreProfile::TachiFull.into()),
@@ -723,7 +731,7 @@ fn portable_band_reopen_preserves_stamp_schema_and_matching_backup_marker() {
     let context =
         DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
     drop(MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap());
-    stamp_and_mark(&path, 41);
+    stamp_and_mark(&path, 44);
     let before = super::inventory::schema_inventory(&Connection::open(&path).unwrap());
     let cookie: u32 = Connection::open(&path)
         .unwrap()
@@ -737,7 +745,7 @@ fn portable_band_reopen_preserves_stamp_schema_and_matching_backup_marker() {
     };
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection()).unwrap(),
-        41
+        44
     );
     drop(store);
     // Compare equally fresh offline connections: vec0 exposes its transient
@@ -929,24 +937,115 @@ fn pre_baseline_versions_refuse_across_all_open_doors_without_mutating_store() {
 /// before handing out a writable connection.
 #[test]
 fn maintenance_read_write_door_requires_complete_portable_band_shape() {
-    for version in [41, 42, 43] {
-        let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
-        stamp_and_mark(&path, version);
-        drop(
-            MemoryStore::open_existing_read_write(path.to_str().unwrap())
-                .expect("healthy Portable band store opens for maintenance"),
-        );
+    super::current_store_admission::with_historical_portable_inventory(43, || {
+        for version in [41, 42, 43] {
+            check_maintenance_shape(version);
+        }
+    });
+    check_maintenance_shape(44);
+}
 
-        let raw = Connection::open(&path).unwrap();
-        raw.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0 AND superseded_by IS NULL;").unwrap();
-        drop(raw);
-        let error = match MemoryStore::open_existing_read_write(path.to_str().unwrap()) {
-            Ok(_) => panic!("non-unique identity index is not a valid Portable shape"),
-            Err(error) => error,
+fn check_maintenance_shape(version: u32) {
+    let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
+    stamp_and_mark(&path, version);
+    drop(
+        MemoryStore::open_existing_read_write(path.to_str().unwrap())
+            .expect("healthy Portable band store opens for maintenance"),
+    );
+
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0 AND superseded_by IS NULL;").unwrap();
+    drop(raw);
+    let error = match MemoryStore::open_existing_read_write(path.to_str().unwrap()) {
+        Ok(_) => panic!("non-unique identity index is not a valid Portable shape"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|name| name.contains("idx_memories_idless_identity_active"))),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn v44_upgrades_shipped_typed_record_guards_and_preserves_rows() {
+    for (profile, old_version) in [
+        (StoreProfile::PortableKernel, 41),
+        (StoreProfile::TachiFull, 43),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prior.db");
+        let kind = crate::RecordKind {
+            id: crate::RecordKindId {
+                name: "episode".into(),
+                version: 1,
+            },
+            key_schema: serde_json::json!({"type":"object", "properties":{"agent_id":{"type":"string"}}, "additionalProperties":false}),
+            payload_schema: serde_json::json!({"type":"string"}),
         };
-        assert!(
-            matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|name| name.contains("idx_memories_idless_identity_active"))),
-            "{error:?}"
+        let writer =
+            crate::RecordWriter::from_host_config("host", "personal", vec![kind.id.clone()])
+                .unwrap();
+        let record = crate::TypedRecordInput {
+            id: "historical".into(),
+            kind: kind.id.clone(),
+            keys: serde_json::json!({"agent_id":"a"}),
+            payload: serde_json::json!("legacy content"),
+            links: vec![],
+        };
+        let policy = crate::KernelPolicy {
+            record_registry: Some(std::sync::Arc::new(
+                crate::RecordRegistry::new(vec![kind]).unwrap(),
+            )),
+            ..Default::default()
+        };
+        let before = crate::db::migrations::catalogue::test_support::with_prefix(43, || {
+            let mut store = MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &DbOpenContext::create_fresh()
+                    .with_exact_profile(profile)
+                    .with_exact_role("personal"),
+            )
+            .unwrap()
+            .with_kernel_policy(policy.clone());
+            store
+                .append_typed_record(&writer, &record, None)
+                .unwrap()
+                .record
+        });
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&raw).unwrap(),
+            old_version
         );
+        let old_guards = super::inventory::query_rows(&raw,"SELECT sql FROM sqlite_schema WHERE name IN ('typed_records_no_delete','typed_record_supersessions_no_delete') ORDER BY name");
+        assert_eq!(old_guards.len(), 2);
+        assert!(!format!("{old_guards:?}").contains("tachi_typed_record_erasure_enabled"));
+        drop(raw);
+        assert!(
+            matches!(MemoryStore::open_with_context(path.to_str().unwrap(),&context(profile,false)),Err(MemoryError::SchemaMigrationOptInRequired {stored,expected:44,..}) if stored==old_version)
+        );
+        let mut store = MemoryStore::open_with_context(
+            path.to_str().unwrap(),
+            &context(profile, true).with_exact_role("personal"),
+        )
+        .unwrap()
+        .with_kernel_policy(policy);
+        let conn = store.connection();
+        assert_eq!(
+            crate::db::migrations::read_schema_version(conn).unwrap(),
+            44
+        );
+        assert_eq!(store.get_typed_record(&record.id).unwrap(), Some(before));
+        crate::db::validate_persistent_trigger_inventory(conn, true).unwrap();
+        assert_eq!(backups(&path).len(), 1);
+        let receipt = store
+            .purge_typed_records(
+                &writer,
+                &std::collections::BTreeMap::from([("agent_id".into(), "a".into())]),
+            )
+            .unwrap();
+        assert_eq!(receipt.erased_records, 1);
+        drop(store);
+        MemoryStore::open_with_context(path.to_str().unwrap(), &context(profile, false)).unwrap();
     }
 }

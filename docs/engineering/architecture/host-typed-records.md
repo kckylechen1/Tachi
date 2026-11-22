@@ -80,7 +80,7 @@ changed content, writer or lineage is refused. Concurrent corrections to one
 predecessor have one winner.
 
 The predecessor row is never updated, including access statistics. Its
-`superseded_by` response field is derived from the append-only lineage ledger.
+`superseded_by` response field is derived from the lineage ledger.
 The receipt consequently keeps `source_revision_before == source_revision_after`
 and identifies the route as `typed_record_revision_v1`. Its event effects name
 `typed_records.append` and `typed_record_supersessions.append`. Ordinary
@@ -88,6 +88,13 @@ and identifies the route as `typed_record_revision_v1`. Its event effects name
 
 The two new tables use `WITHOUT ROWID`. Persistent triggers deny UPDATE,
 DELETE and conflicting INSERT OR REPLACE, even inside the typed write scope.
+Migration 44 adds a separate transaction-scoped DELETE grant for
+`purge_typed_records(writer, key_filters)`. All filters must match exact string
+values and at least one is required. The writer needs the store role and a grant
+for each affected kind/version, including the opposite endpoint of any removed
+edge. The transaction returns counts of erased revisions and lineage edges.
+Audit receipts retain IDs and digests. They contain no record payload or keys.
+
 The kind namespace also checks replacement victims by physical rowid and
 refuses shadowed rowid layouts. These protections work with recursive triggers
 both on and off. Open admission checks canonical trigger definitions and the
@@ -140,9 +147,11 @@ current 39/40 to 41 migration tests run outside that scope.
 
 SQLite image backups retain typed rows, lineage, kind definitions and receipts.
 The older Hypermem memories/vector snapshot format cannot preserve them and
-refuses any nonempty typed state before creating a destination. Typed records
-are retrieved explicitly by id; ordinary note search is not a typed-record
-search API. Neither production migration nor adoption of a new dependency pin
+refuses any nonempty typed state before creating a destination. Use `get_typed_record` for one ID or `list_typed_records` for a bounded
+chronological query. `TypedRecordQuery` supports exact kind/version and key
+filters. Inclusive time bounds apply to `created_at` or a named key before
+ordering and limiting. ISO dates denote midnight UTC. Results include verified
+content digests and default to current revisions. Neither production migration nor adoption of a new dependency pin
 is implied by adding this capability.
 
 ## Verification contracts

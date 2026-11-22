@@ -670,6 +670,12 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
             Site {
                 symbol: "LINEAGE_DELETE",
                 trigger: "TYPED_RECORD_SUPERSESSIONS_NO_DELETE",
+                ddl: "0cf065d2b138aa62",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "LINEAGE_DELETE_V41",
+                trigger: "TYPED_RECORD_SUPERSESSIONS_NO_DELETE",
                 ddl: "727b135d09e2ffec",
                 occurrences: 1,
             },
@@ -688,6 +694,12 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
             Site {
                 symbol: "RECORD_DELETE",
                 trigger: "TYPED_RECORDS_NO_DELETE",
+                ddl: "f3832d5c294c9eff",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECORD_DELETE_V41",
+                trigger: "TYPED_RECORDS_NO_DELETE",
                 ddl: "645f3bedd51ecbdd",
                 occurrences: 1,
             },
@@ -703,13 +715,26 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 ddl: "1c3bd67b31b31941",
                 occurrences: 1,
             },
+            Site {
+                symbol: "migrate_v44",
+                trigger: "TYPED_RECORDS_NO_DELETE",
+                ddl: "37560da2a9e68837",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "migrate_v44",
+                trigger: "TYPED_RECORD_SUPERSESSIONS_NO_DELETE",
+                ddl: "292de75d25a517e9",
+                occurrences: 1,
+            },
         ],
-        reason: "the nine constants are canonical v41 typed-record, lineage and \
-                 kind-registry guards. install executes them on the migration \
+        reason: "KIND_*/LINEAGE_*/RECORD_*_V41 constants are historical v41 \
+                 typed-record, lineage, and kind-registry guards; LINEAGE_DELETE, \
+                 RECORD_DELETE, and migrate_v44 replace the delete triggers in \
+                 v44 with connection-local tachi_typed_record_erasure_enabled() \
+                 gating. install and migrate_v44 execute on the migration \
                  connection supplied by the catalogue; this file names no \
-                 MemoryStore connection doorway. Constants, installer and v41 \
-                 catalogue call read by the Codex census audit 2026-11-03. The \
-                 machine basis establishes only the documented file-local absence.",
+                 MemoryStore connection doorway.",
     },
     Exemption {
         path: "crates/memcore/src/db/verified_admissions.rs",
@@ -1027,6 +1052,36 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  probe against the original statement prefix. Re-derived: this \
                  dedicated file names no store doorway, so the triggers cannot \
                  reach a guarded MemoryStore connection from here.",
+    },
+    Exemption {
+        path: "crates/portable-kernel/tests/portable_contract/typed_record_contract.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "scoped_purge_removes_only_matching_rows_and_incident_edges_in_one_commit",
+                trigger: "STOP_PURGE",
+                ddl: "0f3faff6fa77db8a",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "scoped_purge_removes_only_matching_rows_and_incident_edges_in_one_commit",
+                trigger: "STOP_PURGE",
+                ddl: "4d4dec1a25c36c9c",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "time_window_filters_and_verifies_the_selected_revisions",
+                trigger: "TYPED_RECORDS_NO_UPDATE",
+                ddl: "7e5a686ef20c8360",
+                occurrences: 1,
+            },
+        ],
+        reason: "scoped_purge_removes_only_matching_rows_and_incident_edges_in_one_commit \
+                 creates and drops STOP_PURGE on a separate direct rusqlite::Connection::open(&path) \
+                 to prove atomic purge rollback; time_window_filters_and_verifies_the_selected_revisions \
+                 drops typed_records_no_update on a separate direct rusqlite::Connection::open(&path) \
+                 to simulate raw DB tampering and verify content digest checking. \
+                 Bodies read 2026-11-22; file names no store doorway.",
     },
     Exemption {
         path: "crates/tachi-params/src/current_truth/tests/projection_compat.rs",

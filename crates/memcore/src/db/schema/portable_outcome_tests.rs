@@ -253,6 +253,10 @@ fn outcome_fixture_snapshot_refuses_uncheckpointed_wal() {
 
 #[test]
 fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
+    super::current_store_admission::with_historical_portable_inventory(43, check_v43_outcomes);
+}
+
+fn check_v43_outcomes() {
     let portable = FixtureSnapshot::new(StoreProfile::PortableKernel);
     let full = FixtureSnapshot::new(StoreProfile::TachiFull);
     for (profile, stamp) in [

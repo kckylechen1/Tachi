@@ -103,6 +103,13 @@ fn raw_sql_update_delete_and_replace_refuse_even_with_typed_authority() {
     store
         .append_typed_record(&writer("assistant", "observation"), &input("r1"), None)
         .unwrap();
+    store
+        .append_typed_record(
+            &writer("assistant", "observation"),
+            &input("r2"),
+            Some("r1"),
+        )
+        .unwrap();
     let raw = Connection::open(&path).unwrap();
     for conn in [&raw, &store.conn] {
         for sql in [
@@ -117,6 +124,7 @@ fn raw_sql_update_delete_and_replace_refuse_even_with_typed_authority() {
         crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
     for sql in [
         "UPDATE typed_records SET writer='forged'",
+        "DELETE FROM typed_record_supersessions",
         "DELETE FROM typed_records",
         "INSERT OR REPLACE INTO typed_records SELECT * FROM typed_records",
     ] {
@@ -563,8 +571,8 @@ fn typed_receipt_effects_describe_append_operations_and_ordinary_notes_stay_muta
 #[test]
 fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup() {
     for (version, profile, expected_version) in [
-        (39, StoreProfile::PortableKernel, 41),
-        (40, StoreProfile::TachiFull, 43),
+        (39, StoreProfile::PortableKernel, 44),
+        (40, StoreProfile::TachiFull, 44),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upgrade.db");

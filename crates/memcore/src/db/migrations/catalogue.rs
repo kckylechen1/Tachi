@@ -38,9 +38,10 @@ macro_rules! catalogue {
 catalogue! {
     39, "v39_mirror_eval_identity", Product, |conn, context, report| { report.mirror_eval_identity_columns_added = migrate_v39_mirror_eval_identity(conn, context.profile)?; Ok(()) };
     40, "v40_work_claim_project_binding", Product, |conn, context, report| { report.identity_workclaim_columns_added += identity_workclaim_spine::migrate_v40_work_claim_project_binding(conn, context.profile)?; Ok(()) };
-    41, "v41_host_typed_records", Portable, |conn, _context, _report| { crate::db::typed_records::install(conn) };
+    41, "v41_host_typed_records", Portable, |conn, _context, _report| { crate::db::typed_records::install_v41(conn) };
     42, "v42_coordination_mailbox", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v42_coordination_mailbox(conn)?; } Ok(()) };
     43, "v43_adjudication_provenance", Product, |conn, context, _report| { crate::db::adjudication_provenance::migrate_v43_adjudication_provenance(conn, context.profile).map(drop) };
+    44, "v44_typed_record_erasure", Portable, |conn, _context, _report| { crate::db::typed_records::migrate_v44(conn) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {
@@ -217,7 +218,7 @@ mod tests {
         // catalogue, but cannot silently reclassify a shipped suffix.
         assert_eq!(BASELINE_SCHEMA_VERSION, 39);
         assert_eq!(PORTABLE_COMPAT_FLOOR, 39);
-        assert!(MIGRATIONS.len() >= 5);
+        assert!(MIGRATIONS.len() >= 6);
         assert_eq!(MIGRATIONS[0].index, 39);
         let expected_scopes = [
             (39, MigrationScope::Product),
@@ -225,6 +226,7 @@ mod tests {
             (41, MigrationScope::Portable),
             (42, MigrationScope::Product),
             (43, MigrationScope::Product),
+            (44, MigrationScope::Portable),
         ];
         for (migration, (expected_index, expected_scope)) in
             MIGRATIONS.iter().zip(expected_scopes.iter())
@@ -238,8 +240,8 @@ mod tests {
         }
         assert_eq!(portable_version(&MIGRATIONS[..1]), 39);
         assert_eq!(expected_version(&MIGRATIONS[..1]), 39);
-        assert_eq!(portable_version(MIGRATIONS), 41);
-        assert_eq!(expected_version(MIGRATIONS), 43);
+        assert_eq!(portable_version(MIGRATIONS), 44);
+        assert_eq!(expected_version(MIGRATIONS), 44);
         let keys: std::collections::BTreeSet<_> =
             MIGRATIONS.iter().map(|entry| entry.sentinel).collect();
         assert_eq!(keys.len(), MIGRATIONS.len(), "sentinels are unique");

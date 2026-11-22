@@ -12,7 +12,7 @@
 //! [`check_schema_version_gate`] and must be bridged to `v39+` using an
 //! archived pre-squash binary. Fresh empty databases (`user_version == 0`)
 //! initialize the complete baseline schema directly and stamp
-//! [`EXPECTED_SCHEMA_VERSION`] (`43`, or `41` for Portable).
+//! [`EXPECTED_SCHEMA_VERSION`] (`44` for both profiles).
 //!
 //! Active shipped migrations:
 //! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
@@ -22,6 +22,7 @@
 //! - v43: adjudication provenance receipt & attribution basis columns +
 //!   append-only trigger triples on `dispatch_adjudications` and
 //!   `mirror_eval_adjudications` (#2012).
+//! - v44: scoped erasure guards on typed revisions and lineage (Portable).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -658,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_init_installs_baseline_and_v39_through_v43_sentinels_once() {
+    fn fresh_init_installs_baseline_and_shipped_sentinels_once() {
         let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open in-memory");
@@ -1047,7 +1048,7 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         // Remove v40 column/sentinels so v40 has real DDL work to perform and roll back.
         conn.execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance')",
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure')",
             params![MIGRATION_NS],
         )
         .unwrap();
