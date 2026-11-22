@@ -480,6 +480,7 @@ pub(crate) async fn request_managed_custom_cancel(
                     "absent_same_daemon_handle",
                 ));
             };
+            let clarification_pause = native_session::is_clarification_pause(&status);
             let Some(object) = status.as_object_mut() else {
                 return Ok(unavailable(
                     dispatch_id,
@@ -521,7 +522,8 @@ pub(crate) async fn request_managed_custom_cancel(
                     "stale_status_revision",
                 ));
             }
-            if object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+            if (object.get("state").and_then(Value::as_str) != Some("TASK_STATE_WORKING")
+                && !clarification_pause)
                 || object.contains_key("completion_recovery")
                 || object.contains_key("resolved_completion")
             {
@@ -596,6 +598,14 @@ pub(crate) async fn request_managed_custom_cancel(
                     None,
                 ),
             );
+            if clarification_pause {
+                object.insert("state".into(), json!("TASK_STATE_WORKING"));
+                object.remove("clarification_request");
+                object
+                    .get_mut("native_session")
+                    .expect("clarification has a session")["phase"] =
+                    json!("cancellation_requested");
+            }
             crate::managed_run_control::advance_status_revision(object)?;
             let body = serde_json::to_vec_pretty(&status)
                 .map_err(|e| format!("serialize cancellation_requested: {e}"))?;
