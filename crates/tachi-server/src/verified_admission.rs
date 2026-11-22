@@ -608,7 +608,8 @@ pub(crate) fn with_current_admission_write<T>(
         }
         "rejected" => Err("AgentIdentity admission rejected".to_string()),
         _ => Err(
-            "AgentIdentity admission unavailable; remote identity has no verified proof".to_string(),
+            "AgentIdentity admission unavailable; remote identity has no verified proof"
+                .to_string(),
         ),
     }
 }
