@@ -383,5 +383,21 @@ pub(super) fn atty_stdout() -> bool {
 }
 
 pub(super) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Remote transport has no project dotenv, daemon proxy or MCP router.
+    if let Some(tachi_bootstrap::cli::Commands::A2a {
+        action: tachi_bootstrap::cli::A2aAction::Remote { action },
+    }) = &cli.command
+    {
+        if cli.global_db.is_some()
+            || cli.project_db.is_some()
+            || cli.daemon
+            || cli.profile.is_some()
+        {
+            return Err(
+                "remote A2A uses its explicit config, not daemon/project/profile overrides".into(),
+            );
+        }
+        return crate::remote_a2a::run(action, cli.allow_schema_migration);
+    }
     serve::tokio_main(cli)
 }

@@ -287,8 +287,10 @@ pub use db::{
 #[cfg(feature = "admin")]
 pub use db::{
     get_verified_admission_receipt, has_current_verified_admission,
+    is_supported_verified_admission_policy, verified_mtls_key_is_revoked,
     with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
-    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
+    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_MTLS_METHOD, VERIFIED_ADMISSION_SCOPE,
+    VERIFIED_ADMISSION_VERSION,
 };
 pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 pub use db::{

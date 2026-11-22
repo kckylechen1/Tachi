@@ -194,6 +194,39 @@ impl MemoryServer {
         schema_migration: MigrationAuthority,
         home_dir: PathBuf,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_runtime_policy(
+            global_db_path,
+            project_db_path,
+            schema_migration,
+            home_dir,
+            background_workers_enabled(),
+        )
+    }
+
+    /// Dedicated transport/operator runtimes must not claim ordinary daemon
+    /// queues, including durable replay work already present in their store.
+    pub(crate) fn new_without_background_workers(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        schema_migration: MigrationAuthority,
+        home_dir: PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_runtime_policy(
+            global_db_path,
+            project_db_path,
+            schema_migration,
+            home_dir,
+            false,
+        )
+    }
+
+    fn new_with_runtime_policy(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        schema_migration: MigrationAuthority,
+        home_dir: PathBuf,
+        start_background_workers: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         ensure_db_parent(&global_db_path)?;
         if let Some(project_db_path) = project_db_path.as_ref() {
             ensure_db_parent(project_db_path)?;
@@ -303,7 +336,6 @@ impl MemoryServer {
         let mut enrich_rx = Some(enrich_rx);
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
-        let start_background_workers = background_workers_enabled();
         #[cfg(test)]
         let retained_enrich_rx = Arc::new(StdMutex::new(if start_background_workers {
             None

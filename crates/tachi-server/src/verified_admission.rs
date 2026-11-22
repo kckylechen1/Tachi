@@ -5,8 +5,8 @@
 //! normal admin caller cannot mint a `verified` row by constructing a low-level
 //! write request. Raw database access remains trusted-code authority.
 
-// #1938 lands the typed server port before #1170 supplies its production
-// provider adapter; the production wrapper is intentionally not model-facing.
+// #1171 supplies the production TLS adapter. This writer remains private to
+// trusted server producers, never a model-facing admission-minting surface.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use jiff::SignedDuration;
@@ -236,10 +236,11 @@ fn validate_verified_evidence(
     {
         return Err("verified admission request binding is invalid".to_string());
     }
-    if request.expected_verification_method != memcore::VERIFIED_ADMISSION_METHOD
-        || request.expected_verification_version != memcore::VERIFIED_ADMISSION_VERSION
-        || request.verification_scope != memcore::VERIFIED_ADMISSION_SCOPE
-    {
+    if !memcore::is_supported_verified_admission_policy(
+        &request.expected_verification_method,
+        &request.expected_verification_version,
+        &request.verification_scope,
+    ) {
         return Err("verified admission verifier policy is unsupported".to_string());
     }
     if evidence.state == VerifiedEvidenceState::Revoked {
@@ -373,6 +374,16 @@ fn persist_verified_admission(
         // for otherwise valid evidence to expire.
         let verified_at = authoritative_now();
         validate_verified_evidence(request, evidence, verified_at)?;
+        if evidence.verification_method == memcore::VERIFIED_ADMISSION_MTLS_METHOD
+            && memcore::verified_mtls_key_is_revoked(
+                &tx,
+                &evidence.issuer_id,
+                evidence.evidence_ref.as_str(),
+            )
+            .map_err(|error| error.to_string())?
+        {
+            return Err("verified mTLS enrollment key is revoked".into());
+        }
         if let Some(existing) = find_receipt_by_idempotency(
             &tx,
             &evidence.issuer_id,
@@ -483,8 +494,8 @@ fn persist_verified_admission(
     })
 }
 
-/// Production entry uses the server clock. A future #1170 adapter calls this
-/// after provider proof verification; callers cannot inject freshness time.
+/// Production entry uses the server clock after trusted transport proof
+/// verification; callers cannot inject freshness time.
 pub(crate) fn admit_verified_agent_connection(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
@@ -597,7 +608,7 @@ pub(crate) fn with_current_admission_write<T>(
         }
         "rejected" => Err("AgentIdentity admission rejected".to_string()),
         _ => Err(
-            "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string(),
+            "AgentIdentity admission unavailable; remote identity has no verified proof".to_string(),
         ),
     }
 }
@@ -1006,51 +1017,58 @@ mod tests {
 
     #[test]
     fn trusted_verifier_writes_bound_secret_negative_receipt_and_exact_replay() {
-        let server = make_server();
-        let at = now();
-        let first = admit_verified_agent_connection_at(
-            &server,
-            &request("verify-alpha-7"),
-            &verifier(evidence(at)),
-            at,
-        )
-        .expect("fresh trusted evidence must admit");
-        assert!(matches!(first, VerifiedAdmissionWriteOutcome::Created(_)));
-        let receipt = first.receipt();
-        assert_eq!(receipt.connection_id, "placement/runner-alpha/connection-7");
-        assert_eq!(
-            receipt.verification_method,
-            memcore::VERIFIED_ADMISSION_METHOD
-        );
+        for method in [
+            memcore::VERIFIED_ADMISSION_METHOD,
+            memcore::VERIFIED_ADMISSION_MTLS_METHOD,
+        ] {
+            let server = make_server();
+            let at = now();
+            let mut admission_request = request("verify-alpha-7");
+            admission_request.expected_verification_method = method.into();
+            let mut admission_evidence = evidence(at);
+            admission_evidence.verification_method = method.into();
+            admission_evidence.evidence_ref =
+                VerifiedEvidenceRef::attestation(method, &"c".repeat(64)).unwrap();
+            let first = admit_verified_agent_connection_at(
+                &server,
+                &admission_request,
+                &verifier(admission_evidence.clone()),
+                at,
+            )
+            .expect("fresh trusted evidence must admit");
+            assert!(matches!(first, VerifiedAdmissionWriteOutcome::Created(_)));
+            let receipt = first.receipt();
+            assert_eq!(receipt.connection_id, "placement/runner-alpha/connection-7");
+            assert_eq!(receipt.verification_method, method);
 
-        let replay = admit_verified_agent_connection_at(
-            &server,
-            &request("verify-alpha-7"),
-            &verifier(evidence(at)),
-            at,
-        )
-        .expect("same issuer/key/digest must replay");
-        assert!(matches!(replay, VerifiedAdmissionWriteOutcome::Replayed(_)));
-        assert_eq!(replay.receipt(), receipt);
-        assert_eq!(verified_count(&server), 1);
-        require_current_verified_admission(&server).expect("fresh exact binding");
-        let mut copied_context = server.verified_work_claim_connection().unwrap();
-        copied_context.connection_id = "placement/runner-beta/connection-8".into();
-        server.set_verified_work_claim_connection(copied_context);
-        require_current_verified_admission(&server)
-            .expect_err("fresh receipt must not authorize another connection");
-        server.set_verified_work_claim_connection(VerifiedAdmissionContext {
-            admission_id: receipt.admission_id.clone(),
-            agent_identity_id: receipt.agent_identity_id.clone(),
-            connection_id: receipt.connection_id.clone(),
-            issuer_id: receipt.issuer_id.clone(),
-            verification_method: receipt.verification_method.clone(),
-            verification_version: receipt.verification_version.clone(),
-            trust_domain: receipt.trust_domain.clone(),
-            verification_scope: receipt.verification_scope.clone(),
-        });
+            let replay = admit_verified_agent_connection_at(
+                &server,
+                &admission_request,
+                &verifier(admission_evidence),
+                at,
+            )
+            .expect("same issuer/key/digest must replay");
+            assert!(matches!(replay, VerifiedAdmissionWriteOutcome::Replayed(_)));
+            assert_eq!(replay.receipt(), receipt);
+            assert_eq!(verified_count(&server), 1);
+            require_current_verified_admission(&server).expect("fresh exact binding");
+            let mut copied_context = server.verified_work_claim_connection().unwrap();
+            copied_context.connection_id = "placement/runner-beta/connection-8".into();
+            server.set_verified_work_claim_connection(copied_context);
+            require_current_verified_admission(&server)
+                .expect_err("fresh receipt must not authorize another connection");
+            server.set_verified_work_claim_connection(VerifiedAdmissionContext {
+                admission_id: receipt.admission_id.clone(),
+                agent_identity_id: receipt.agent_identity_id.clone(),
+                connection_id: receipt.connection_id.clone(),
+                issuer_id: receipt.issuer_id.clone(),
+                verification_method: receipt.verification_method.clone(),
+                verification_version: receipt.verification_version.clone(),
+                trust_domain: receipt.trust_domain.clone(),
+                verification_scope: receipt.verification_scope.clone(),
+            });
 
-        server
+            server
             .with_global_store_read(|store| {
                 let persisted: String = store
                     .connection()
@@ -1068,6 +1086,109 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn mtls_revocation_retires_the_key_across_connections_without_changing_device_scope() {
+        for method in [
+            memcore::VERIFIED_ADMISSION_METHOD,
+            memcore::VERIFIED_ADMISSION_MTLS_METHOD,
+        ] {
+            let server = make_server();
+            let at = now();
+            let mut first_request = request("key-first");
+            first_request.expected_verification_method = method.into();
+            let mut first_evidence = evidence(at);
+            first_evidence.verification_method = method.into();
+            first_evidence.evidence_ref =
+                VerifiedEvidenceRef::attestation(method, &"c".repeat(64)).unwrap();
+            let first = admit_verified_agent_connection_at(
+                &server,
+                &first_request,
+                &verifier(first_evidence.clone()),
+                at,
+            )
+            .unwrap();
+
+            let mut second_request = first_request.clone();
+            second_request.idempotency_key = "key-second".into();
+            second_request.connection_id = "connection-second".into();
+            let mut second_evidence = first_evidence.clone();
+            second_evidence.connection_id = second_request.connection_id.clone();
+            second_evidence.nonce = "nonce-second".into();
+            admit_verified_agent_connection_at(
+                &server,
+                &second_request,
+                &verifier(second_evidence),
+                at,
+            )
+            .unwrap();
+            require_current_verified_admission(&server).unwrap();
+
+            let revocation = VerifiedRevocationEvidence {
+                admission_id: first.receipt().admission_id.clone(),
+                issuer_id: first_evidence.issuer_id.clone(),
+                evidence_digest: format!("{:x}", Sha256::digest(b"retire-enrolled-key")),
+                evidence_ref: VerifiedEvidenceRef::attestation(method, "key-revocation").unwrap(),
+                nonce: "key-revocation".into(),
+                revoked_at: at,
+            };
+            revoke_verified_admission_at(
+                &server,
+                &first.receipt().admission_id,
+                &FakeRevocation(revocation),
+                at,
+            )
+            .unwrap();
+            if method == memcore::VERIFIED_ADMISSION_MTLS_METHOD {
+                require_current_verified_admission(&server).expect_err(
+                    "revoking one admission retires existing mTLS connections for the key",
+                );
+                let error = crate::claims_ops::handle_task_claim(
+                    &server,
+                    &task_claim_params("retired-key"),
+                )
+                .expect_err("the other connection cannot mutate after key revocation");
+                assert!(error.contains("expired, revoked"), "{error}");
+            } else {
+                require_current_verified_admission(&server)
+                    .expect("device-envelope revocation remains admission-scoped");
+            }
+
+            let mut next_request = first_request;
+            next_request.idempotency_key = "key-next".into();
+            next_request.connection_id = "connection-next".into();
+            let mut next_evidence = first_evidence;
+            next_evidence.connection_id = next_request.connection_id.clone();
+            next_evidence.nonce = "nonce-next".into();
+            let result = admit_verified_agent_connection_at(
+                &server,
+                &next_request,
+                &verifier(next_evidence.clone()),
+                at,
+            );
+            if method == memcore::VERIFIED_ADMISSION_MTLS_METHOD {
+                let error =
+                    result.expect_err("a fresh connection and nonce cannot revive a retired key");
+                assert!(error.contains("enrollment key is revoked"), "{error}");
+                assert_eq!(verified_count(&server), 2);
+                next_request.idempotency_key = "key-rotated".into();
+                next_evidence.evidence_ref =
+                    VerifiedEvidenceRef::attestation(method, &"d".repeat(64)).unwrap();
+                admit_verified_agent_connection_at(
+                    &server,
+                    &next_request,
+                    &verifier(next_evidence),
+                    at,
+                )
+                .expect("a separately verified new key may be enrolled");
+            } else {
+                result.expect("revoking a device admission does not retire its evidence reference");
+            }
+            assert_eq!(verified_count(&server), 3);
+            require_current_verified_admission(&server).unwrap();
+        }
     }
 
     #[test]
@@ -1762,6 +1883,18 @@ mod tests {
                 },
                 "invalid or secret-like",
             ),
+            (
+                "mtls-unbound-ref",
+                VerifiedAdmissionRequest {
+                    expected_verification_method: memcore::VERIFIED_ADMISSION_MTLS_METHOD.into(),
+                    ..request("mtls-unbound-ref")
+                },
+                VerifiedAdmissionEvidence {
+                    verification_method: memcore::VERIFIED_ADMISSION_MTLS_METHOD.into(),
+                    ..evidence(at)
+                },
+                "canonical SPKI SHA-256",
+            ),
         ];
         for (label, request, evidence, expected) in cases {
             let server = make_server();
@@ -1776,16 +1909,40 @@ mod tests {
                 .is_err(),
             "free-form secret-bearing evidence references must be structurally unavailable"
         );
-        let mut unsupported_request = request("unsupported-method");
-        unsupported_request.expected_verification_method = "display-name".into();
-        let error = admit_verified_agent_connection_at(
-            &make_server(),
-            &unsupported_request,
-            &verifier(evidence(at)),
-            at,
-        )
-        .expect_err("caller-selected method policy must be rejected");
-        assert!(error.contains("policy is unsupported"), "{error}");
+        for (method, version, scope) in [
+            ("display-name", "v1", memcore::VERIFIED_ADMISSION_SCOPE),
+            (
+                memcore::VERIFIED_ADMISSION_MTLS_METHOD,
+                "v2",
+                memcore::VERIFIED_ADMISSION_SCOPE,
+            ),
+            (
+                memcore::VERIFIED_ADMISSION_MTLS_METHOD,
+                "v1",
+                "agent_identity:display_only",
+            ),
+        ] {
+            let server = make_server();
+            let mut unsupported_request = request("unsupported-policy");
+            unsupported_request.expected_verification_method = method.into();
+            unsupported_request.expected_verification_version = version.into();
+            unsupported_request.verification_scope = scope.into();
+            let mut unsupported_evidence = evidence(at);
+            unsupported_evidence.verification_method = method.into();
+            unsupported_evidence.verification_version = version.into();
+            unsupported_evidence.verification_scope = scope.into();
+            let error = admit_verified_agent_connection_at(
+                &server,
+                &unsupported_request,
+                &verifier(unsupported_evidence),
+                at,
+            )
+            .expect_err(
+                "matching evidence cannot admit an unsupported method/version/scope policy",
+            );
+            assert!(error.contains("policy is unsupported"), "{error}");
+            assert_eq!(verified_count(&server), 0);
+        }
     }
 
     #[test]

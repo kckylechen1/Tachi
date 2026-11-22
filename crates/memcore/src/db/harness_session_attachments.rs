@@ -937,29 +937,22 @@ fn verify_host_admission(
         ));
     };
     let verified_is_current = if state == "verified" {
-        conn.query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM identity_admission_verification_receipts r
-                 WHERE r.admission_id=?1 AND r.agent_identity_id=?2 AND r.connection_id=?3
-                   AND r.verification_method=?4 AND r.verification_version=?5
-                   AND r.verification_scope=?6 AND r.issuer_id<>'' AND r.trust_domain<>''
-                   AND julianday(r.evidence_issued_at) <= julianday('now')
-                   AND julianday(r.evidence_expires_at) > julianday('now')
-                   AND NOT EXISTS (
-                       SELECT 1 FROM identity_admission_verification_revocations v
-                       WHERE v.admission_id=r.admission_id
-                   )
-             )",
-            params![
-                admission_id,
-                admitted_identity,
-                connection_id,
-                super::verified_admissions::VERIFIED_ADMISSION_METHOD,
-                super::verified_admissions::VERIFIED_ADMISSION_VERSION,
-                super::verified_admissions::VERIFIED_ADMISSION_SCOPE,
-            ],
-            |row| row.get::<_, bool>(0),
-        )?
+        match super::verified_admissions::get_verified_admission_receipt(conn, &admission_id)? {
+            Some(receipt) if !receipt.issuer_id.is_empty() && !receipt.trust_domain.is_empty() => {
+                super::verified_admissions::has_current_verified_admission(
+                    conn,
+                    &admission_id,
+                    &admitted_identity,
+                    &connection_id,
+                    &receipt.issuer_id,
+                    &receipt.verification_method,
+                    &receipt.verification_version,
+                    &receipt.trust_domain,
+                    &receipt.verification_scope,
+                )?
+            }
+            _ => false,
+        }
     } else {
         true
     };
@@ -1616,6 +1609,122 @@ mod tests {
             first.attachment.attachment_id
         );
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn verified_policy_and_key_revocation_gate_attachment_replay() {
+        use crate::db::verified_admissions::{
+            has_current_verified_admission, VERIFIED_ADMISSION_METHOD,
+            VERIFIED_ADMISSION_MTLS_METHOD, VERIFIED_ADMISSION_SCOPE,
+        };
+
+        for (method, version, scope, supported) in [
+            (
+                VERIFIED_ADMISSION_METHOD,
+                "v1",
+                VERIFIED_ADMISSION_SCOPE,
+                true,
+            ),
+            (
+                VERIFIED_ADMISSION_MTLS_METHOD,
+                "v1",
+                VERIFIED_ADMISSION_SCOPE,
+                true,
+            ),
+            ("display-name", "v1", VERIFIED_ADMISSION_SCOPE, false),
+            (
+                VERIFIED_ADMISSION_MTLS_METHOD,
+                "v2",
+                VERIFIED_ADMISSION_SCOPE,
+                false,
+            ),
+            (
+                VERIFIED_ADMISSION_MTLS_METHOD,
+                "v1",
+                "agent_identity:display_only",
+                false,
+            ),
+        ] {
+            let mut conn = setup();
+            let mut input = seed(&mut conn);
+            input.admission_receipt_ref = "admission-verified".into();
+            let verified_host = HarnessSessionHostAdmission {
+                host_identity: "host-1".into(),
+                connection_id: "connection-verified".into(),
+            };
+            conn.execute(
+                "INSERT INTO identity_admissions
+                 (admission_id, agent_identity_id, connection_id, state, created_at)
+                 VALUES ('admission-verified', 'host-1', 'connection-verified', 'verified',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO identity_admission_verification_receipts
+                 (receipt_id, admission_id, agent_identity_id, connection_id, issuer_id,
+                  verification_method, verification_version, trust_domain, verification_scope,
+                  evidence_digest, evidence_ref, evidence_issued_at, evidence_expires_at, nonce,
+                  idempotency_key, request_digest, current_state, verified_at)
+                 VALUES ('receipt-verified', 'admission-verified', 'host-1', 'connection-verified',
+                         'issuer-test', ?1, ?2, 'workspace:owner/repo', ?3, ?4, ?5,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+10 minutes'),
+                         'nonce-verified', 'key-verified', ?6, 'verified',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                params![
+                    method,
+                    version,
+                    scope,
+                    "a".repeat(64),
+                    format!("attestation:{method}:{}", "c".repeat(64)),
+                    "b".repeat(64)
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                has_current_verified_admission(
+                    &conn,
+                    "admission-verified",
+                    "host-1",
+                    "connection-verified",
+                    "issuer-test",
+                    method,
+                    version,
+                    "workspace:owner/repo",
+                    scope,
+                )
+                .unwrap(),
+                supported,
+                "persisted policy {method}/{version}/{scope}",
+            );
+            let result = attach_harness_session(&mut conn, &input, &verified_host, 30 * 60);
+            if !supported {
+                result.expect_err("unsupported receipt policy cannot authorize an attachment");
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM harness_session_attachments",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0);
+                continue;
+            }
+            result.expect("both supported verified policies authorize the exact host");
+            let before = attachment_row_bytes(&conn);
+            conn.execute(
+                "INSERT INTO identity_admission_verification_revocations
+                 (revocation_id, admission_id, issuer_id, evidence_digest, evidence_ref, nonce, revoked_at)
+                 VALUES ('revocation-verified', 'admission-verified', 'issuer-test', ?1,
+                         'attestation:operator:revoke-key', 'nonce-revoke',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                ["d".repeat(64)],
+            ).unwrap();
+            attach_harness_session(&mut conn, &input, &verified_host, 30 * 60)
+                .expect_err("an exact attachment replay must recheck current verified authority");
+            assert_eq!(attachment_row_bytes(&conn), before);
+        }
     }
 
     #[test]

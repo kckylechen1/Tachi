@@ -140,8 +140,10 @@ pub(crate) use verified_admissions::install_verified_admission_schema;
 #[cfg(feature = "admin")]
 pub use verified_admissions::{
     get_verified_admission_receipt, has_current_verified_admission,
+    is_supported_verified_admission_policy, verified_mtls_key_is_revoked,
     with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
-    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
+    VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_MTLS_METHOD, VERIFIED_ADMISSION_SCOPE,
+    VERIFIED_ADMISSION_VERSION,
 };
 // The three raw-`Connection` constructors are gated with the accessor pair on
 // `MemoryStore` (#1585): a bare connection is a raw-SQL bypass
