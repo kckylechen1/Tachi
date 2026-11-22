@@ -2,6 +2,34 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
+#[test]
+fn typed_clarification_requires_the_current_nonsecret_question() {
+    let request = json!({"id": "ask-1", "method": "item/tool/requestUserInput", "params": {
+        "threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "isBlocking": true,
+        "questions": [{"id":"branch", "question":"Which branch?", "isSecret":false, "isOther":false,
+                       "options":[{"label":"main", "description":"Current default"},{"label":"release", "description":"Release branch"}]}]}});
+    let ask = super::clarification_request(&request, Some("thread-1"), Some("turn-1")).unwrap();
+    assert_eq!(ask.question_id, "branch");
+    assert_eq!(ask.choices.unwrap(), ["main", "release"]);
+    assert!(ask.question.contains("Choices: main; release"));
+    assert!(super::clarification_request(&request, Some("thread-1"), Some("old-turn")).is_none());
+    let mut secret = request.clone();
+    secret["params"]["questions"][0]["isSecret"] = json!(true);
+    assert!(super::clarification_request(&secret, Some("thread-1"), Some("turn-1")).is_none());
+    let mut auth = request.clone();
+    auth["params"]["questions"][0]["question"] = json!("AUTH_REQUIRED: enter your password");
+    assert!(super::clarification_request(&auth, Some("thread-1"), Some("turn-1")).is_none());
+    let mut multiple = request.clone();
+    multiple["params"]["questions"]
+        .as_array_mut()
+        .unwrap()
+        .push(request["params"]["questions"][0].clone());
+    assert!(super::clarification_request(&multiple, Some("thread-1"), Some("turn-1")).is_none());
+    let mut oversized = request;
+    oversized["params"]["questions"][0]["question"] = json!("x".repeat(4097));
+    assert!(super::clarification_request(&oversized, Some("thread-1"), Some("turn-1")).is_none());
+}
+
 const PEER: &str = r#"
 import json, os, sys
 mode = os.environ["FAKE_MODE"]

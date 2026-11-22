@@ -635,7 +635,7 @@ pub(crate) fn read_projection(
             .unwrap_or(false);
         artifacts.insert(name.to_string(), Value::Bool(artifact_is_regular));
     }
-    Some(json!({
+    let mut projection = json!({
         "execution_state": execution_state,
         "control_state": control_state,
         "outcome_state": outcome_state,
@@ -643,7 +643,14 @@ pub(crate) fn read_projection(
         "current_controller_epoch_id": current_epoch,
         "reconciliation": status.get(RECONCILIATION_KEY).cloned().unwrap_or(Value::Null),
         "artifacts_available": Value::Object(artifacts),
-    }))
+    });
+    if control_state == "available"
+        && execution_state == "running"
+        && crate::managed_run_control::native_session::is_clarification_pause(status)
+    {
+        projection["input_required"] = status["clarification_request"].clone();
+    }
+    Some(projection)
 }
 
 /// Run the startup reconciliation scan for this daemon incarnation and

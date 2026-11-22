@@ -743,7 +743,7 @@ async fn run_native_acp_command_inner(
             if let Some(control) = control.as_mut() {
                 super::supervised::run_supervised(&mut connection, &spec, control, run_dir).await
             } else {
-                connection.run_turn(&spec).await
+                connection.run_turn(&spec, None).await
             }
         };
         tokio::select! {
@@ -1122,8 +1122,9 @@ impl SessionDriver for NativeDriver {
     async fn run_turn(
         &mut self,
         spec: &NativeAcpRunSpec,
+        control: Option<&mut crate::managed_run_control::native_session::NativeSessionControl>,
     ) -> Result<NativeAcpPromptOutcome, String> {
-        each_driver!(self, driver => SessionDriver::run_turn(driver, spec).await)
+        each_driver!(self, driver => SessionDriver::run_turn(driver, spec, control).await)
     }
 
     async fn next_idle_message(&mut self) -> Result<serde_json::Value, String> {

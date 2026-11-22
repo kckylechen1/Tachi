@@ -23,6 +23,7 @@ pub(super) trait SessionDriver {
     fn run_turn(
         &mut self,
         spec: &NativeAcpRunSpec,
+        control: Option<&mut NativeSessionControl>,
     ) -> impl Future<Output = Result<NativeAcpPromptOutcome, String>> + Send;
     /// Must be cancel-safe: it races controller commands between turns.
     fn next_idle_message(
@@ -133,7 +134,7 @@ async fn turn_loop<D: SessionDriver>(
         update_phase(&control.server, driver.dispatch_id(), None, state)?;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
-            driver.run_turn(&turn_spec),
+            driver.run_turn(&turn_spec, Some(control)),
         )
         .await
         .map_err(|_| "native turn timed out; no automatic retry".to_string())??;
@@ -171,7 +172,7 @@ async fn turn_loop<D: SessionDriver>(
                     }
                     let error = accepted.expect_err("successful instruction returned above");
                     let admission_refusal = error.starts_with("stale_status_revision:")
-                        || error == "native session is not at a supervised turn boundary";
+                        || error == "native session is not at an admitted input boundary";
                     let _ = command.response.send(Err(error.clone()));
                     if !admission_refusal { return Err(error); }
                 },
