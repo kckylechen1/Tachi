@@ -190,6 +190,9 @@ fn seed_judged_row(
                 },
             )
             .map_err(|err| err.to_string())?;
+            let resolved_model = tachi_dispatch::resolve_dispatch_profile(profile)
+                .and_then(tachi_dispatch::profile_resolved_model)
+                .or_else(|| Some("anthropic/claude-sonnet".to_string()));
             memcore::insert_route_decision_idempotent(
                 conn,
                 &memcore::NewRouteDecision {
@@ -197,7 +200,7 @@ fn seed_judged_row(
                     dispatch_id: dispatch_id.clone(),
                     recommendation_id: Some(recommendation_id.clone()),
                     selected_profile: Some(profile.to_string()),
-                    selected_model: Some("anthropic/claude-sonnet".to_string()),
+                    selected_model: resolved_model,
                     assignment_mode: assignment_mode.to_string(),
                     override_flag: false,
                     contract_hash: None,
@@ -272,6 +275,7 @@ fn projection_rows(observations: Vec<EvalObservation>) -> Vec<ProjectionRow> {
 
 fn project(observations: Vec<EvalObservation>, eligible: &[String]) -> ProjectionOutcome {
     let rows = projection_rows(observations);
+    let empty_models = std::collections::BTreeMap::new();
     rules::project(
         &rows,
         eligible,
@@ -279,6 +283,7 @@ fn project(observations: Vec<EvalObservation>, eligible: &[String]) -> Projectio
         None,
         NOW,
         Some("fix_request"),
+        &empty_models,
     )
 }
 

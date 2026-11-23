@@ -69,6 +69,7 @@ pub(crate) struct LedgerRouteEvidence {
     pub(crate) route_policy_rows: Vec<memcore::db::StateRow>,
     pub(crate) policy_revisions: memcore::PolicyRevisionCensus,
     pub(crate) evidence_spans_other_revisions: bool,
+    pub(crate) current_models: std::collections::BTreeMap<String, String>,
 }
 
 impl LedgerRouteEvidence {
@@ -95,6 +96,7 @@ impl LedgerRouteEvidence {
                         &self.since,
                         None,
                         task_type.as_deref(),
+                        &self.current_models,
                     ),
                     rules::RowDisposition::Usable
                 )
@@ -198,6 +200,19 @@ pub(crate) fn resolve_route_evidence(
         })
         .collect::<Vec<_>>();
 
+    let staff_config =
+        tachi_dispatch::load_staff_config(&server.tachi_home_dir()).unwrap_or_default();
+    let mut current_models = std::collections::BTreeMap::new();
+    for profile_name in &gates.eligible {
+        if let Some(profile_def) = tachi_dispatch::resolve_dispatch_profile(profile_name) {
+            if let Some(model) =
+                tachi_dispatch::resolved_profile_model_with_config(profile_def, &staff_config)
+            {
+                current_models.insert(profile_name.clone(), model);
+            }
+        }
+    }
+
     let outcome = rules::project(
         &rows,
         &gates.eligible,
@@ -205,6 +220,7 @@ pub(crate) fn resolve_route_evidence(
         None,
         &now,
         gates.task_type.as_deref(),
+        &current_models,
     );
 
     Ok(LedgerRouteEvidence {
@@ -220,6 +236,7 @@ pub(crate) fn resolve_route_evidence(
         route_policy_rows,
         policy_revisions,
         evidence_spans_other_revisions,
+        current_models,
     })
 }
 

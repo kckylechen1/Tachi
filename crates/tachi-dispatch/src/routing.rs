@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::eval::{CompletionStatus, EvalRow};
 use crate::{
@@ -308,6 +309,34 @@ pub fn recommend_dispatch_profile_candidates<W>(
     performance_matrix: &[RoutePerformanceRow],
     route_policy_rules: &RoutePolicyRuleLoadout,
     evidence_source: RouteEvidenceSource,
+    weak_against_for_profile: W,
+) -> Result<Vec<ProfileCandidate>, String>
+where
+    W: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
+{
+    recommend_dispatch_profile_candidates_with_models(
+        eligible_profiles,
+        risk,
+        rows,
+        subagent_scores,
+        performance_matrix,
+        route_policy_rules,
+        evidence_source,
+        &BTreeMap::new(),
+        weak_against_for_profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recommend_dispatch_profile_candidates_with_models<W>(
+    eligible_profiles: &[String],
+    risk: &DispatchRisk,
+    rows: &[RouteEvalRow],
+    subagent_scores: &[RouteSubagentScore],
+    performance_matrix: &[RoutePerformanceRow],
+    route_policy_rules: &RoutePolicyRuleLoadout,
+    evidence_source: RouteEvidenceSource,
+    current_models: &BTreeMap<String, String>,
     mut weak_against_for_profile: W,
 ) -> Result<Vec<ProfileCandidate>, String>
 where
@@ -318,7 +347,7 @@ where
         .filter(|profile| eligible_profiles.iter().any(|name| name == profile.name))
         .map(|profile| {
             let weak_against = weak_against_for_profile(profile)?;
-            Ok(score_profile_candidate(
+            let mut candidate = score_profile_candidate(
                 profile,
                 risk,
                 rows,
@@ -326,7 +355,11 @@ where
                 performance_matrix,
                 &weak_against,
                 evidence_source,
-            ))
+            );
+            if let Some(model) = current_models.get(profile.name) {
+                candidate.model = Some(model.clone());
+            }
+            Ok(candidate)
         })
         .collect::<Result<Vec<_>, String>>()?;
     apply_route_policy_rules_to_candidates(&mut candidates, route_policy_rules, risk);
@@ -676,7 +709,7 @@ pub fn build_dispatch_recommendation_response(
         "blocked_profiles": &risk.blocked_profiles,
         "recommended_profile": &best.profile,
         "recommended_agent": &best.agent,
-        "recommended_model": profile_resolved_model(best_profile),
+        "recommended_model": best.model.clone().or_else(|| profile_resolved_model(best_profile)),
         "identity_receipt": recommendation_identity_receipt(best_profile),
         "recommended_transport": profile_payload.recommended_transport,
         "transport_readiness": profile_payload.transport_readiness,
@@ -713,6 +746,14 @@ pub fn build_dispatch_recommendation_response(
 pub fn build_route_policy_rule_loadout(
     records: &[RoutePolicyRuleRecord],
     risk: &DispatchRisk,
+) -> RoutePolicyRuleLoadout {
+    build_route_policy_rule_loadout_for_models(records, risk, &BTreeMap::new())
+}
+
+pub fn build_route_policy_rule_loadout_for_models(
+    records: &[RoutePolicyRuleRecord],
+    risk: &DispatchRisk,
+    current_models: &BTreeMap<String, String>,
 ) -> RoutePolicyRuleLoadout {
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
@@ -756,6 +797,20 @@ pub fn build_route_policy_rule_loadout(
             .get("prefer_profile")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let prefer_model = policy_rule
+            .get("prefer_model")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                value
+                    .get("evidence")
+                    .and_then(|evidence| evidence.get("proposed"))
+                    .and_then(|proposed| proposed.get("model"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| value.get("model").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string);
         let sample_count = route_policy_rule_sample_count(&value);
         let score_delta = value.get("score_delta").and_then(serde_json::Value::as_f64);
         // Which evidence base this rule was mined from, as the rule row itself
@@ -768,6 +823,9 @@ pub fn build_route_policy_rule_loadout(
             .or_else(|| value.get("evidence_source"))
             .and_then(serde_json::Value::as_str);
 
+        let resolved_prefer_profile = prefer_profile
+            .as_deref()
+            .and_then(crate::resolve_dispatch_profile);
         let skip_reason = if status != "applied" {
             Some(format!("status_not_applied:{status}"))
         } else if review_status != "approved" {
@@ -782,10 +840,7 @@ pub fn build_route_policy_rule_loadout(
                 "insufficient_samples:{sample_count}<{}",
                 MIN_ROUTE_POLICY_RULE_SAMPLES
             ))
-        } else if prefer_profile
-            .as_deref()
-            .is_none_or(|profile| crate::resolve_dispatch_profile(profile).is_none())
-        {
+        } else if resolved_prefer_profile.is_none() {
             Some(format!(
                 "unknown_prefer_profile:{}",
                 prefer_profile.as_deref().unwrap_or("missing")
@@ -820,6 +875,23 @@ pub fn build_route_policy_rule_loadout(
                 "not_required_for_risk_class:{}",
                 prefer_profile.as_deref().unwrap_or("missing")
             ))
+        } else if let Some(model_mismatch_reason) = resolved_prefer_profile
+            .and_then(|profile| current_models.get(profile.name).map(|m| (profile, m)))
+            .and_then(|(profile, current_model)| {
+                if let Some(rule_model) = prefer_model.as_deref() {
+                    (rule_model != current_model.as_str())
+                        .then(|| format!("model_changed:{rule_model}!={current_model}"))
+                } else if profile.backend == "opencode"
+                    && profile.native_session.is_some()
+                    && profile_resolved_model(profile).as_deref() != Some(current_model.as_str())
+                {
+                    Some(format!("model_changed:unpinned!={current_model}"))
+                } else {
+                    None
+                }
+            })
+        {
+            Some(model_mismatch_reason)
         } else if evidence_source != Some(ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER) {
             // tachi#1675 PR4, BUG-1: the LAST surviving `/eval` -> routing
             // policy path. Rules approved from `/eval` memory through the removed

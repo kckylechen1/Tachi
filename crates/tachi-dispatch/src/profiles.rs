@@ -553,6 +553,20 @@ pub fn profile_resolved_model(profile: &DispatchProfileDef) -> Option<String> {
         .or_else(|| profile.model.map(str::to_string))
 }
 
+pub fn resolved_profile_model_with_config(
+    profile: &DispatchProfileDef,
+    staff_config: &crate::StaffConfig,
+) -> Option<String> {
+    if profile.backend == "opencode" && profile.native_session.is_some() {
+        staff_config
+            .seat_default_model(profile.name)
+            .map(str::to_string)
+            .or_else(|| profile_resolved_model(profile))
+    } else {
+        profile_resolved_model(profile)
+    }
+}
+
 /// One canonical lineage encoding everywhere (`provider/family`, or the bare
 /// backend when no model is declared). An alias is a routing name, not a
 /// lineage: it must resolve to its concrete model first, or the receipt's

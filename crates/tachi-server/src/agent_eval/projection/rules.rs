@@ -94,6 +94,8 @@ pub(crate) mod reason {
     /// its rows do not support. Only applied when BOTH sides record a task
     /// type — a row with none is never assumed to mismatch.
     pub(crate) const TASK_TYPE_MISMATCH: &str = "task_type_mismatch";
+    /// Current seat model differs from the model recorded with this row.
+    pub(crate) const MODEL_CHANGED: &str = "model_changed";
     pub(crate) const NO_TERMINAL_STATE: &str = "no_terminal_state";
     pub(crate) const TERMINAL_STATE_MISMATCH: &str = "terminal_state_mismatch";
     pub(crate) const TERMINAL_STATE_UNVERIFIABLE: &str = "terminal_state_unverifiable";
@@ -220,6 +222,7 @@ fn row_scope<'a>(
     since: &str,
     until: Option<&str>,
     task_type: Option<&str>,
+    current_models: &BTreeMap<String, String>,
 ) -> Result<&'a str, &'static str> {
     let observation = &row.observation;
 
@@ -248,6 +251,23 @@ fn row_scope<'a>(
     ) {
         if query != row_task_type {
             return Err(reason::TASK_TYPE_MISMATCH);
+        }
+    }
+
+    if let (Some(current_model), Some(row_model)) = (
+        current_models
+            .get(profile)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|m| !m.is_empty()),
+        observation
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty()),
+    ) {
+        if current_model != row_model {
+            return Err(reason::MODEL_CHANGED);
         }
     }
 
@@ -281,10 +301,18 @@ pub(crate) fn classify_row(
     since: &str,
     until: Option<&str>,
     task_type: Option<&str>,
+    current_models: &BTreeMap<String, String>,
 ) -> RowDisposition {
     let observation = &row.observation;
 
-    if let Err(reason) = row_scope(row, eligible_profiles, since, until, task_type) {
+    if let Err(reason) = row_scope(
+        row,
+        eligible_profiles,
+        since,
+        until,
+        task_type,
+        current_models,
+    ) {
         return RowDisposition::Excluded(reason);
     }
 
@@ -792,6 +820,7 @@ pub(crate) fn project(
     until: Option<&str>,
     now: &str,
     task_type: Option<&str>,
+    current_models: &BTreeMap<String, String>,
 ) -> ProjectionOutcome {
     // Every eligible candidate appears in the output, including the ones with
     // zero evidence — "no evidence" is an answer, not an omission.
@@ -815,7 +844,14 @@ pub(crate) fn project(
         // from surviving rows is how "overturn newer than the settling window
         // => abstain" silently stops firing for the corrections that matter
         // most.
-        if let Ok(profile) = row_scope(row, eligible_profiles, since, until, task_type) {
+        if let Ok(profile) = row_scope(
+            row,
+            eligible_profiles,
+            since,
+            until,
+            task_type,
+            current_models,
+        ) {
             if let Some(adjudication) = observation
                 .adjudication
                 .as_ref()
@@ -831,7 +867,14 @@ pub(crate) fn project(
             }
         }
 
-        let disposition = classify_row(row, eligible_profiles, since, until, task_type);
+        let disposition = classify_row(
+            row,
+            eligible_profiles,
+            since,
+            until,
+            task_type,
+            current_models,
+        );
         let profile = observation.profile.clone();
         match disposition {
             // `classify_row` only returns Usable/QualityOnly for a row that

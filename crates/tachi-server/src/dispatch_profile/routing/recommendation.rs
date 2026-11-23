@@ -90,11 +90,14 @@ pub(crate) fn handle_dispatch_recommendation_with_profiles(
             value_json: row.value_json.clone(),
         })
         .collect::<Vec<_>>();
-    let route_policy_rules =
-        tachi_dispatch::build_route_policy_rule_loadout(&route_policy_records, &risk);
+    let route_policy_rules = tachi_dispatch::build_route_policy_rule_loadout_for_models(
+        &route_policy_records,
+        &risk,
+        &evidence.current_models,
+    );
 
     let ledger_rows = evidence.usable_route_eval_rows();
-    let mut candidates = tachi_dispatch::recommend_dispatch_profile_candidates(
+    let mut candidates = tachi_dispatch::recommend_dispatch_profile_candidates_with_models(
         &evidence.gates.eligible,
         &risk,
         &ledger_rows,
@@ -106,6 +109,7 @@ pub(crate) fn handle_dispatch_recommendation_with_profiles(
         &[],
         &route_policy_rules,
         tachi_dispatch::RouteEvidenceSource::DecisionFactLedger,
+        &evidence.current_models,
         // #1690 B1: `weak_against` is the static reviewed baseline — the
         // legacy `add_weak_against` overlay projection is retired, so the
         // scorer no longer loads a profile overlay for it.
@@ -631,6 +635,9 @@ mod evidence_flip_tests {
         let dispatch_id = format!("disp-{key}");
         let recommendation_id = format!("rec-{key}");
         let adjudication_id = format!("adj-{key}");
+        let seed_model = resolve_dispatch_profile(profile)
+            .and_then(tachi_dispatch::profile_resolved_model)
+            .unwrap_or_else(|| "anthropic/claude-sonnet".to_string());
 
         server
             .with_global_store(|store| {
@@ -640,9 +647,9 @@ mod evidence_flip_tests {
                      (outcome_id, dispatch_id, model, vendor, task_type, execution_outcome, \
                       identity_attribution_basis, cost_tokens, cost_usd, idempotency_key, \
                       created_at, updated_at) \
-                     VALUES (?1, ?2, 'anthropic/claude-sonnet', 'claude', 'fix_request', \
+                     VALUES (?1, ?2, ?4, 'claude', 'fix_request', \
                              'completed', 'observed', 1000, 0.5, ?1, ?3, ?3)",
-                    rusqlite::params![outcome_id, dispatch_id, occurred_at],
+                    rusqlite::params![outcome_id, dispatch_id, occurred_at, seed_model],
                 )
                 .map_err(|err| err.to_string())?;
                 conn.execute(
@@ -679,7 +686,7 @@ mod evidence_flip_tests {
                         dispatch_id: dispatch_id.clone(),
                         recommendation_id: Some(recommendation_id.clone()),
                         selected_profile: Some(profile.to_string()),
-                        selected_model: Some("anthropic/claude-sonnet".to_string()),
+                        selected_model: Some(seed_model.clone()),
                         assignment_mode: "advised".to_string(),
                         override_flag: false,
                         contract_hash: None,
@@ -1432,6 +1439,119 @@ mod evidence_flip_tests {
         assert_eq!(
             row.recommended_profile.as_deref(),
             Some(recommended.as_str())
+        );
+    }
+
+    #[test]
+    fn staff_json_model_switch_excludes_old_rows_and_skips_old_policy_rules() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _adapters = crate::test_support::NativeAdapterFixture::new();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let db_path = temp_home.path().join("global/tachi-memory.db");
+        let server = MemoryServer::new(db_path, None).expect("test memory server");
+        let available = vec!["opencode_review".to_string()];
+
+        // 1. Seed usable rows under the original OpenCode default (`openai/gpt-6.1-sol`)
+        //    plus a ledger-sourced route_policy rule pinned to `opencode_review`.
+        let now = memcore::now_utc_iso();
+        for i in 0..tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES {
+            let occurred_at = projection_rules::shift_iso(&now, -3600 * (i as i64 + 1))
+                .expect("in-window timestamp");
+            seed_usable_row(
+                &server,
+                &format!("opencode-sol-{i}"),
+                "opencode_review",
+                &available,
+                &occurred_at,
+            );
+        }
+        seed_route_policy_rule(
+            &server,
+            "route_policy:fix_request:opencode_review",
+            "fix_request",
+            "opencode_review",
+            tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+        );
+
+        let before: Value = serde_json::from_str(
+            &handle_dispatch_recommendation_with_profiles(
+                &server,
+                TASK,
+                None,
+                200,
+                &[],
+                &available,
+            )
+            .expect("baseline recommend"),
+        )
+        .expect("baseline json");
+        assert_eq!(before["recommended_model"], json!("openai/gpt-6.1-sol"));
+        assert_eq!(
+            before["ledger_evidence"]["usable_rows"],
+            json!(tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES)
+        );
+        assert_eq!(
+            before["route_policy_rules"]["applied"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 2. Switch opencode_review in $TACHI_HOME/staff.json to deepseek/deepseek-flash.
+        let staff_json = temp_home.path().join("staff.json");
+        std::fs::write(
+            &staff_json,
+            serde_json::to_vec(&json!({
+                "opencode": {"providers": ["openai", "deepseek"]},
+                "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let after: Value = serde_json::from_str(
+            &handle_dispatch_recommendation_with_profiles(
+                &server,
+                TASK,
+                None,
+                200,
+                &[],
+                &available,
+            )
+            .expect("post-switch recommend"),
+        )
+        .expect("post-switch json");
+        assert_eq!(after["recommended_model"], json!("deepseek/deepseek-flash"));
+        assert_eq!(after["ledger_evidence"]["usable_rows"], json!(0));
+        assert_eq!(
+            after["ledger_evidence"]["excluded_counts"]["model_changed"],
+            json!(tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES)
+        );
+        assert!(
+            after["route_policy_rules"]["applied"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "old rule must not score switched seat: {after:#}"
+        );
+        assert!(
+            after["route_policy_rules"]["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|rule| rule["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("model_changed:"))),
+            "skipped rule must cite model_changed: {after:#}"
         );
     }
 }
