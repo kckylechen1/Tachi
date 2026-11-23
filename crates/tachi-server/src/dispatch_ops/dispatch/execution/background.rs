@@ -51,6 +51,9 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
     );
     let observer = presence.as_ref().map(|(observer, _)| observer.clone());
     let background = async move {
+        #[cfg(any(unix, windows))]
+        let _status_hint =
+            crate::server_state::task_notifications::NotifyOnDrop::new(&server_clone, Some(&d_id));
         let _presence_guard = presence.map(|(_, guard)| guard);
         // Keep the registry entry and its sender alive for the entire
         // background lifecycle. Binding this outside the async move drops the

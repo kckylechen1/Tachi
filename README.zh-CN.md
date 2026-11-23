@@ -28,14 +28,14 @@ Tachi 是一个单二进制、本地优先的 AI Agent 记忆与协调后端。�
 - **混合检索**：语义（sqlite-vec + Voyage）、词法（针对中文优化的 FTS5）、时间衰减和图谱激活蔓延，通过 RRF 融合。
 - **项目优先**：Tachi 能识别每次调用来自哪个项目，先查该项目的记忆库，再查全局记忆和共享 Wiki。
 - **任务简报与共享看板**：紧凑的简报、谁在做什么，以及任务是“跑完了”还是“结果真正交付了”。
-- **本地加密保险库**：API Key 和 OAuth 令牌（包括第三方 MCP 服务器的）都保存在 Vault 中，不会出现在 Agent 配置里。
-- **一个 MCP 连接**：第三方 MCP 服务器只需在 Tachi 注册一次，Agent 通过同一个 Tachi 连接就能看到它们的工具。
+- **本地加密保险库**：限定范围的 API 和连接凭据保持加密，并按准入条件提供给具体命令。
+- **一个常驻 Tachi 连接**：Agent 通过 HTTP 共享 Tachi 的记忆和工作工具。第三方 MCP 服务器直接在各宿主中配置；Hub 管理保留的 skill 和 plugin 资产。
 - **无需外部数据库**：一个 Rust 二进制，每个库一个 SQLite 文件。
 
 ## 发布状态
 
 - **当前版本：** `v2.0.0`（存储 schema 39）。见 [2.0.0 发布说明](CHANGELOG.md#200---2026-09-25)。
-- **`main` 上尚未发布的变化：** 一方 MCP 只走 HTTP，Agent 入口统一为一个默认配置，项目绑定、简报和中文召回都有改进。见 [Unreleased](CHANGELOG.md#unreleased)。
+- **`main` 上尚未发布的变化：** 一方 MCP 只走 HTTP，Agent 入口统一为一个默认配置，项目绑定、简报和中文召回都有改进。Hub 的上游 MCP 代理和自动建议生产者已退役。下文能力说明对应 `main`；已发布的二进制请查阅对应 tag 的文档。见 [Unreleased](CHANGELOG.md#unreleased)。
 - **升级提示：** 从 1.9.x 升级，或者以前是让客户端以 stdio 子进程方式启动 Tachi，请先阅读 [docs/UPGRADING.md](docs/UPGRADING.md)（英文）。
 
 ---
@@ -152,11 +152,13 @@ python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:69
 | `tachi_memory` | 检索、保存、简报与复用记忆。 |
 | `tachi_task` | 任务简报、工作看板、认领、进度与完成证据。 |
 | `tachi_agent_eval` | 记录并查看原生 Worker 的有限经验。 |
-| `tachi_staff` | 按显式的人员调度策略追踪外部 Worker。 |
-| `tachi_a2a` | 经准入的 Agent 间协作。 |
+| `tachi_staff` | 按显式的派工策略启动、监督和查看 Worker。 |
+| `tachi_a2a` | 同机项目协作与信箱回执。 |
 | `vault_connections` | 读取已保存的连接元数据，并在不暴露密钥的前提下准备宿主命令。 |
 
-Worker（`delegate`）会话拿到 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_a2a` 和只读的 `vault_connections`，共五个工具：不含 `tachi_agent_eval`，也不能递归派遣。在 Tachi 注册的第三方 MCP 服务器的工具会以 `server__tool` 的名字一并出现，上游的 schema 和返回结果保持不变。
+Worker（`delegate`）会话拿到 `tachi_memory`、`tachi_task`、`tachi_staff`、`tachi_a2a` 和只读的 `vault_connections`，共五个工具：不含 `tachi_agent_eval`，也不开放 Staff start 动作。
+
+普通本地委派默认使用宿主的原生 subagent。Staff start 要求明确的 `staffing_reason` 和准入的 profile。Tachi 通过已安装 harness 的协议监督相应的 managed native session；外部附着的 harness 保留自己的生命周期管理。
 
 支持 MCP Skills 扩展的宿主可以从 `skill://tachi/SKILL.md` 按需加载 Tachi 的使用指南，这样常驻的服务器说明就能保持简短。
 
@@ -192,7 +194,7 @@ Worker（`delegate`）会话拿到 `tachi_memory`、`tachi_task`、`tachi_staff`
 
 ### 连续性与项目生命周期
 
-Tachi 记录类型化的项目事件，把重复出现的行为沉淀为可复用的模式记忆，标注结果，并把 issue、PR、文档、Wiki 页面和运行产物关联起来。之后接手的 Agent 不必从聊天记录重建上下文，就能延续同一个项目周期。GitHub 只作为 intake 和状态的只读来源。
+Tachi 记录类型化的项目事件，并关联 issue、PR、文档、Wiki 页面和运行产物。Session capture 保留来源记忆及 `session.captured` 事件；结果标签由宿主明确提交。投影和每日批量蒸馏继续保留。GitHub 状态快照只读；历史 CurrentTruth 对账保留原始 revision，明确显示陈旧或不可用的证据，不制造新的来源新鲜度。
 
 设计文档：[连续性记忆](docs/engineering/architecture/tachi-continuity-memory-architecture.md) · [项目周期主干](docs/engineering/architecture/project-cycle-memory-spine.md) · [模式时间线](docs/engineering/architecture/pattern-timeline-bonding-memory.md)
 

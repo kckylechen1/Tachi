@@ -668,10 +668,10 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
     assert!(matches!(
         error,
         MemoryError::SchemaChangedDuringOpen {
-            preflight: 44,
+            preflight,
             current: 39,
             ..
-        }
+        } if preflight == head
     ));
     assert_eq!(take_invocations(), 0);
     assert!(backups(&path).is_empty());
@@ -968,9 +968,17 @@ fn check_maintenance_shape(version: u32) {
 
 #[test]
 fn v44_upgrades_shipped_typed_record_guards_and_preserves_rows() {
-    for (profile, old_version) in [
-        (StoreProfile::PortableKernel, 41),
-        (StoreProfile::TachiFull, 43),
+    for (profile, old_version, expected_version) in [
+        (
+            StoreProfile::PortableKernel,
+            41,
+            crate::db::PORTABLE_OUTPUT_STAMP,
+        ),
+        (
+            StoreProfile::TachiFull,
+            43,
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prior.db");
@@ -1022,7 +1030,7 @@ fn v44_upgrades_shipped_typed_record_guards_and_preserves_rows() {
         assert!(!format!("{old_guards:?}").contains("tachi_typed_record_erasure_enabled"));
         drop(raw);
         assert!(
-            matches!(MemoryStore::open_with_context(path.to_str().unwrap(),&context(profile,false)),Err(MemoryError::SchemaMigrationOptInRequired {stored,expected:44,..}) if stored==old_version)
+            matches!(MemoryStore::open_with_context(path.to_str().unwrap(),&context(profile,false)),Err(MemoryError::SchemaMigrationOptInRequired {stored,expected,..}) if stored==old_version && expected==expected_version)
         );
         let mut store = MemoryStore::open_with_context(
             path.to_str().unwrap(),
@@ -1033,7 +1041,7 @@ fn v44_upgrades_shipped_typed_record_guards_and_preserves_rows() {
         let conn = store.connection();
         assert_eq!(
             crate::db::migrations::read_schema_version(conn).unwrap(),
-            44
+            expected_version
         );
         assert_eq!(store.get_typed_record(&record.id).unwrap(), Some(before));
         crate::db::validate_persistent_trigger_inventory(conn, true).unwrap();

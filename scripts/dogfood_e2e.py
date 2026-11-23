@@ -30,6 +30,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import queue
 import shutil
 import signal
 import socket
@@ -59,7 +60,7 @@ RETIRED_TOOLS = ("tachi_tune",)
 class McpSession:
     """One MCP session over the daemon's streamable HTTP endpoint."""
 
-    def __init__(self, url: str, headers: dict[str, str] | None = None):
+    def __init__(self, url: str, headers: dict[str, str] | None = None, version: str = "2025-06-18"):
         self.url = url
         self.headers = {
             "Content-Type": "application/json",
@@ -74,7 +75,7 @@ class McpSession:
                 "id": self._id(),
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": version,
                     "capabilities": {},
                     "clientInfo": {"name": "tachi-dogfood-e2e", "version": "1"},
                 },
@@ -145,6 +146,82 @@ class McpSession:
         except ValueError:
             payload = text
         return not result.get("isError", False), payload, text
+
+
+def modern_tasks_call(url: str, identity: dict, action: str, **arguments) -> dict:
+    """ReiClaw's stateless modern request, including the Tasks extension."""
+    meta = {**identity, "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {"io.modelcontextprotocol/tasks": {}}}}
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+               "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "tachi_staff"}
+    for header, field in (("X-Tachi-Agent-Identity", "tachiAgentIdentity"), ("X-Tachi-Project", "tachiProject"),
+                          ("X-Tachi-Profile", "tachiProfile"), ("X-Tachi-Client", "tachiClient")):
+        if field in identity:
+            headers[header] = identity[field]
+    request = urllib.request.Request(url, headers=headers, method="POST", data=json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "_meta": meta, "name": "tachi_staff", "arguments": {"action": action, "format": "json", **arguments}}}).encode())
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read().decode()
+        events = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:") and line[5:].strip()]
+        return json.loads(events[-1] if events else raw)
+
+
+class TaskHints:
+    """A real legacy GET /mcp stream, consumed exactly as wake hints."""
+
+    def __init__(self, session: McpSession):
+        self.session = session
+        self.events = queue.Queue()
+        self.response = urllib.request.urlopen(urllib.request.Request(
+            session.url, headers={**session.headers, "Accept": "text/event-stream",
+                                  "Mcp-Session-Id": session.session_id}, method="GET"), timeout=30)
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        try:
+            for line in self.response:
+                if line.startswith(b"data:"):
+                    data = line[5:].strip()
+                    if not data:
+                        continue
+                    try:
+                        value = json.loads(data)
+                    except ValueError:
+                        continue
+                    if isinstance(value, dict) and value.get("method") == "notifications/tasks":
+                        self.events.put(value)
+        except OSError:
+            pass
+
+    def wait(self, dispatch: str, status: str, seconds: float = 10) -> dict:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                event = self.events.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            params = event.get("params", {})
+            task_id = params.get("taskId", "")
+            suffix = task_id.removeprefix(f"tachi-result:{dispatch}:")
+            if (event.get("jsonrpc") == "2.0" and "id" not in event
+                    and task_id.startswith(f"tachi-result:{dispatch}:")
+                    and len(suffix) == 32 and all(c in "0123456789abcdef" for c in suffix)
+                    and params.get("status") == status):
+                return event
+        return {}
+
+    def close(self):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    self.session.url, headers={**self.session.headers,
+                                               "Mcp-Session-Id": self.session.session_id}, method="DELETE"), timeout=5):
+                pass
+        finally:
+            self.reader.join(timeout=2)
+            self.response.close()
 
 
 # ── Isolated daemon and fixture ──────────────────────────────────────────────
@@ -1449,6 +1526,216 @@ def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> Non
                                  task="plan a bounded feature", staffing_reason="explicit_user_request")
     ctx.check("legacy planning advice cannot authorize native Staff", not ok
               and "no admitted native Staff Session" in raw, raw)
+    ctx.done()
+
+
+@scenario("tasks", "task-push", shared_daemon=False)
+def native_status_transitions_wake_the_legacy_sse_owner(ctx: Context) -> None:
+    root = ctx.daemon.home / f"task-push-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    native_fixture(daemon, root)
+    hints = None
+    try:
+        daemon.start()
+        headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"push-owner-{ctx.tag}",
+                   "X-Tachi-Profile": "standard", "X-Tachi-Client": "reiclaw"}
+        owner = McpSession(daemon.url, headers)
+        hints = TaskHints(McpSession(daemon.url, headers, version="2025-11-25"))
+        ok, result, raw = owner.call("tachi_staff", action="start", profile="codex_sol_review",
+                                     task="Read the repository and report.", staffing_reason="explicit_user_request", format="json")
+        dispatch = find_key(result, "dispatch_id") if ok else None
+        ctx.require("native task started for SSE acceptance", bool(dispatch), raw)
+        hint = hints.wait(dispatch, "input_required")
+        ctx.require("legacy SSE receives a supervised pause wake hint", bool(hint), hint)
+        ok, status, raw = owner.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+        ctx.check("wake hint preserves canonical supervised WORKING state", ok
+                  and status.get("state") == "TASK_STATE_WORKING"
+                  and status.get("native_session", {}).get("phase") == "awaiting_instruction", status if ok else raw)
+        sidecar = daemon.app_home / "runs" / dispatch / "mcp-tasks.json"
+        ctx.check("SSE pause does not mint a result handle", json.loads(sidecar.read_text()).get("result") is None, sidecar.read_text())
+        ok, result, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                                     expected_status_revision=status["status_revision"], format="json")
+        ctx.require("owner finishes the supervised session", ok, raw)
+        hint = hints.wait(dispatch, "completed")
+        ctx.require("committed native completion emits a wake hint", bool(hint), hint)
+        ok, status, raw = owner.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+        ctx.check("completion hint is confirmed by canonical status", ok and status.get("state") == "TASK_STATE_COMPLETED", status if ok else raw)
+        ctx.check("terminal hint still does not mint a result handle", json.loads(sidecar.read_text()).get("result") is None, sidecar.read_text())
+    finally:
+        if hints:
+            hints.close()
+        daemon.stop()
+    ctx.done()
+
+
+@scenario("tasks", "result-parity", shared_daemon=False)
+def modern_and_legacy_historical_result_parity(ctx: Context) -> None:
+    root = ctx.daemon.home / f"result-parity-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    identity = {"tachiAgentIdentity": f"result-owner-{ctx.tag}", "tachiProfile": "standard", "tachiClient": "reiclaw"}
+    try:
+        daemon.start()
+        legacy = McpSession(daemon.url, {"X-Tachi-Agent-Identity": identity["tachiAgentIdentity"],
+                                       "X-Tachi-Profile": "standard", "X-Tachi-Client": "reiclaw"}, version="2025-11-25")
+        dispatch = f"historical-{ctx.tag}"
+        run = daemon.app_home / "runs" / dispatch
+        run.mkdir(parents=True)
+        (run / "status.json").write_text(json.dumps({"dispatch_id": dispatch, "state": "TASK_STATE_COMPLETED"}))
+        (run / "result.md").write_text("Historical report 中文\n" + "x" * 65000)
+        ok, expected, raw = legacy.call("tachi_staff", action="result", dispatch_id=dispatch, format="json")
+        ctx.require("legacy historical result is available", ok, raw)
+        response = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        result = response.get("result", {})
+        ctx.require("modern historical result completes synchronously", result.get("resultType") == "complete", response)
+        actual = json.loads("".join(part.get("text", "") for part in result.get("content", [])))
+        ctx.check("modern and legacy canonical result bodies are identical", actual == expected, actual)
+        ctx.check("historical report retains the 64 KiB bound and truncation flag",
+                  len(actual["result"]["body"].encode()) <= 65536 and actual["result"]["truncated"] is False, actual["result"])
+        sidecar = run / "mcp-tasks.json"
+        ctx.check("historical synchronous read mints no binding", not sidecar.exists(), str(sidecar))
+        sidecar.write_text("{broken")
+        denied = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        ctx.check("a corrupt existing binding cannot fall back to history",
+                  denied.get("error", {}).get("message") == "task unavailable", denied)
+        sidecar.unlink()
+        (run / "result.md").write_text("x" * 70000)
+        legacy_ok, _, legacy_raw = legacy.call("tachi_staff", action="result", dispatch_id=dispatch, format="json")
+        modern = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        ctx.check("both protocols preserve oversized report refusal", not legacy_ok
+                  and ("error" in modern or modern.get("result", {}).get("isError") is True),
+                  {"legacy": legacy_raw, "modern": modern})
+    finally:
+        daemon.stop()
+    ctx.done()
+
+
+@scenario("clarification", "paired-staff", shared_daemon=False)
+def native_clarification_answers_the_original_turn(ctx: Context) -> None:
+    root = ctx.daemon.home / f"clarification-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    native_fixture(daemon, root)
+    hints = None
+
+    def wait(session, dispatch, predicate):
+        status = {}
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            ok, status, raw = session.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+            if ok and predicate(status):
+                return status
+            time.sleep(0.03)
+        raise RuntimeError(f"native clarification state timeout: {status}")
+
+    def start(session, marker):
+        ok, payload, raw = session.call("tachi_staff", action="start", profile="codex_sol_review",
+                                        task=f"{marker} Read the selected branch and report.",
+                                        staffing_reason="explicit_user_request", format="json")
+        ctx.require(f"native producer starts {marker}", ok and bool(find_key(payload, "dispatch_id")), raw)
+        return find_key(payload, "dispatch_id")
+
+    def content(message):
+        return json.loads("".join(part.get("text", "") for part in message["result"].get("content", [])))
+
+    try:
+        daemon.start()
+        headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"clarify-owner-{ctx.tag}",
+                   "X-Tachi-Profile": "standard", "X-Tachi-Client": "reiclaw"}
+        owner = McpSession(daemon.url, headers, version="2025-11-25")
+        hints = TaskHints(McpSession(daemon.url, headers, version="2025-11-25"))
+        dispatch = start(owner, "[clarification]")
+        hint = hints.wait(dispatch, "input_required")
+        ctx.require("native factual question wakes the legacy SSE owner", bool(hint), hint)
+        status = wait(owner, dispatch, lambda value: value.get("native_session", {}).get("phase") == "awaiting_clarification")
+        question = status.get("read_projection", {}).get("input_required", {})
+        ctx.check("canonical clarification exposes a bounded factual question at ReiClaw's read path",
+                  status.get("state") == "TASK_STATE_INPUT_REQUIRED" and status.get("closure_kind") is None
+                  and status.get("acp_permission") is None and question.get("question") == "Which branch should be reviewed?"
+                  and bool(question.get("request_id")), status)
+        revision = status["status_revision"]
+        run = daemon.app_home / "runs" / dispatch
+        binding = json.loads((run / "mcp-tasks.json").read_text())
+        identity = {"tachiAgentIdentity": headers["X-Tachi-Agent-Identity"], "tachiProfile": "standard",
+                    "tachiClient": "reiclaw", "tachiProject": binding["owner"]["canonical_project"]}
+        stranger = modern_tasks_call(daemon.url, {**identity, "tachiAgentIdentity": "clarification-stranger"},
+                                     "continue", dispatch_id=dispatch, expected_status_revision=revision, task="main")
+        ctx.check("foreign principal cannot answer the native question", "error" in stranger
+                  or stranger.get("result", {}).get("isError") is True, stranger)
+        ok, _, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                               expected_status_revision=revision, format="json")
+        ctx.check("finish cannot consume a pending clarification", not ok, raw)
+        stale = modern_tasks_call(daemon.url, identity, "continue", dispatch_id=dispatch,
+                                  expected_status_revision=revision - 1, task="main")
+        ctx.check("stale clarification reports its observed revision",
+                  "stale_status_revision" in json.dumps(stale)
+                  and f"observed_status_revision={revision}" in json.dumps(stale), stale)
+        answered = modern_tasks_call(daemon.url, identity, "continue", dispatch_id=dispatch,
+                                     expected_status_revision=revision, task="main")
+        ctx.require("modern owner continue accepts the factual answer", answered.get("result", {}).get("isError") is not True
+                    and "error" not in answered, answered)
+        accepted = content(answered)
+        ctx.check("continue receipt is the committed WORKING revision",
+                  accepted.get("dispatch_id") == dispatch and accepted.get("state") == "TASK_STATE_WORKING"
+                  and accepted.get("status_revision") == revision + 1
+                  and accepted.get("session", {}).get("phase") == "instruction_accepted", accepted)
+        idle = wait(owner, dispatch, lambda value: value.get("native_session", {}).get("phase") == "awaiting_instruction")
+        rows = [json.loads(line) for line in (run / "runtime/home/protocol.jsonl").read_text().splitlines()]
+        answers = [row for row in rows if row.get("id") == "ask-1"]
+        ctx.check("answer resolves the original native request exactly once without starting another turn",
+                  len(answers) == 1 and answers[0].get("result", {}).get("answers", {}).get("branch", {}).get("answers") == ["main"]
+                  and sum(row.get("method") == "turn/start" for row in rows) == 1
+                  and "clarification_request" not in idle, rows)
+        replay = modern_tasks_call(daemon.url, identity, "continue", dispatch_id=dispatch,
+                                   expected_status_revision=revision, task="main")
+        ctx.check("the accepted answer cannot be replayed", "stale_status_revision" in json.dumps(replay), replay)
+        ok, _, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                               expected_status_revision=idle["status_revision"], format="json")
+        ctx.require("supervised finish still works after clarification", ok, raw)
+        ctx.require("completed clarified run emits its terminal hint", bool(hints.wait(dispatch, "completed")), dispatch)
+        result = modern_tasks_call(daemon.url, identity, "result", dispatch_id=dispatch)
+        ctx.require("modern result completes after the native clarification", result.get("result", {}).get("resultType") == "complete", result)
+        report = content(result)
+        ctx.check("canonical result proves the native worker received the answer",
+                  report.get("state") == "TASK_STATE_COMPLETED" and json.loads(report["result"]["body"])["clarification"] == ["main"], report)
+
+        for marker in ("[clarification-secret]", "[clarification-auth]", "[clarification-resolved]", "[clarification-resolved-early]"):
+            dispatch = start(owner, marker)
+            if marker == "[clarification-resolved-early]":
+                run = daemon.app_home / "runs" / dispatch
+                events = run / "events.jsonl"
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline and (not events.exists() or "fixture/clarificationResolvedBarrier" not in events.read_text()):
+                    time.sleep(0.02)
+                ctx.require("driver reads past the withdrawn pre-ack question", events.exists()
+                            and "fixture/clarificationResolvedBarrier" in events.read_text(), dispatch)
+                ok, snapshot, raw = owner.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+                ctx.check("matching pre-ack resolution never republishes an actionable question", ok
+                          and snapshot.get("state") == "TASK_STATE_WORKING"
+                          and snapshot.get("native_session", {}).get("phase") == "running"
+                          and "clarification_request" not in snapshot, snapshot if ok else raw)
+                requests = [json.loads(line) for line in (run / "runtime/home/protocol.jsonl").read_text().splitlines()]
+                ctx.check("withdrawn native request receives no answer", not any(row.get("id") == "ask-1" for row in requests), requests)
+                (run / "runtime/home/release-resolved").touch()
+            idle = wait(owner, dispatch, lambda value: value.get("native_session", {}).get("phase") == "awaiting_instruction")
+            ctx.check(f"{marker} leaves no actionable factual input", idle.get("state") == "TASK_STATE_WORKING"
+                      and "clarification_request" not in idle and "input_required" not in idle.get("read_projection", {}), idle)
+            ok, _, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                                   expected_status_revision=idle["status_revision"], format="json")
+            ctx.require(f"{marker} preserves ordinary supervised finish", ok, raw)
+            wait(owner, dispatch, lambda value: value.get("state") == "TASK_STATE_COMPLETED")
+
+        dispatch = start(owner, "[clarification]")
+        paused = wait(owner, dispatch, lambda value: value.get("native_session", {}).get("phase") == "awaiting_clarification")
+        ok, cancelled, raw = owner.call("tachi_staff", action="cancel", dispatch_id=dispatch,
+                                        expected_status_revision=paused["status_revision"], format="json")
+        ctx.require("pending clarification preserves owned cancellation", ok, raw)
+        terminal = wait(owner, dispatch, lambda value: value.get("state") == "TASK_STATE_CANCELED")
+        ctx.check("cancelled native input has no answerable request", "clarification_request" not in terminal, terminal)
+    finally:
+        if hints:
+            hints.close()
+        daemon.stop()
     ctx.done()
 
 

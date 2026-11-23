@@ -3,6 +3,21 @@ use super::{Exemption, ExemptionBasis, MachineProof, Site};
 /// Keep sorted by path.
 pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
+        path: "crates/memcore/src/db/a2a/remote/tests.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[Site {
+            symbol: "remote_rejection_has_real_gateway_receipts_and_atomic_local_isolation",
+            trigger: "REFUSE_REMOTE_REJECTION",
+            ddl: "5e5c9f33a2a19964",
+            occurrences: 1,
+        }],
+        reason: "remote_rejection_has_real_gateway_receipts_and_atomic_local_isolation \
+                 installs a TEMP failure trigger on the bare in-memory rusqlite \
+                 connection returned by memory_connection, then checks that failure \
+                 rolls back both the new envelope and received receipt. No guarded \
+                 MemoryStore connection is used. Body read 2026-11-23.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/adjudication_provenance.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
         sites: &[

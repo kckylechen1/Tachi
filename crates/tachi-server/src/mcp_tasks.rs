@@ -57,6 +57,11 @@ fn current_owner(server: &MemoryServer) -> Result<ResultOwner, rmcp::ErrorData> 
 }
 
 fn admit(server: &MemoryServer, action: &str) -> Result<ResultOwner, rmcp::ErrorData> {
+    require_profile(server, action)?;
+    current_owner(server)
+}
+
+fn require_profile(server: &MemoryServer, action: &str) -> Result<(), rmcp::ErrorData> {
     let profile = server.active_tool_profile();
     if !tachi_hub::tool_visible(
         "tachi_staff",
@@ -66,11 +71,82 @@ fn admit(server: &MemoryServer, action: &str) -> Result<ResultOwner, rmcp::Error
     {
         return Err(unavailable());
     }
-    current_owner(server)
+    Ok(())
 }
 
-/// Called once before the launcher can execute a worker. Historical/unbound
-/// runs remain usable through their existing facade; they gain no Tasks grant.
+pub(crate) fn notification_owner(server: &MemoryServer) -> Result<ResultOwner, rmcp::ErrorData> {
+    admit(server, "result")
+}
+
+/// A hint never mints a result handle, reads result.md, or supplies input authority.
+pub(crate) fn status_notification(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<rmcp::model::ServerNotification>, rmcp::ErrorData> {
+    use rmcp::model::{ServerNotification, TaskStatusNotification, TaskStatusNotificationParams};
+    let owner = notification_owner(server)?;
+    let anchor = anchor_for(server, dispatch_id)?;
+    let (binding, status) = {
+        let lock = anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(unix)]
+        anchor.validate_current_path().map_err(|_| unavailable())?;
+        let binding = read_binding(&anchor, &owner, dispatch_id)?;
+        let status = read_status(&anchor, dispatch_id)?;
+        (binding, status)
+    };
+    let payload = match status["state"].as_str() {
+        Some("TASK_STATE_COMPLETED") => TaskPayload::Completed {
+            result: Default::default(),
+        },
+        Some("TASK_STATE_FAILED") => TaskPayload::Failed {
+            error: serde_json::from_value(
+                json!({"code":-32000,"message":"Run failed; read canonical staff status."}),
+            )
+            .map_err(|_| unavailable())?,
+        },
+        Some("TASK_STATE_CANCELED") => TaskPayload::Cancelled,
+        Some("TASK_STATE_INPUT_REQUIRED") => TaskPayload::InputRequired {
+            input_requests: Default::default(),
+        },
+        Some("TASK_STATE_WORKING")
+            if status["native_session"]["phase"] == "awaiting_instruction"
+                && status["native_session"]["supervised"] == true =>
+        {
+            TaskPayload::InputRequired {
+                input_requests: Default::default(),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let task_id = if let Some(result) = binding.result {
+        if dispatch_from_task(&result.task_id)? != dispatch_id {
+            return Err(unavailable());
+        }
+        result.task_id
+    } else {
+        let key = serde_json::to_vec(&(dispatch_id, &binding.owner)).map_err(|_| unavailable())?;
+        format!(
+            "{TASK_PREFIX}{dispatch_id}:{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &key).simple()
+        )
+    };
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
+    let updated = status["updated_at"]
+        .as_str()
+        .filter(|stamp| crate::utils::parse_rfc3339(stamp).is_ok())
+        .unwrap_or(&now);
+    let mut task = Task::new(task_id, payload.status(), updated, updated).with_ttl_ms(TTL_MS);
+    task.status_message = Some("Wake hint only; read canonical tachi_staff status.".into());
+    Ok(Some(ServerNotification::TaskStatusNotification(
+        TaskStatusNotification::new(TaskStatusNotificationParams::from(DetailedTask::new(
+            task, payload,
+        ))),
+    )))
+}
+
+/// Called once before the launcher can execute a worker. Admitted global runs
+/// bind to the global source; historical runs without a sidecar gain no grant.
 pub(crate) fn prepare_run_binding(
     server: &MemoryServer,
     run_dir: &Path,
@@ -80,10 +156,10 @@ pub(crate) fn prepare_run_binding(
     let Ok(owner) = current_owner(server) else {
         return Ok(());
     };
-    let Some(project) = project else {
-        return Ok(());
+    let canonical_project = match project {
+        Some(project) => server.resolve_server_named_project_binding(project)?.0,
+        None => String::new(),
     };
-    let (canonical_project, _) = server.resolve_server_named_project_binding(project)?;
     if canonical_project != owner.canonical_project {
         return Ok(());
     }
@@ -189,7 +265,7 @@ pub(crate) fn owned_project_for_dispatch(
     {
         return None;
     }
-    Some(binding.owner.canonical_project)
+    (!binding.owner.canonical_project.is_empty()).then_some(binding.owner.canonical_project)
 }
 
 fn read_status(anchor: &AnchoredRunStatus, dispatch_id: &str) -> Result<Value, rmcp::ErrorData> {
@@ -339,6 +415,48 @@ fn project_task(
         _ => "Waiting for the existing run's final result; execution and acceptance are separate facts.".to_string(),
     });
     Ok(DetailedTask::new(task, TaskPayload::Working))
+}
+
+/// Retain the synchronous terminal-result contract for historical runs which
+/// genuinely have no binding. Hold the same anchor/fence through the response
+/// read so a concurrent binding writer cannot turn absence into an access bypass.
+pub(crate) fn begin_compatible_result(
+    server: &MemoryServer,
+    params: &CallToolRequestParams,
+) -> Result<CallToolResponse, rmcp::ErrorData> {
+    require_profile(server, "result")?;
+    let args: tachi_params::TachiStaffParams =
+        serde_json::from_value(Value::Object(params.arguments.clone().unwrap_or_default()))
+            .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+    if args.submission_id.is_some() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "submission_id is accepted only by start and key-only status",
+            None,
+        ));
+    }
+    let dispatch_id = args.dispatch_id.ok_or_else(unavailable)?;
+    let anchor = anchor_for(server, &dispatch_id)?;
+    {
+        let lock = anchor.lock();
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(unix)]
+        anchor.validate_current_path().map_err(|_| unavailable())?;
+        let _fence = anchor.acquire_fence().map_err(|_| unavailable())?;
+        if anchor
+            .read_mcp_binding()
+            .map_err(|_| unavailable())?
+            .is_none()
+        {
+            let status = anchor
+                .read_json_bounded(MAX_STATUS_BYTES)
+                .map_err(|_| unavailable())?
+                .filter(|status| status["dispatch_id"] == dispatch_id && terminal_receipt(status))
+                .ok_or_else(unavailable)?;
+            return Ok(result_response(server, &dispatch_id, status, &anchor).into());
+        }
+    }
+    // Presence, including malformed or foreign sidecars, never takes fallback.
+    begin_result(server, params)
 }
 
 pub(crate) fn begin_result(

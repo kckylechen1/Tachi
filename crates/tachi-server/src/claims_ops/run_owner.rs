@@ -19,13 +19,37 @@ pub(crate) fn current_run_owner(server: &MemoryServer) -> Result<RunOwner, Strin
     {
         return Err("run admission unavailable".into());
     }
-    let project = server.session_project().ok_or("run project unavailable")?;
-    let (canonical_project, _) = server.resolve_server_named_project_binding(&project)?;
-    let source_fingerprint =
-        server.with_named_project_store_read_identity_checked(&canonical_project, |store| {
-            crate::memory_resources::verified_project_source(server, &canonical_project, store)
-                .ok_or_else(|| "project source unavailable".to_string())
-        })?;
+    let (canonical_project, source_fingerprint) = match server.session_project() {
+        Some(project) => {
+            let (canonical_project, _) = server.resolve_server_named_project_binding(&project)?;
+            let fingerprint = server.with_named_project_store_read_identity_checked(
+                &canonical_project,
+                |store| {
+                    crate::memory_resources::verified_project_source(
+                        server,
+                        &canonical_project,
+                        store,
+                    )
+                    .ok_or_else(|| "project source unavailable".to_string())
+                },
+            )?;
+            (canonical_project, fingerprint)
+        }
+        None => {
+            // Empty is not a valid named project. Global runs bind to the
+            // admitted principal and this opened global file, never a path alone.
+            let fingerprint = server.with_global_store_read_identity_checked(|store| {
+                crate::memory_resources::source_fingerprint(
+                    &server.global_db_path_buf(),
+                    store
+                        .opened_physical_db_identity()
+                        .ok_or("global source unavailable")?,
+                )
+                .ok_or_else(|| "global source unavailable".to_string())
+            })?;
+            (String::new(), fingerprint)
+        }
+    };
     Ok(RunOwner {
         agent_identity_id,
         canonical_project,

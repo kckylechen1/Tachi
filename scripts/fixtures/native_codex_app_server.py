@@ -20,6 +20,7 @@ thread = None
 cwd = None
 mcp = None
 turn = 0
+clarification_enabled = False
 
 
 def emit(value):
@@ -29,7 +30,8 @@ def emit(value):
 def log(message):
     with (home / "protocol.jsonl").open("a") as stream:
         stream.write(json.dumps({"method": message.get("method"), "id": message.get("id"),
-                                 "params": message.get("params"), "argv": sys.argv[1:],
+                                 "params": message.get("params"), "result": message.get("result"),
+                                 "error": message.get("error"), "argv": sys.argv[1:],
                                  "process_cwd": str(Path.cwd()), "home": str(home)}) + "\n")
 
 
@@ -37,6 +39,20 @@ def reroute():
     emit({"method": "model/rerouted", "params": {"threadId": thread, "turnId": f"turn-{turn}",
                                                  "fromModel": "gpt-6.1-sol", "toModel": "gpt-5.5",
                                                  "reason": "conformance drift"}})
+
+
+def ask(prompt):
+    if not clarification_enabled:
+        raise SystemExit(20)
+    auth = "[clarification-auth]" in prompt
+    ask_id = f"ask-{turn}"
+    emit({"id": ask_id, "method": "item/tool/requestUserInput", "params": {
+        "threadId": thread, "turnId": f"turn-{turn}", "itemId": f"question-{turn}",
+        "isBlocking": False, "autoResolutionMs": None,
+        "questions": [{"id": "branch", "header": "Branch",
+                       "question": "AUTH_REQUIRED: enter your password" if auth else "Which branch should be reviewed?",
+                       "isOther": True, "isSecret": "[clarification-secret]" in prompt, "options": None}]}})
+    return ask_id
 
 
 for line in sys.stdin:
@@ -51,6 +67,7 @@ for line in sys.stdin:
         emit({"id": rid, "result": {"data": [{"id": model} for model in models]}})
     elif method == "thread/start":
         cwd = Path(params["cwd"])
+        clarification_enabled = params["config"].get("features.default_mode_request_user_input") is True
         server = params["config"].get("mcp_servers", {}).get("tachi")
         mcp = {"url": server["url"], "headers": server.get("http_headers", {})} if server else None
         thread = "thread-" + str(os.getpid())
@@ -60,8 +77,21 @@ for line in sys.stdin:
     elif method == "turn/start":
         turn += 1
         prompt = "".join(item.get("text", "") for item in params["input"])
+        resolved_early = "[clarification-resolved-early]" in prompt
+        early_ask = "[clarification]" in prompt
+        if resolved_early or early_ask:
+            ask_id = ask(prompt)
+            if resolved_early:
+                emit({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": ask_id}})
+            else:
+                emit({"method": "serverRequest/resolved", "params": {"threadId": "foreign-thread", "requestId": ask_id}})
+                emit({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": "foreign-request"}})
         emit({"id": rid, "result": {"turn": {"id": f"turn-{turn}", "status": "inProgress"}}})
         (home / "turn.json").write_text(json.dumps({"turn": turn, "thread": thread, "prompt": prompt}))
+        if resolved_early:
+            emit({"method": "fixture/clarificationResolvedBarrier", "params": {"threadId": thread}})
+            while not (home / "release-resolved").exists():
+                time.sleep(0.02)
         if "[auth-cleanup-fail]" in prompt:
             auth = home / ".codex/auth.json"
             if auth.is_file():
@@ -74,6 +104,27 @@ for line in sys.stdin:
             raise SystemExit(17)
         if "[drift]" in prompt or "[model-drift-restore]" in prompt:
             reroute()
+        clarification = None
+        if "[clarification" in prompt and not resolved_early:
+            secret = "[clarification-secret]" in prompt
+            auth = "[clarification-auth]" in prompt
+            if not early_ask:
+                ask_id = ask(prompt)
+            if "[clarification-resolved]" in prompt:
+                time.sleep(0.15)
+                emit({"method": "serverRequest/resolved", "params": {"threadId": thread, "requestId": ask_id}})
+            else:
+                answer = sys.stdin.readline()
+                if not answer:
+                    raise SystemExit(0)
+                answer = json.loads(answer)
+                log(answer)
+                clarification = answer.get("result", {}).get("answers", {}).get("branch", {}).get("answers")
+                if secret or auth:
+                    if "error" not in answer:
+                        raise SystemExit(18)
+                elif answer.get("id") != ask_id or clarification != ["main"]:
+                    raise SystemExit(19)
         emit({"id": f"srv-{turn}", "method": "item/commandExecution/requestApproval",
               "params": {"threadId": thread, "turnId": f"turn-{turn}", "command": "true"}})
         reply = sys.stdin.readline()
@@ -103,6 +154,7 @@ for line in sys.stdin:
                        "self_complete_refused": refused}
         text = json.dumps({**surface, "turn": turn, "thread": thread, "outside_blocked": outside_blocked,
                            "cwd_writable": cwd_writable, "approval_declined": declined,
+                           "clarification": clarification,
                            "mailbox": "mailbox message" in prompt})
         if "[long]" in prompt:
             text += "\n" + "x" * 70000 + "\nCOMPLETE_RESULT_TAIL"

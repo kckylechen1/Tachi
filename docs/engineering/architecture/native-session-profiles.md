@@ -19,8 +19,9 @@ separately admitted `dsh_executor` headless path remains distinct.
 | `opencode_astra_review` | OpenCode | `openai/gpt-6-astra` | Unspecified | No | 4 | 600 |
 | `opencode_terra_write` | OpenCode | `openai/gpt-6.1-terra` | Unspecified | Managed worktree | 8 | 600 |
 
-All six profiles use supervised native ACP Session transport. Each run also has a
-fixed total lifetime of `turn ceiling × seconds per turn`, including time spent
+All six profiles share Tachi's native session supervisor. Codex uses its local
+app-server dialect; OpenCode uses ACP, as listed below. Each run also has a fixed
+total lifetime of `turn ceiling × seconds per turn`, including time spent
 waiting for supervision; each active turn independently has the listed timeout. These are requested
 pins, not assertions about adapter installation, account access or model
 availability. OpenCode has no claimed effort control in these profiles. Its
@@ -66,8 +67,8 @@ model and effort at `thread/start` (`model`, `config.model_reasoning_effort`,
 `config.mcp_servers`) and fails unless the local roster offers the model and the
 response echoes both. A turn ends only at `turn/completed`; a non-`completed`
 status, `model/rerouted`, or any identity drift fails the run without retry.
-Server-to-client requests are refused fail-closed with a receipt (approvals are
-declined). Codex has no in-turn effort notification, so effort is evidenced once,
+Server-to-client approvals are declined with a receipt. The factual-input
+exception is described below; other server requests remain refused. Codex has no in-turn effort notification, so effort is evidenced once,
 at thread start.
 
 The public Staff profile list filters profiles whose adapter or host filesystem
@@ -139,7 +140,7 @@ Use `tachi_staff(start)` with an explicit admitted profile and a durable
 `submission_id` when a lost response must be recoverable. Read `status` and use its
 `status_revision` for `continue` or `finish`. These controls accept only the
 original owner on the owning daemon while `native_session.phase` is
-`awaiting_instruction`. `continue` accepts the next instruction in `task`;
+`awaiting_instruction`, or for `continue` only, at the factual-input boundary below. `continue` accepts the next instruction in `task`;
 `finish` accepts no task and closes the same session. A fourth review turn or
 eighth write turn finishes automatically. Cancellation is valid during a running
 turn or at a boundary and uses the existing owned-child termination finalizer.
@@ -152,6 +153,35 @@ Successful `continue` and `finish` responses carry `state`, `dispatch_id`,
 has session phase `finished` while the canonical run is still working; read
 `status` for the later terminal result rather than treating the acknowledgement
 as completion. The facade's `status` field describes the tool call, not run state.
+
+### Factual input during a Codex turn
+
+A managed Codex `item/tool/requestUserInput` for the active thread and turn may
+pause the same worker with `state=TASK_STATE_INPUT_REQUIRED` and
+`native_session.phase=awaiting_clarification`. This supports one explicitly
+non-secret question per request, up to three requests per run. The sanitized
+question and server-owned request ID appear in `clarification_request` and
+`read_projection.input_required`, with no closure kind or ACP permission request.
+Questions and answers are bounded to 4096 UTF-8 bytes. Choice-only requests accept
+an offered label; free-text requests accept factual text. Credential/authentication
+input and approval requests cannot use this path. OpenCode/ACP has no factual-input
+producer in this slice, and a question in ordinary worker output is not one.
+Tachi enables `features.default_mode_request_user_input` in the managed thread's
+private configuration so the installed Codex can ask while staying in its normal
+execution mode. This uses the upstream app-server Default-mode feature contract;
+adapter-version compatibility still needs real-account native acceptance.
+
+The original owner sends `continue` with the current `expected_status_revision`
+and its answer in `task`. Acceptance clears the pending question, advances the
+canonical revision and returns `WORKING` / `instruction_accepted`. The driver sends
+the answer to that exact native request and resumes the original turn; it does not
+start another turn. `finish` remains confined to a supervised turn boundary.
+Stale requests report `stale_status_revision` and `observed_status_revision`.
+Missing live control, a previous daemon epoch, partial closure, pending permission,
+cancellation and completion recovery all refuse continuation. Native request
+resolution, completion, timeout, failure and cancellation withdraw the question.
+The wait is bounded by 300 seconds and the existing turn/lifetime limits; mailbox
+intake never supplies an answer. This does not change filesystem or tool authority.
 
 The launch-bound mailbox recipient is `staff:<dispatch_id>`. Its existing global
 mailbox admission is scoped to the bound project. Intake occurs only between

@@ -671,6 +671,7 @@ impl super::supervised::SessionDriver for NativeAcpConnection {
     async fn run_turn(
         &mut self,
         spec: &NativeAcpRunSpec,
+        _control: Option<&mut crate::managed_run_control::native_session::NativeSessionControl>,
     ) -> Result<NativeAcpPromptOutcome, String> {
         self.run_prompt_turn(spec).await
     }

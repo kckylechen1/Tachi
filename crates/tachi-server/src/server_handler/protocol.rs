@@ -237,6 +237,10 @@ impl ServerHandler for MemoryServer {
                 crate::claims_ops::sanitize_presence_field(&request.client_info.name, 160),
             );
             context.peer.set_peer_info(request);
+            #[cfg(any(unix, windows))]
+            if context.extensions.get::<http::request::Parts>().is_some() {
+                self.task_notifications.register(self, context.peer.clone());
+            }
             self.touch_activity();
             Ok(info)
         }
@@ -493,7 +497,7 @@ impl ServerHandler for MemoryServer {
                     .and_then(serde_json::Value::as_str)
                     == Some("json")
             {
-                return crate::mcp_tasks::begin_result(server, &params);
+                return crate::mcp_tasks::begin_compatible_result(server, &params);
             }
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────

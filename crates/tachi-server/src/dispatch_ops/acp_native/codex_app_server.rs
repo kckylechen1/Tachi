@@ -11,6 +11,9 @@ use super::super::dispatch_v2::append_trajectory_event;
 use super::connection::sanitize_receipt_field;
 use super::supervised::{append_raw_event, SessionDriver};
 use super::{NativeAcpEventTarget, NativeAcpPromptOutcome, NativeAcpRunSpec, NativeAcpStagedEvent};
+use crate::managed_run_control::native_session::{
+    pause_for_clarification, safe_clarification_text, update_phase, NativeSessionControl,
+};
 
 pub(super) struct CodexAppServerConnection {
     stdin: Option<ChildStdin>,
@@ -22,6 +25,8 @@ pub(super) struct CodexAppServerConnection {
     turn_number: u64,
     thread_id: Option<String>,
     active_turn: Option<String>,
+    pending_user_input: Option<Value>,
+    clarification_count: u8,
     /// Evidence for the current thread, keyed by turn id, so ordering between a
     /// turn/start response and its notifications cannot misattribute output.
     turns: HashMap<String, TurnRecord>,
@@ -65,6 +70,8 @@ impl CodexAppServerConnection {
             turn_number: 0,
             thread_id: None,
             active_turn: None,
+            pending_user_input: None,
+            clarification_count: 0,
             turns: HashMap::new(),
             observed_model: None,
             observed_effort: None,
@@ -136,6 +143,16 @@ impl CodexAppServerConnection {
                 }
                 return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
+            // A server ask may race the turn/start response. Its identity is
+            // checked only after that response establishes the active turn.
+            if method == "turn/start"
+                && message["method"] == "item/tool/requestUserInput"
+                && message.get("id").is_some()
+                && self.pending_user_input.is_none()
+            {
+                self.pending_user_input = Some(message);
+                continue;
+            }
             self.process(message).await?;
         }
     }
@@ -154,6 +171,16 @@ impl CodexAppServerConnection {
         let own_thread =
             self.thread_id.is_some() && params["threadId"].as_str() == self.thread_id.as_deref();
         match method.as_str() {
+            "serverRequest/resolved" => {
+                if own_thread
+                    && self
+                        .pending_user_input
+                        .as_ref()
+                        .is_some_and(|ask| ask["id"] == params["requestId"])
+                {
+                    self.pending_user_input = None;
+                }
+            }
             "model/rerouted" => {
                 self.observed_model = params["toModel"].as_str().map(str::to_string);
                 self.identity_fault = Some(format!(
@@ -249,6 +276,97 @@ impl CodexAppServerConnection {
         self.send(response).await
     }
 
+    async fn clarify(
+        &mut self,
+        message: Value,
+        spec: &NativeAcpRunSpec,
+        control: &mut NativeSessionControl,
+    ) -> Result<(), String> {
+        let Some(ask) = clarification_request(
+            &message,
+            self.thread_id.as_deref(),
+            self.active_turn.as_deref(),
+        ) else {
+            return self
+                .refuse_server_request(&message, "item/tool/requestUserInput")
+                .await;
+        };
+        if !spec.managed || self.clarification_count >= 3 {
+            return self
+                .refuse_server_request(&message, "item/tool/requestUserInput")
+                .await;
+        }
+        self.check_profile(spec)?;
+        let phase = |driver: &Self, phase| {
+            super::supervised::projection(driver, spec, driver.turn_number, phase, None)
+        };
+        pause_for_clarification(
+            &control.server,
+            &self.dispatch_id,
+            phase(self, "awaiting_clarification"),
+            &ask.question,
+        )?;
+        self.clarification_count += 1;
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(300));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                incoming = self.read() => {
+                    let incoming = incoming?;
+                    let resolved = incoming["method"] == "serverRequest/resolved"
+                        && incoming["params"]["threadId"].as_str() == self.thread_id.as_deref()
+                        && incoming["params"]["requestId"] == message["id"];
+                    self.process(incoming).await?;
+                    self.check_profile(spec)?;
+                    let completed = self.active_turn.as_ref().and_then(|turn| self.turns.get(turn))
+                        .is_some_and(|record| record.completed.is_some());
+                    if resolved || completed {
+                        update_phase(&control.server, &self.dispatch_id, None, phase(self, "running"))?;
+                        return Ok(());
+                    }
+                },
+                _ = &mut deadline => return Err("native clarification timed out; no automatic retry".into()),
+                command = control.turns.recv() => {
+                    let command = command.ok_or("native clarification controller lost")?;
+                    let answer = command.prompt.as_deref().ok_or_else(|| "finish is unavailable while clarification is pending".to_string())
+                        .and_then(safe_clarification_text)
+                        .and_then(|answer| {
+                            if ask.choices.as_ref().is_some_and(|choices| !choices.contains(&answer)) {
+                                Err("clarification requires one of the offered choices".into())
+                            } else { Ok(answer) }
+                        });
+                    let answer = match answer {
+                        Ok(answer) => answer,
+                        Err(error) => { let _ = command.response.send(Err(error)); continue; },
+                    };
+                    let accepted = update_phase(&control.server, &self.dispatch_id, Some(command.expected_revision), phase(self, "instruction_accepted"));
+                    let receipt = match accepted {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            let refusal = error.starts_with("stale_status_revision:") || error == "native session is not at an admitted input boundary";
+                            let _ = command.response.send(Err(error.clone()));
+                            if refusal { continue; }
+                            return Err(error);
+                        },
+                    };
+                    // This answers the pending native request in the current
+                    // turn. It never starts a second turn or grants permission.
+                    let sent = self.send(json!({"id": message["id"], "result": {"answers": {
+                        ask.question_id: {"answers": [answer]},
+                    }}})).await;
+                    if let Err(error) = sent {
+                        let _ = command.response.send(Err("native clarification outcome is unknown; read status before any retry".into()));
+                        return Err(error);
+                    }
+                    let _ = command.response.send(Ok(receipt));
+                    update_phase(&control.server, &self.dispatch_id, None, phase(self, "running"))?;
+                    return Ok(());
+                },
+            }
+        }
+    }
+
     fn map_event(&mut self, event: &str, kind: &str, text: Option<String>) {
         let target = if event == "acp_native_message" {
             NativeAcpEventTarget::Progress
@@ -292,6 +410,9 @@ impl CodexAppServerConnection {
             ));
         }
         let mut config = json!({"mcp_servers": codex_mcp_servers(&spec.mcp_servers)?});
+        if spec.managed {
+            config["features.default_mode_request_user_input"] = json!(true);
+        }
         if let Some(effort) = contract["effort"].as_str() {
             config["model_reasoning_effort"] = json!(effort);
         }
@@ -331,6 +452,67 @@ impl CodexAppServerConnection {
         crate::staffing_ops::presence::worker_event("ready", "acp_session_initialized");
         Ok(())
     }
+}
+
+struct ClarificationRequest {
+    question_id: String,
+    question: String,
+    choices: Option<Vec<String>>,
+}
+
+/// The supported factual-input producer is Codex's typed, single-question
+/// request. Text that happens to end in a question mark is never a producer.
+fn clarification_request(
+    message: &Value,
+    thread: Option<&str>,
+    turn: Option<&str>,
+) -> Option<ClarificationRequest> {
+    let params = &message["params"];
+    let bounded_id = |value: &Value| {
+        value.as_str().is_some_and(|id| {
+            !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+        })
+    };
+    if message["method"] != "item/tool/requestUserInput"
+        || !(bounded_id(&message["id"]) || message["id"].is_i64() || message["id"].is_u64())
+        || thread.is_none()
+        || turn.is_none()
+        || params["threadId"].as_str() != thread
+        || params["turnId"].as_str() != turn
+        || !bounded_id(&params["itemId"])
+    {
+        return None;
+    }
+    let questions = params["questions"].as_array()?;
+    if questions.len() != 1 {
+        return None;
+    }
+    let question = &questions[0];
+    if question["isSecret"] != false || !bounded_id(&question["id"]) {
+        return None;
+    }
+    let mut text = safe_clarification_text(question["question"].as_str()?).ok()?;
+    let choices = if let Some(options) = question["options"]
+        .as_array()
+        .filter(|options| !options.is_empty())
+    {
+        if options.len() > 12 {
+            return None;
+        }
+        let choices = options
+            .iter()
+            .map(|option| safe_clarification_text(option["label"].as_str()?).ok())
+            .collect::<Option<Vec<_>>>()?;
+        text = safe_clarification_text(&format!("{text}\nChoices: {}", choices.join("; "))).ok()?;
+        (question["isOther"] != true).then_some(choices)
+    } else {
+        None
+    };
+    Some(ClarificationRequest {
+        question_id: question["id"].as_str()?.to_string(),
+        question: text,
+        choices,
+    })
 }
 
 /// ACP-shaped MCP descriptors become a run-private codex `mcp_servers` override.
@@ -418,6 +600,7 @@ impl SessionDriver for CodexAppServerConnection {
     async fn run_turn(
         &mut self,
         spec: &NativeAcpRunSpec,
+        mut control: Option<&mut NativeSessionControl>,
     ) -> Result<NativeAcpPromptOutcome, String> {
         if self.thread_id.is_none() {
             self.start_thread(spec).await?;
@@ -446,9 +629,22 @@ impl SessionDriver for CodexAppServerConnection {
                 .get(&turn_id)
                 .is_some_and(|record| record.completed.is_some())
             {
+                if let Some(message) = self.pending_user_input.take() {
+                    self.refuse_server_request(&message, "item/tool/requestUserInput")
+                        .await?;
+                }
                 break self.turns.remove(&turn_id).expect("completed turn present");
             }
-            let message = self.read().await?;
+            let message = match self.pending_user_input.take() {
+                Some(message) => message,
+                None => self.read().await?,
+            };
+            if message["method"] == "item/tool/requestUserInput" && message.get("id").is_some() {
+                if let Some(control) = control.as_deref_mut() {
+                    self.clarify(message, spec, control).await?;
+                    continue;
+                }
+            }
             self.process(message).await?;
         };
         self.active_turn = None;
