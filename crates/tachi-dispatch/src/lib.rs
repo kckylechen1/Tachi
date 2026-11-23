@@ -73,10 +73,10 @@ pub use profiles::{
     profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
     resolve_and_apply_dispatch_profile, resolve_and_apply_staff_assignment_profile,
     resolve_and_apply_staff_assignment_profile_with_config, resolve_dispatch_profile,
-    retired_dispatch_profile, DispatchProfileAlias, DispatchProfileDef, NativeSessionPolicy,
-    NativeSessionProfile, ResolvedDispatchProfile, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
-    MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
-    ROUTE_POLICY_RULE_SCORE_BONUS,
+    resolved_profile_model_with_config, retired_dispatch_profile, DispatchProfileAlias,
+    DispatchProfileDef, NativeSessionPolicy, NativeSessionProfile, ResolvedDispatchProfile,
+    DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES, MIN_ROUTE_POLICY_RULE_SAMPLES,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported,
@@ -85,12 +85,13 @@ pub use registry::{
 };
 pub use routing::{
     build_dispatch_recommendation_response, build_profile_fallback_chain,
-    build_route_policy_rule_loadout, classify_dispatch_risk, profile_role_matches,
-    recommend_dispatch_profile_candidates, route_eval_rows, AppliedRoutePolicyRule, DispatchRisk,
-    ProfileCandidate, RecommendationProfilePayload, RouteEvalRow, RouteEvidenceSource,
-    RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord, RouteSubagentScore,
-    SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON, RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
-    ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
+    build_route_policy_rule_loadout, build_route_policy_rule_loadout_for_models,
+    classify_dispatch_risk, profile_role_matches, recommend_dispatch_profile_candidates,
+    recommend_dispatch_profile_candidates_with_models, route_eval_rows, AppliedRoutePolicyRule,
+    DispatchRisk, ProfileCandidate, RecommendationProfilePayload, RouteEvalRow,
+    RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord,
+    RouteSubagentScore, SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON,
+    RETIRED_EVIDENCE_SOURCE_SKIP_REASON, ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
 };
 pub use signatures::{
     dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,

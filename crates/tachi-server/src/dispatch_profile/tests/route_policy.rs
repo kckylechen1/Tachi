@@ -191,3 +191,78 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
         "neither refused rule may reach the applied loadout: {loadout:#?}"
     );
 }
+
+#[test]
+fn build_route_policy_rule_loadout_for_models_skips_mismatched_and_switched_opencode_rules() {
+    let min_samples = tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES;
+    let ledger = tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER;
+    let make_record = |id: &str, prefer_profile: &str, prefer_model: Option<&str>| {
+        let mut policy_rule = serde_json::json!({
+            "when_task_type": "review_request",
+            "prefer_profile": prefer_profile,
+        });
+        if let Some(model) = prefer_model {
+            policy_rule["prefer_model"] = serde_json::json!(model);
+        }
+        RoutePolicyRuleRecord {
+            proposal_id: id.to_string(),
+            value_json: serde_json::json!({
+                "proposal_id": id,
+                "status": "applied",
+                "review": {"status": "approved"},
+                "policy": "model_scoped",
+                "policy_rule": policy_rule,
+                "evidence": {
+                    "source": ledger,
+                    "proposed": {"samples": min_samples}
+                }
+            })
+            .to_string(),
+        }
+    };
+    let records = vec![
+        make_record(
+            "rule:matching-model",
+            "opencode_review",
+            Some("deepseek/deepseek-flash"),
+        ),
+        make_record(
+            "rule:stale-model",
+            "opencode_review",
+            Some("openai/gpt-6.2-sol"),
+        ),
+        make_record("rule:unpinned-switched-seat", "opencode_write", None),
+    ];
+    let risk = DispatchRisk {
+        task_type: "review_request".to_string(),
+        risk: "medium".to_string(),
+        reasons: Vec::new(),
+        required_profiles: Vec::new(),
+        blocked_profiles: Vec::new(),
+    };
+    let current_models = std::collections::BTreeMap::from([
+        (
+            "opencode_review".to_string(),
+            "deepseek/deepseek-flash".to_string(),
+        ),
+        (
+            "opencode_write".to_string(),
+            "zhipuai-coding-plan/glm-5.3".to_string(),
+        ),
+    ]);
+    let loadout = tachi_dispatch::build_route_policy_rule_loadout_for_models(
+        &records,
+        &risk,
+        &current_models,
+    );
+    assert_eq!(loadout.applied.len(), 1, "{loadout:#?}");
+    assert_eq!(loadout.applied[0].proposal_id, "rule:matching-model");
+    assert!(loadout.skipped.iter().any(|r| {
+        r.proposal_id == "rule:stale-model"
+            && r.reason == "model_changed:openai/gpt-6.2-sol!=deepseek/deepseek-flash"
+    }));
+    assert!(loadout.skipped.iter().any(|r| {
+        r.proposal_id == "rule:unpinned-switched-seat"
+            && r.reason == "model_changed:unpinned!=zhipuai-coding-plan/glm-5.3"
+    }));
+}

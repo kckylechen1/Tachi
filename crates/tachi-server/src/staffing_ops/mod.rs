@@ -127,6 +127,33 @@ pub(crate) async fn staff_start(
     Ok(outcome.raw)
 }
 
+fn decision_is_override(
+    row: &memcore::RouteRecommendationRow,
+    selected_profile: Option<&str>,
+    selected_model: Option<&str>,
+) -> bool {
+    if row.recommended_profile.as_deref() != selected_profile {
+        return true;
+    }
+    let Some(selected_model) = selected_model.map(str::trim).filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let Some(profile) = selected_profile else {
+        return false;
+    };
+    row.candidates
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|entry| entry.get("profile").and_then(|v| v.as_str()) == Some(profile))
+        })
+        .and_then(|entry| entry.get("model").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .is_some_and(|recommended_model| recommended_model != selected_model)
+}
+
 /// tachi#1675 PR1 Seam B implementation. Parses the dispatch response for
 /// `dispatch_id`/`selected_profile`, re-reads the just-written canonical
 /// `status.json` for `env_id`/`host_profile`/`authority`/`identity_receipt`
@@ -198,7 +225,9 @@ fn record_route_decision_best_effort(
     };
     let override_flag = resolved_recommendation
         .as_ref()
-        .map(|row| row.recommended_profile != selected_profile)
+        .map(|row| {
+            decision_is_override(row, selected_profile.as_deref(), selected_model.as_deref())
+        })
         .unwrap_or(false);
     let recommendation_id = resolved_recommendation.map(|row| row.recommendation_id.clone());
 
@@ -1624,6 +1653,56 @@ pub(crate) mod tests {
         assert!(
             !row.override_flag,
             "selected_profile matches the recommendation -> no override"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn record_route_decision_marks_model_divergence_within_same_profile_as_override() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = test_server();
+
+        let recommendation = server
+            .with_global_store(|store| {
+                memcore::insert_route_recommendation(
+                    store.connection(),
+                    &memcore::NewRouteRecommendation {
+                        recommendation_id: "rec-model-diff".to_string(),
+                        task_type: Some("review_request".to_string()),
+                        risk: "low".to_string(),
+                        candidates: serde_json::json!([
+                            {"profile": "opencode_review", "model": "openai/gpt-6.2-sol"}
+                        ]),
+                        recommended_profile: Some("opencode_review".to_string()),
+                        policy_source_revision: Some("rev-1".to_string()),
+                        rows_considered: 1,
+                        occurred_at: memcore::now_utc_iso(),
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+
+        let dispatch_id = "20260810T000004Z-opencode-dddddddd";
+        seed_status_json(dispatch_id, "env-1", "dev", "deepseek/deepseek-flash");
+        let raw = fake_raw_response(dispatch_id, "opencode_review");
+
+        record_route_decision_best_effort(&server, &raw, Some(&recommendation));
+
+        let row = server
+            .with_global_store_read(|store| {
+                memcore::get_route_decision_by_dispatch_id(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.override_flag,
+            "selecting a different model on the recommended seat counts as an override"
         );
     }
 

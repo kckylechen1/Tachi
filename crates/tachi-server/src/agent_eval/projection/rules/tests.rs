@@ -44,6 +44,7 @@ struct Row {
     terminal_outcome: Option<&'static str>,
     terminal: TerminalCheck,
     task_type: Option<&'static str>,
+    model: Option<&'static str>,
     cost_usd: Option<f64>,
     cost_tokens: Option<u64>,
     duration_ms: Option<u64>,
@@ -74,6 +75,7 @@ impl Default for Row {
             terminal_outcome: Some("completed"),
             terminal: TerminalCheck::Consistent,
             task_type: Some(TASK_TYPE),
+            model: Some("anthropic/claude-sonnet"),
             cost_usd: Some(1.0),
             cost_tokens: Some(1_000),
             duration_ms: None,
@@ -158,7 +160,7 @@ impl Row {
                     EvalSpine::Dispatch => ProfileAttributionBasis::RouteDecision,
                     EvalSpine::Mirror => ProfileAttributionBasis::MirrorRequested,
                 },
-                model: Some("anthropic/claude-sonnet".to_string()),
+                model: self.model.map(str::to_string),
                 vendor: Some("claude".to_string()),
                 task_type: self.task_type.map(str::to_string),
                 terminal_outcome: self.terminal_outcome.map(str::to_string),
@@ -194,7 +196,15 @@ fn eligible(profiles: &[&str]) -> Vec<String> {
 }
 
 fn run(rows: &[ProjectionRow], eligible_profiles: &[String]) -> ProjectionOutcome {
-    project(rows, eligible_profiles, SINCE, None, NOW, Some(TASK_TYPE))
+    project(
+        rows,
+        eligible_profiles,
+        SINCE,
+        None,
+        NOW,
+        Some(TASK_TYPE),
+        &BTreeMap::new(),
+    )
 }
 
 fn candidate<'a>(outcome: &'a ProjectionOutcome, profile: &str) -> &'a CandidateSummary {
@@ -983,4 +993,44 @@ fn read_time_cap_downgrades_unwitnessed_cross_vendor_and_preserves_self_and_excl
         Some(&1),
         "human_override without owner proof must be excluded"
     );
+}
+
+#[test]
+fn model_changed_excludes_mismatched_observations_and_retains_matching_or_absent_models() {
+    let mut specs = repeat(
+        Row {
+            profile: "profile_a",
+            model: Some("openai/gpt-6.2-sol"),
+            ..Row::default()
+        },
+        2,
+    );
+    specs.extend(repeat(
+        Row {
+            profile: "profile_a",
+            model: Some("deepseek/deepseek-flash"),
+            ..Row::default()
+        },
+        2,
+    ));
+    specs.push(Row {
+        profile: "profile_a",
+        model: None,
+        ..Row::default()
+    });
+    let current_models = BTreeMap::from([(
+        "profile_a".to_string(),
+        "deepseek/deepseek-flash".to_string(),
+    )]);
+    let outcome = project(
+        &rows(specs),
+        &eligible(&["profile_a"]),
+        SINCE,
+        None,
+        NOW,
+        Some(TASK_TYPE),
+        &current_models,
+    );
+    assert_eq!(outcome.usable_rows, 3);
+    assert_eq!(outcome.excluded_counts.get(reason::MODEL_CHANGED), Some(&2));
 }
