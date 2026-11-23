@@ -191,16 +191,17 @@ async fn staff_preflight_with_home(
         }),
     };
 
+    let staff_config = if backend == "opencode" {
+        match tachi_home {
+            Some(home) => Some(tachi_dispatch::load_staff_config(home)?),
+            None => Some(tachi_dispatch::StaffConfig::default()),
+        }
+    } else {
+        None
+    };
+
     if let Some((_, profile_def)) = resolved_profile {
         if let Some(native) = tachi_dispatch::native_session_profile(profile_def.name) {
-            let staff_config = if native.backend == "opencode" {
-                match tachi_home {
-                    Some(home) => Some(tachi_dispatch::load_staff_config(home)?),
-                    None => Some(tachi_dispatch::StaffConfig::default()),
-                }
-            } else {
-                None
-            };
             let mut contract = serde_json::to_value(native).map_err(|e| e.to_string())?;
             if let Some(configured) = staff_config
                 .as_ref()
@@ -806,16 +807,33 @@ mod tests {
                 .is_ok(),
             "Codex preflight must survive invalid OpenCode staff.json"
         );
-        let err = runtime
-            .block_on(staff_preflight_for_server(
-                &server,
-                &params(json!({
-                    "action": "preflight",
-                    "worker": "opencode",
-                    "profile": "opencode_review"
-                })),
-            ))
-            .unwrap_err();
-        assert!(err.contains("opencode.providers"), "{err}");
+        assert!(
+            runtime
+                .block_on(staff_preflight_for_server(
+                    &server,
+                    &params(json!({
+                        "action": "preflight",
+                        "worker": "codex"
+                    })),
+                ))
+                .is_ok(),
+            "Profileless Codex preflight must survive invalid OpenCode staff.json"
+        );
+        for raw in [
+            json!({
+                "action": "preflight",
+                "worker": "opencode",
+                "profile": "opencode_review"
+            }),
+            json!({
+                "action": "preflight",
+                "worker": "opencode"
+            }),
+        ] {
+            let err = runtime
+                .block_on(staff_preflight_for_server(&server, &params(raw)))
+                .unwrap_err();
+            assert!(err.contains("opencode.providers"), "{err}");
+        }
     }
 }
