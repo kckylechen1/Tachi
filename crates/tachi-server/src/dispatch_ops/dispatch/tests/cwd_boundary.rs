@@ -174,7 +174,7 @@ async fn native_backend_protocol_and_sandbox_use_the_opened_directory() {
     std::fs::create_dir(auth.join("opencode")).unwrap();
     std::fs::write(
         auth.join("opencode/auth.json"),
-        r#"{"fixture":"no real account"}"#,
+        r#"{"openai":{"type":"api","key":"fixture-no-real-account"}}"#,
     )
     .unwrap();
     let adapter = root.join("peer.py");
