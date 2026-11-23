@@ -1774,10 +1774,12 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
     def revision(status):
         return find_key(status, "status_revision")
 
-    def start(session, task, profile="codex_sol_review", key=None):
+    def start(session, task, profile="codex_sol_review", key=None, model=None):
         args = dict(action="start", profile=profile, task=task, staffing_reason="explicit_user_request", format="json")
         if key:
             args["submission_id"] = key
+        if model:
+            args["model"] = model
         ok, payload, raw = session.call("tachi_staff", **args)
         dispatch = find_key(payload, "dispatch_id") if ok else None
         if not dispatch:
@@ -1953,6 +1955,38 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         residue = sorted(path.name for path in writer_store.glob("*")) if writer_store.exists() else []
         ctx.check("OpenCode credential snapshot and imported store are removed at terminal",
                   not {"auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm"} & set(residue), residue)
+
+        staff_json = daemon.app_home / "staff.json"
+        staff_json.write_text(json.dumps({
+            "opencode": {"providers": ["openai", "deepseek"]},
+            "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}},
+        }))
+        staff_json.chmod(0o600)
+        try:
+            seat_default = start(owner, "Review using staff.json seat default.", profile="opencode_review")
+            seat_default_status = idle(owner, seat_default)
+            seat_default_report = (daemon.app_home / "runs" / seat_default / "result.md").read_text()
+            ctx.check("opencode_review picks up staff.json default_model without daemon restart",
+                      find_key(seat_default_status, "native_session")["observed"]["model"] == "deepseek/deepseek-flash"
+                      and '"opencode_auth": ["deepseek"]' in seat_default_report, seat_default_status)
+            finish(owner, seat_default, seat_default_status)
+
+            seat_override = start(owner, "Review using explicit model override.",
+                                  profile="opencode_review", model="deepseek/deepseek-v4-pro")
+            seat_override_status = idle(owner, seat_override)
+            seat_override_report = (daemon.app_home / "runs" / seat_override / "result.md").read_text()
+            ctx.check("explicit allowlisted model overrides staff.json seat default",
+                      find_key(seat_override_status, "native_session")["observed"]["model"] == "deepseek/deepseek-v4-pro"
+                      and '"opencode_auth": ["deepseek"]' in seat_override_report, seat_override_status)
+            finish(owner, seat_override, seat_override_status)
+
+            ok_unlisted, _, raw_unlisted = owner.call(
+                "tachi_staff", action="start", profile="opencode_review", model="unlisted/foo",
+                task="Must refuse unlisted provider.", staffing_reason="explicit_user_request", format="json")
+            ctx.check("unlisted OpenCode provider override is refused by staff.json allowlist",
+                      not ok_unlisted and "allowlist" in raw_unlisted, raw_unlisted)
+        finally:
+            staff_json.unlink(missing_ok=True)
 
         drift = start(owner, "[drift] Refuse configuration changes during a turn.")
         drift_status = wait(owner, drift, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")

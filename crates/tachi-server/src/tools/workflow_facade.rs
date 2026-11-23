@@ -59,7 +59,7 @@ impl MemoryServer {
         let format = params.format.clone();
         let raw = match action.as_str() {
             "roster" => crate::staffing_ops::presence::staff_roster(self, &params)?,
-            "preflight" => crate::staffing_ops::staff_preflight(&params).await?,
+            "preflight" => crate::staffing_ops::staff_preflight_for_server(self, &params).await?,
             "start" => {
                 if params.expected_status_revision.is_some() {
                     return Err("tachi_staff: action='start' rejects cancel-only field `expected_status_revision`".to_string());

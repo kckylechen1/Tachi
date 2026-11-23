@@ -160,14 +160,14 @@ fn glm_profile_alias_resolves_to_current_model_card_profile() {
     .expect("compat alias should resolve");
 
     assert_eq!(params.profile.as_deref(), Some("glm_impl"));
-    assert_eq!(params.model.as_deref(), Some("zhipuai-coding-plan/glm-5.2"));
+    assert_eq!(params.model.as_deref(), Some("zhipuai-coding-plan/glm-5.3"));
     assert_eq!(resolved.selected_profile.as_deref(), Some("glm_impl"));
     let receipt = &resolved.identity_receipt;
     assert_eq!(receipt.requested.profile.as_deref(), Some("glm_51_impl"));
     assert_eq!(receipt.planned.profile.as_deref(), Some("glm_impl"));
     assert_eq!(
         receipt.planned.model.as_deref(),
-        Some("zhipuai-coding-plan/glm-5.2")
+        Some("zhipuai-coding-plan/glm-5.3")
     );
     assert_eq!(receipt.planned.model_lineage_id, "zhipuai-coding-plan/glm");
     assert_eq!(
@@ -422,7 +422,7 @@ fn glm_model_registry_supports_env_override_and_profile_json_metadata() {
     assert_eq!(card["model_card"]["vendor"], json!("glm"));
     assert_eq!(
         card["model_card"]["default_model"],
-        json!("zhipuai-coding-plan/glm-5.2")
+        json!("zhipuai-coding-plan/glm-5.3")
     );
     assert_eq!(card["deprecated_aliases"], json!(["glm_51_impl"]));
 
@@ -544,4 +544,173 @@ fn direct_native_profile_rejects_model_and_transport_override() {
         |_| false
     )
     .is_err());
+}
+
+#[test]
+fn opencode_role_profiles_support_staff_json_defaults_and_allowlisted_overrides() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = TempDirGuard(
+        std::env::temp_dir().join(format!("tachi-staff-cfg-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&dir.0).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let staff_json = dir.0.join("staff.json");
+    std::fs::write(
+        &staff_json,
+        serde_json::to_vec(&serde_json::json!({
+            "opencode": {
+                "providers": ["openai", "deepseek", "zhipuai-coding-plan"]
+            },
+            "seats": {
+                "opencode_review": {
+                    "default_model": "deepseek/deepseek-flash"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let config = crate::load_staff_config(&dir.0).unwrap();
+
+    // 1. Seat default from staff.json overrides built-in default and updates planned lineage.
+    let mut from_cfg =
+        StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "review")
+            .with_profile("opencode_review");
+    let resolved_cfg = resolve_and_apply_staff_assignment_profile_with_config(
+        &mut from_cfg,
+        |_| Ok(Vec::new()),
+        |_| Ok(Vec::new()),
+        |_| false,
+        &config,
+    )
+    .unwrap();
+    assert_eq!(
+        resolved_cfg.selected_model.as_deref(),
+        Some("deepseek/deepseek-flash")
+    );
+    assert_eq!(
+        resolved_cfg.identity_receipt.planned.model_lineage_id,
+        "deepseek/deepseek"
+    );
+
+    // 2. Explicit caller model beats staff.json seat default when provider is allowlisted.
+    let mut explicit =
+        StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "review")
+            .with_profile("opencode_review")
+            .with_model("deepseek/deepseek-v4-pro");
+    let resolved_explicit = resolve_and_apply_staff_assignment_profile_with_config(
+        &mut explicit,
+        |_| Ok(Vec::new()),
+        |_| Ok(Vec::new()),
+        |_| false,
+        &config,
+    )
+    .unwrap();
+    assert_eq!(
+        resolved_explicit.selected_model.as_deref(),
+        Some("deepseek/deepseek-v4-pro")
+    );
+    assert_eq!(
+        resolved_explicit
+            .identity_receipt
+            .requested
+            .model
+            .as_deref(),
+        Some("deepseek/deepseek-v4-pro")
+    );
+    assert_eq!(
+        resolved_explicit.identity_receipt.planned.model_lineage_id,
+        "deepseek/deepseek"
+    );
+
+    // 3. Disallowed provider is refused cleanly.
+    let mut blocked_provider =
+        StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "write")
+            .with_profile("opencode_write")
+            .with_model("kimi-code-plan-cn/k3");
+    let err = resolve_and_apply_staff_assignment_profile_with_config(
+        &mut blocked_provider,
+        |_| Ok(Vec::new()),
+        |_| Ok(Vec::new()),
+        |_| false,
+        &config,
+    )
+    .unwrap_err();
+    assert!(err.contains("opencode.providers"), "{err}");
+
+    // 4. Non-OpenCode Codex profile rejects explicit model overrides.
+    let mut codex = StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "review")
+        .with_profile("codex_sol_review")
+        .with_model("gpt-6-astra");
+    let err = resolve_and_apply_staff_assignment_profile_with_config(
+        &mut codex,
+        |_| Ok(Vec::new()),
+        |_| Ok(Vec::new()),
+        |_| false,
+        &config,
+    )
+    .unwrap_err();
+    assert!(err.contains("OpenCode native profiles"), "{err}");
+
+    // 5. Group/world-writable staff.json, writable home dir, symlinks, and non-canonical keys fail closed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let err = crate::load_staff_config(&dir.0).unwrap_err();
+        assert!(err.contains("group- or world-writable"), "{err}");
+
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let err = crate::load_staff_config(&dir.0).unwrap_err();
+        assert!(err.contains("owner-only directory"), "{err}");
+
+        std::fs::remove_file(&staff_json).unwrap();
+        assert_eq!(
+            crate::load_staff_config(&dir.0).unwrap(),
+            crate::StaffConfig::default()
+        );
+
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = dir.0.join("target.json");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &staff_json).unwrap();
+        let err = crate::load_staff_config(&dir.0).unwrap_err();
+        assert!(err.contains("not a symlink"), "{err}");
+        std::fs::remove_file(&staff_json).unwrap();
+    }
+
+    std::fs::write(
+        &staff_json,
+        serde_json::to_vec(&serde_json::json!({
+            "opencode": {"providers": ["openai", "deepseek"]},
+            "seats": {"OPENCODE_REVIEW": {"default_model": "deepseek/deepseek-flash"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let err = crate::load_staff_config(&dir.0).unwrap_err();
+    assert!(
+        err.contains("opencode_review") && err.contains("canonical"),
+        "{err}"
+    );
 }

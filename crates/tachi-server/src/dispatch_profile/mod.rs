@@ -26,22 +26,51 @@ pub(crate) fn dispatch_profiles_json_for_server(
     server: &MemoryServer,
     verbose: bool,
 ) -> Result<Value, String> {
+    let (staff_config, staff_config_error) =
+        match tachi_dispatch::load_staff_config(&server.tachi_home_dir()) {
+            Ok(config) => (Some(config), None),
+            Err(err) => (None, Some(err)),
+        };
     let profiles = DISPATCH_PROFILES
         .iter()
         .filter(|profile| crate::host_profile::native_staff_profile_available(profile))
-        .map(|profile| profile_json_for_server(server, profile))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|profile| {
+            let mut card = profile_json_for_server(server, profile)?;
+            if profile.backend == "opencode" && profile.native_session.is_some() {
+                if let Some(default_model) = staff_config
+                    .as_ref()
+                    .and_then(|cfg| cfg.seat_default_model(profile.name))
+                {
+                    card["model"] = json!(default_model);
+                    if let Some(native) = card
+                        .get_mut("native_session")
+                        .and_then(Value::as_object_mut)
+                    {
+                        native.insert("model".to_string(), json!(default_model));
+                    }
+                }
+                if let Some(err) = staff_config_error.as_deref() {
+                    card["staff_config_error"] = json!(err);
+                }
+            }
+            Ok(card)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let profiles = if verbose {
         profiles
     } else {
         profiles.iter().map(slim_profile_row).collect()
     };
-    Ok(json!({
+    let mut payload = json!({
         "dispatch_profiles": profiles,
         "note": "DispatchProfile routes agents/context/evidence; ToolProfile gates visible tools.",
         "projection_namespace": PROFILE_CARD_OVERLAY_NS,
         "verbose": verbose,
-    }))
+    });
+    if let Some(err) = staff_config_error {
+        payload["staff_config_error"] = json!(err);
+    }
+    Ok(payload)
 }
 
 /// One row: name/backend/model/role. `full` is a `profile_json_for_server`
@@ -49,13 +78,17 @@ pub(crate) fn dispatch_profiles_json_for_server(
 /// `tachi_dispatch::profiles::profile_json_with_loadout_and_evidence_contract`),
 /// so slimming is a field-drop, not a re-derivation.
 fn slim_profile_row(full: &Value) -> Value {
-    json!({
+    let mut row = json!({
         "name": full.get("name").cloned().unwrap_or(Value::Null),
         "backend": full.get("backend").cloned().unwrap_or(Value::Null),
         "model": full.get("model").cloned().unwrap_or(Value::Null),
         "role": full.get("role").cloned().unwrap_or(Value::Null),
         "native_session": full.get("native_session").cloned().unwrap_or(Value::Null),
-    })
+    });
+    if let Some(err) = full.get("staff_config_error") {
+        row["staff_config_error"] = err.clone();
+    }
+    row
 }
 
 mod cards;
@@ -93,21 +126,29 @@ pub(crate) fn resolve_and_apply_staff_assignment_profile_for_server(
     server: &MemoryServer,
     request: &mut tachi_params::StaffAssignmentRequest,
 ) -> Result<ResolvedDispatchProfile, String> {
-    if let Some(profile) = request
+    let resolved = request
         .profile
         .as_deref()
-        .and_then(resolve_dispatch_profile)
-    {
+        .and_then(resolve_dispatch_profile);
+    if let Some(profile) = resolved {
         if profile.native_session.is_some()
             && !crate::host_profile::native_staff_profile_available(profile)
         {
             return Err(format!("native Session profile '{}' is unavailable: install its ACP adapter and enable the host filesystem confinement primitive; authentication and model support are negotiated at start", profile.name));
         }
     }
-    tachi_dispatch::resolve_and_apply_staff_assignment_profile(
+    let staff_config = if resolved
+        .is_some_and(|profile| profile.backend == "opencode" && profile.native_session.is_some())
+    {
+        tachi_dispatch::load_staff_config(&server.tachi_home_dir())?
+    } else {
+        tachi_dispatch::StaffConfig::default()
+    };
+    tachi_dispatch::resolve_and_apply_staff_assignment_profile_with_config(
         request,
         |profile| profile_required_skill_ids_for_server(server, profile),
         |profile| profile_evidence_required_for_server(server, profile),
         |server_url| crate::dispatch_ops::harness_server_attach_ready(server_url),
+        &staff_config,
     )
 }

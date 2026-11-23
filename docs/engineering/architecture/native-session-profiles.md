@@ -15,12 +15,21 @@ separately admitted `dsh_executor` headless path remains distinct.
 | `codex_sol_review` | Codex | `gpt-6.1-sol` | `high` | No | 4 | 300 |
 | `codex_astra_review` | Codex | `gpt-6-astra` | `xhigh` | No | 4 | 600 |
 | `codex_terra_write` | Codex | `gpt-6.1-terra` | `high` | Managed worktree | 8 | 600 |
-| `opencode_sol_review` | OpenCode | `openai/gpt-6.1-sol` | Unspecified | No | 4 | 300 |
-| `opencode_astra_review` | OpenCode | `openai/gpt-6-astra` | Unspecified | No | 4 | 600 |
-| `opencode_terra_write` | OpenCode | `openai/gpt-6.1-terra` | Unspecified | Managed worktree | 8 | 600 |
+| `opencode_review` | OpenCode | `openai/gpt-6.1-sol` (default; overridable within `staff.json`) | Unspecified | No | 4 | 300 |
+| `opencode_write` | OpenCode | `openai/gpt-6.1-terra` (default; overridable within `staff.json`) | Unspecified | Managed worktree | 8 | 600 |
+| `opencode_sol_review` | OpenCode | `openai/gpt-6.1-sol` (default; overridable within `staff.json`) | Unspecified | No | 4 | 300 |
+| `opencode_astra_review` | OpenCode | `openai/gpt-6-astra` (default; overridable within `staff.json`) | Unspecified | No | 4 | 600 |
+| `opencode_terra_write` | OpenCode | `openai/gpt-6.1-terra` (default; overridable within `staff.json`) | Unspecified | Managed worktree | 8 | 600 |
 
-All six profiles share Tachi's native session supervisor. Codex uses its local
-app-server dialect; OpenCode uses ACP, as listed below. Each run also has a fixed
+All eight profiles share Tachi's native session supervisor. Codex uses its local
+app-server dialect and stays fixed to its profile model; OpenCode uses ACP, as
+listed below. For OpenCode native profiles, `$TACHI_HOME/staff.json` (read on
+each `start`/`preflight` when regular and not group/world-writable; omitting it
+defaults `opencode.providers` to `["openai"]`) sets `[opencode.providers]`
+allowlist entries and optional per-seat `seats.<profile>.default_model`, while
+`tachi_staff(action="start")` accepts an optional `model` parameter
+(`provider/model`, precedence: caller `model` > `staff.json` `default_model` >
+built-in default) validated against that provider allowlist. Each run also has a fixed
 total lifetime of `turn ceiling × seconds per turn`, including time spent
 waiting for supervision; each active turn independently has the listed timeout. These are requested
 pins, not assertions about adapter installation, account access or model

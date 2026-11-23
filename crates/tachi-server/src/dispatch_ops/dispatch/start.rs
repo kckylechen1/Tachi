@@ -127,6 +127,7 @@ pub(super) fn resolve_dispatch_start(
         task: legacy_projection.task.clone(),
         submission_id: None,
         profile: raw_request_profile,
+        model: legacy_projection.model.clone(),
         worker: legacy_projection.agent.clone(),
         stage: legacy_projection.stage.clone(),
         execution_level: legacy_projection.execution_level,

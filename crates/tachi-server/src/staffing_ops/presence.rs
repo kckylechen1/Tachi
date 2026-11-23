@@ -720,6 +720,7 @@ pub(crate) fn staff_roster(
         ("dispatch_id", params.dispatch_id.is_some()),
         ("staffing_reason", params.staffing_reason.is_some()),
         ("profile", params.profile.is_some()),
+        ("model", params.model.is_some()),
         ("worker", params.worker.is_some()),
         ("stage", params.stage.is_some()),
         ("issue_ref", params.issue_ref.is_some()),

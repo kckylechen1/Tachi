@@ -19,6 +19,7 @@ home.mkdir(parents=True, exist_ok=True)
 session = "fixture-" + uuid.uuid4().hex
 models = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra"]
 models += ["openai/" + model for model in models]
+models += ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"]
 options = [
     {"id": "model", "category": "model", "type": "select", "currentValue": "unrequested-model",
      "options": [{"value": value, "name": value} for value in models]},
