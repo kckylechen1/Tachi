@@ -1,5 +1,5 @@
 use super::admission::Connection;
-use super::config::{public_key_digest, GatewayConfig};
+use super::config::{public_key_digest, GatewayConfig, Peer};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -189,10 +189,14 @@ pub(super) async fn probe(config: &GatewayConfig, peer_id: &str) -> Result<Value
         .iter()
         .find(|p| p.agent_identity_id == peer_id)
         .ok_or("destination is not enrolled")?;
-    let endpoint = peer
-        .endpoint
-        .as_deref()
-        .ok_or("destination has no configured endpoint")?;
+    let client = pinned_client(config, peer)?;
+    probe_with_client(config, peer, &client).await
+}
+
+pub(super) fn pinned_client(
+    config: &GatewayConfig,
+    peer: &Peer,
+) -> Result<reqwest::Client, Box<dyn Error>> {
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
         Arc::new(config.roots()?),
         Arc::new(rustls::crypto::ring::default_provider()),
@@ -208,14 +212,26 @@ pub(super) async fn probe(config: &GatewayConfig, peer_id: &str) -> Result<Value
         public_key_sha256: peer.public_key_sha256.clone(),
     }))
     .with_client_auth_cert(config.certificates()?, config.key()?)?;
-    let client = reqwest::Client::builder()
+    Ok(reqwest::Client::builder()
         .use_preconfigured_tls(tls)
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
-        .build()?;
+        .build()?)
+}
+
+pub(super) async fn probe_with_client(
+    config: &GatewayConfig,
+    peer: &Peer,
+    client: &reqwest::Client,
+) -> Result<Value, Box<dyn Error>> {
+    let endpoint = peer
+        .endpoint
+        .as_deref()
+        .ok_or("destination has no configured endpoint")?;
     let mut response = client
         .get(url::Url::parse(endpoint)?.join("/health")?)
         .send()

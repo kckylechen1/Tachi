@@ -28,6 +28,14 @@ pub use remote::{
     RemoteTaskHeader, RemoteTaskInsertOutcome, RemoteTaskPage, RemoteTaskReceipt,
     A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES,
 };
+#[cfg(feature = "admin")]
+mod submissions;
+#[cfg(feature = "admin")]
+pub use submissions::{
+    finish_remote_submission, prepare_remote_submission, read_remote_submission,
+    remote_submission_attempt_is_current, reserve_remote_submission, RemoteSubmission,
+    RemoteSubmissionAttempt, RemoteSubmissionBinding, RemoteSubmissionResult,
+};
 
 pub const A2A_COORDINATION_KIND: &str = "coordination/v1";
 pub const A2A_TURN_RESPONSE_KIND: &str = "turn_response/v1";

@@ -25,6 +25,7 @@ pub const OPERATOR_GC_CLASSES: &[&str] = &[
     "agent_known_state_orphan",
     "recall_impression_groups_age_or_quota",
     "a2a_terminal_body_scrub",
+    "a2a_remote_submission_body_scrub",
     "kanban_terminal_or_stale",
     "kanban_excluded_protected",
 ];
@@ -58,7 +59,7 @@ pub enum OperatorMaintenanceOperation {
 const OPERATOR_PLAN_VERSION: u32 = 1;
 const OPERATOR_RECEIPT_VERSION: u32 = 1;
 const OPERATOR_POLICY_VERSION: &str = "tachi-memory-maintenance-v1";
-const OPERATOR_GC_POLICY_VERSION: &str = "tachi-memory-maintenance-v2";
+const OPERATOR_GC_POLICY_VERSION: &str = "tachi-memory-maintenance-v3";
 const OPERATOR_KANBAN_MAX_AGE_DAYS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +350,7 @@ enum Mutation {
     },
     Diversity(Vec<(String, i64)>),
     ScrubA2a(Vec<String>),
+    ScrubRemoteSubmissions(Vec<String>),
     DeleteKanban(Vec<String>),
     None,
 }
@@ -756,6 +758,24 @@ fn collect_gc_candidates(
         candidates.push(empty_or_none_class("a2a_terminal_body_scrub", Vec::new()));
     }
 
+    if product {
+        candidates.push(candidate_from_query(
+            conn, "a2a_remote_submission_body_scrub",
+            "SELECT submission_id,current_state,state_version,expires_at,updated_at,body
+             FROM a2a_remote_submissions WHERE body IS NOT NULL
+             AND ((current_state IN ('refused','blocked') AND unixepoch(updated_at,'+90 days') <= unixepoch(?1))
+               OR unixepoch(expires_at,'+90 days') <= unixepoch(?1))
+             ORDER BY expires_at,submission_id LIMIT ?2",
+            vec![Value::Text(as_of.to_string()), Value::Integer(A2A_BODY_SCRUB_BATCH as i64)],
+            |ids| Ok(Mutation::ScrubRemoteSubmissions(ids)),
+        )?);
+    } else {
+        candidates.push(empty_or_none_class(
+            "a2a_remote_submission_body_scrub",
+            Vec::new(),
+        ));
+    }
+
     candidates.extend(collect_kanban_candidates(
         conn,
         profile,
@@ -879,6 +899,14 @@ fn apply_candidates(
                 for id in ids {
                     conn.execute(
                         "UPDATE a2a_envelopes SET body=NULL WHERE envelope_id=?1",
+                        [id],
+                    )?;
+                }
+            }
+            Mutation::ScrubRemoteSubmissions(ids) => {
+                for id in ids {
+                    conn.execute(
+                        "UPDATE a2a_remote_submissions SET body=NULL WHERE submission_id=?1",
                         [id],
                     )?;
                 }

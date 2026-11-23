@@ -1,6 +1,6 @@
 # Remote task admission and refusal receipts
 
-This is an inbound implementation slice for #1940 and #1934 on top of the
+This implements origin submission and inbound refusal for #1940 on top of the
 [mutual-TLS gateway](remote-admission.md). It validates and durably records a
 bounded request, then returns an authenticated **execution-unavailable refusal**.
 It does not launch a worker, allocate a local WorkClaim, reserve resources or
@@ -40,12 +40,105 @@ restart the gateway. Removing a grant hides historical tasks from that peer as
 well as refusing new submissions and replays. Key revocation remains the existing
 live, durable `a2a remote revoke` operation and does not wait for restart.
 
-The store is Product schema **45**; Portable remains **44**. A pre-existing Product
+The store is Product schema **46**; Portable remains **44**. A pre-existing Product
 store must cross the normal explicit migration gate. Use
 `tachi --allow-schema-migration a2a remote serve --config /absolute/gateway.json`
 only for the operator-selected store after normal backup/deployment preparation.
-Ordinary startup still denies implicit migrations. This migration extends the
-existing A2A envelope/receipt pair and retains its local rows and constraints.
+Ordinary startup still denies implicit migrations. V45 extended the existing
+A2A envelope/receipt pair; v46 adds `a2a_remote_submissions` for origin intent.
+The origin table does not claim a destination admission or receipt before a
+verified response exists. Existing local/inbound rows and constraints remain.
+
+## Configure and submit from the origin
+
+The origin uses its protected gateway configuration and explicitly enrolled
+destination. Inbound `repositories` grants never authorize outbound work. Add
+the separate outbound grant and the existing local project's exact canonical
+name (the project recorded on its WorkClaim):
+
+```json
+{
+  "origin_database": "/absolute/origin-home/global/tachi-memory.db",
+  "peers": [{
+    "agent_identity_id": "agent-mac",
+    "host_id": "mac-host",
+    "public_key_sha256": "<enrolled DER SPKI SHA-256>",
+    "endpoint": "https://mac-gateway.example",
+    "outbound": [{
+      "repository": "owner/repository",
+      "canonical_project": "<actual local WorkClaim project>",
+      "jobs": ["review_revision"]
+    }]
+  }]
+}
+```
+
+This is another fragment of the complete configuration. `origin_database`, when
+present, must name an existing regular file under the protected `home`, owned by
+the operator account and not writable by other users. It allows the origin to
+reuse the normal daemon's global WorkClaims and store its submissions in the
+same transaction. Without it, origin commands use `home/global.db`. Do not copy
+claims into a second ledger. The gateway's Serve/Revoke authority remains in
+`home/global.db`; the origin checks key retirement in **both** stores, before
+reserving an attempt and again after TLS health, immediately before POST. An
+unreadable authority ledger prevents sending. Both existing stores must pass the
+explicit migration gate; neither command starts background workers.
+
+Prepare a private, operator-owned `0600` JSON file containing exactly the
+business object described below. Use an actual current local WorkClaim and its
+current transition version, exact repository/head, and explicit key/nonce.
+Select and redact any review snapshot before freezing this file. There is no
+automatic memory export, reference expansion, command selection or key renewal.
+
+```sh
+tachi a2a remote submit --config /absolute/origin.json \
+  --request /absolute/selected-job.json --prepare-only
+tachi a2a remote resume --config /absolute/origin.json \
+  --submission remote-submit-EXACT-ID
+tachi a2a remote status --config /absolute/origin.json \
+  --submission remote-submit-EXACT-ID
+```
+
+Omit `--prepare-only` to prepare and send in one command. Preparation checks the
+actual local holder, active lease, transition version, project and expected
+head, plus the operator's repository/job grant. It atomically freezes the body,
+SHA-256, key, nonce, destination/host/key/endpoint and origin claim reference.
+The entire framed RPC is bounded to 32 KiB. Same-key identical preparation
+returns the existing submission; changed bytes or destination binding conflict.
+
+Every attempt is committed before network I/O. The client checks the destination
+certificate chain, hostname and enrolled SPKI before HTTP, then checks the
+authenticated health identity/domain. It reloads operator policy and rechecks
+both current key retirement and the local WorkClaim immediately before the task
+POST. Revocation or claim transitions after that authorization point cannot
+recall bytes already sent. Destination execution and cancellation remain a
+separate admission/lifecycle seam. Redirects, ambient proxies and implicit HTTP
+retries are disabled.
+
+Automatic submission is bounded to three attempts across all CLI invocations,
+inside the original start window. A 45-second durable reservation covers the
+health and POST deadlines (15 seconds each); concurrent/early resumes return the
+existing state. After a crashed sender's reservation expires, resume consumes
+the next attempt with exactly the original bytes. Late responses are fenced by
+the attempt token. No database write lock is held during network I/O.
+
+| Origin state | Meaning |
+| --- | --- |
+| `pending` | Frozen; no attempt reserved. Current policy and authority still need to pass. |
+| `in_flight` | An attempt was durably reserved. The destination result is not known yet; a crashed process can leave this until recovery. |
+| `refused` | A verified, exactly bound destination Task and both refusal receipts were saved. This slice only recognizes `execution_unavailable`. |
+| `blocked` | No attempt was made; the start window, claim or frozen destination binding prevented egress. |
+| `unknown` | At least one attempt was reserved, but no valid destination outcome is established. Includes lost replies, invalid receipts and exhausted retries. |
+
+Status contains headers, counters and validated receipts, never the frozen
+question/context. `retry_allowed` records the remaining automatic-retry policy;
+current claim, key, grant and time checks still apply. Missing enrollment/grants
+or an already revoked gateway key fail the command before allocating another
+attempt; a previously prepared row remains inspectable. A permanent HTTP/RPC
+refusal stops retries but remains `unknown` unless the host's exact durable
+refusal Task was validated. It is not proof that an earlier attempt created no
+task. Exhaustion requires authorized `GetTask`/`ListTasks` reconciliation at the
+destination; do not change the key, nonce or destination to escape ambiguity.
 
 ## Wire profile
 
@@ -97,8 +190,8 @@ Optional fields must be omitted when unused; explicit null values are refused.
 serialized size is at most 16 KiB. References are bounded opaque tokens. The
 gateway never fetches them or writes their contents into memory/recall stores.
 Known credential patterns and hidden-reasoning delimiters are rejected. This
-screening does not replace the origin's future explicit selection/redaction and
-current-claim egress gate; no origin submission/export CLI is provided here.
+screening complements explicit operator selection/redaction and the origin's
+current-claim egress gate; it does not automatically select or export memory.
 
 The immutable digest covers every admitted business field, including the nonce,
 start window and optional context. It excludes the JSON-RPC/message IDs and the
@@ -142,6 +235,12 @@ task. Neither manufactures a cancellation or launch outcome.
 
 Bodies use the existing maintenance class: terminal content is scrubbed after
 90 days, while immutable header/digest/receipt tombstones remain for replay.
+Origin bodies use the same maintenance workflow and 90-day policy: every body
+becomes eligible 90 days after original expiry; refused or blocked bodies are
+also eligible 90 days after their state update, whichever condition is met first.
+A batch scrubs at most 100 origin bodies, preserving immutable replay
+headers and any receipt. The new maintenance class advances canonical GC plans
+to policy `tachi-memory-maintenance-v3`; regenerate an older plan before apply.
 Receipt JSON is authoritative only as an observation over the authenticated
 gateway channel; an exported unsigned copy is not independent proof.
 
@@ -157,10 +256,16 @@ artifact creation:
 python3 scripts/dogfood_e2e.py --tachi /absolute/candidate --only remote-admission
 ```
 
+The same scenario also obtains a real WorkClaim through normal daemon MCP,
+submits through the product origin CLI, drops authenticated replies, kills and
+restarts the sender across its durable reservation, checks the three-attempt
+ceiling, rejects mismatched receipts and changed endpoints, and exercises live
+claim release and gateway-key revocation across separate existing stores.
+Its TLS-terminating fault proxy is test infrastructure; deployment still uses
+the separately reviewed pass-through relay boundary.
+
 This code does not enable remote execution. The following remain required:
 
-- The origin's current local claim/revision/owner authorization check, durable
-  frozen submission, bounded retry and authenticated observation persistence.
 - Destination repository-to-project mapping, fetched-object/PR head checks,
   local claim/grant/resource reservation and an explicit execution admission
   adapter that preserves canonical sealed-flow guards.

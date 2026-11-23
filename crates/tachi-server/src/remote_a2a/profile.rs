@@ -361,6 +361,22 @@ pub(super) fn parse_request(bytes: &[u8]) -> Result<RpcRequest, ()> {
     Ok(request)
 }
 
+pub(super) fn parse_job(bytes: &[u8]) -> Result<RemoteJob, ()> {
+    let value = parse_unique(bytes)?;
+    let job: RemoteJob = serde_json::from_value(value).map_err(|_| ())?;
+    job.validate()?;
+    Ok(job)
+}
+
+pub(super) fn parse_unique(bytes: &[u8]) -> Result<Value, ()> {
+    if bytes.len() > MAX_REQUEST_BYTES {
+        return Err(());
+    }
+    serde_json::from_slice::<UniqueValue>(bytes)
+        .map(|value| value.0)
+        .map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

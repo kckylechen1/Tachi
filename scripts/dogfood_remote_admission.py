@@ -70,7 +70,7 @@ subjectKeyIdentifier = hash
 [server]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature
-extendedKeyUsage = serverAuth
+extendedKeyUsage = serverAuth,clientAuth
 subjectAltName = DNS:localhost,IP:127.0.0.1
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
@@ -78,6 +78,13 @@ authorityKeyIdentifier = keyid,issuer
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature
 extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+[origin]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth,clientAuth
+subjectAltName = DNS:localhost,IP:127.0.0.1
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
 """)
@@ -104,7 +111,7 @@ authorityKeyIdentifier = keyid,issuer
         dates = ["-startdate", "20000101000000Z", "-enddate", "20010101000000Z"] \
             if name == "expired" else []
         invoke(f"sign ephemeral {name} certificate", "ca", "-batch", "-notext",
-               "-config", config, "-extensions", "server" if name == "server" else "client",
+               "-config", config, "-extensions", "server" if name == "server" else "origin" if name == "cloud" else "client",
                "-in", csr, "-out", cert, *dates)
         cert.chmod(0o644)
         public = invoke(f"read {name} public key", "x509", "-in", cert, "-pubkey", "-noout")
@@ -393,7 +400,306 @@ def _remote_tasks(ctx, gateway, ca, leaves, alpha, beta, db):
     return dgx, beta_task
 
 
-def register_scenarios(scenario, Daemon, free_port):
+def _origin_submissions(ctx, origin, origin_config, origin_path, gateway, ca, leaves,
+                        root, McpSession, make_fixture_repo, free_port):
+    """Exercise real origin CLI + MCP claim + gateway; inject lost TLS replies."""
+    repo = make_fixture_repo(root)
+    subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin",
+                    "https://github.com/owner/example.git"], check=True, env=origin.env)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                   env=origin.env, text=True).strip()
+    origin.start()
+    source = McpSession(origin.url, {"X-Tachi-Workspace-Root": str(repo),
+                                   "X-Tachi-Agent-Identity": "agent-cloud"})
+    lease = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    ok, claim, raw = source.call("tachi_task", action="claim", claim_scope=["src/egress.rs"],
+        claim_mode="read_only", claim_role="reviewer", worktree_path=str(repo),
+        expected_head=head, lease_expires_at=lease, issue_ref="owner/example#1940")
+    ctx.require("origin obtains its WorkClaim through actual MCP", ok, claim if ok else raw)
+    db = origin.app_home / "global" / "tachi-memory.db"
+    with closing(sqlite3.connect(db)) as conn:
+        project = conn.execute("SELECT canonical_project FROM session_claims WHERE claim_id=?",
+                               (claim["claim_id"],)).fetchone()[0]
+
+    # This fault proxy owns the enrolled test certificate, forwards to the real
+    # gateway and drops only its response. It is not a production relay model.
+    control = {"mode": "pass", "bodies": [], "http": 0}
+    committed, release = threading.Event(), threading.Event()
+
+    class Proxy(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args):
+            pass
+
+        def forward(self, method, body=None):
+            control["http"] += 1
+            client = _client(ca, gateway.port, leaves["cloud"])
+            try:
+                return _request(client, self.path, dict(self.headers), method, body)
+            finally:
+                client.close()
+
+        def reply(self, status, payload):
+            encoded = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/a2a+json")
+            self.send_header("A2A-Version", "1.0")
+            self.send_header("A2A-Extensions", f"{_DELEGATION},{_PROVENANCE}")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self):
+            response = self.forward("GET")
+            hook = control.pop("after_health", None)
+            if hook is not None:
+                hook()
+            self.reply(*response)
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            control["bodies"].append(body)
+            status, payload = self.forward("POST", body)
+            mode = control["mode"]
+            if mode == "hold_once":
+                control["mode"] = "pass"
+                committed.set()
+                release.wait(timeout=20)
+            if mode in ("drop_once", "drop_all", "hold_once"):
+                if mode == "drop_once":
+                    control["mode"] = "pass"
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            if mode == "wrong_receipt":
+                payload["result"]["task"]["metadata"][_PROVENANCE]["input_digest"] = "f" * 64
+            self.reply(status, payload)
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", free_port()), Proxy)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.load_cert_chain(leaves["server"]["certificate"], leaves["server"]["private_key"])
+    context.load_verify_locations(cafile=str(ca))
+    context.verify_mode = ssl.CERT_REQUIRED
+    proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    original = json.loads(json.dumps(origin_config))
+    configured = json.loads(json.dumps(origin_config))
+    configured["origin_database"] = str(db)
+    configured["peers"][0]["endpoint"] = f"https://localhost:{proxy.server_port}"
+    configured["peers"][0]["outbound"] = [{"repository": "owner/example", "canonical_project": project,
+                                          "jobs": ["review_revision", "verify_pr"]}]
+    _private_text(origin_path, json.dumps(configured))
+
+    def cli(action, *args, success=True):
+        result = _run(ctx, origin, f"origin {action} completes", [str(origin.tachi), "a2a", "remote",
+                      action, "--config", str(origin_path), *args])
+        if success:
+            ctx.require(f"origin {action} succeeds", result.returncode == 0, _output(result))
+            return json.loads(result.stdout)
+        return result
+
+    def request(case, **changes):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        job = {"kind": "tachi.remote_job/v1", "sender": "agent-cloud", "recipient": "agent-mac",
+               "trust_domain": configured["trust_domain"], "idempotency_key": f"origin-{case}",
+               "nonce": f"nonce-origin-{case}", "issued_at": now.isoformat().replace("+00:00", "Z"),
+               "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+               "repository": "owner/example", "head_sha": head,
+               "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+               "job": "review_revision", "question": "Private selected origin review question", **changes}
+        path = root / f"origin-{case}.json"
+        _private_text(path, json.dumps(job))
+        return path
+
+    def prepare(case, **changes):
+        path = request(case, **changes)
+        return cli("submit", "--request", str(path), "--prepare-only"), path
+
+    def task_count(key):
+        with closing(sqlite3.connect(gateway.app_home / "global.db")) as conn:
+            return conn.execute("SELECT COUNT(*) FROM a2a_envelopes WHERE issuer_agent_identity_id='agent-cloud' AND idempotency_key=?",
+                                (key,)).fetchone()[0]
+
+    process = None
+    authority_gateway = None
+    try:
+        pending, path = prepare("positive")
+        ctx.check("origin freezes the input before all network I/O", pending["current_state"] == "pending"
+                  and pending["attempts"] == 0 and control["http"] == 0 and "body" not in pending, pending)
+        refused = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("real TLS refusal binds one origin submission to one destination task",
+                  refused["current_state"] == "refused" and refused["attempts"] == 1
+                  and refused["remote_receipt"]["metadata"][_PROVENANCE]["input_digest"] == pending["body_digest"]
+                  and task_count(pending["idempotency_key"]) == 1, refused)
+        before = control["http"]
+        replay = cli("submit", "--request", str(path))
+        ctx.check("terminal origin replay performs no network I/O", replay == refused and control["http"] == before,
+                  {"same_snapshot": replay == refused, "http_unchanged": control["http"] == before})
+        changed = json.loads(path.read_text())
+        changed["question"] = "Different selected input"
+        _private_text(path, json.dumps(changed))
+        result = cli("submit", "--request", str(path), success=False)
+        ctx.check("origin rejects same-key changed payload before I/O", result.returncode != 0
+                  and control["http"] == before, _output(result))
+
+        control["mode"] = "drop_once"
+        pending, _ = prepare("lost-ack")
+        start = len(control["bodies"])
+        recovered = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("lost acknowledgment retries identical bytes and recovers the original task",
+                  recovered["current_state"] == "refused" and recovered["attempts"] == 2
+                  and len(control["bodies"][start:]) == 2 and len(set(control["bodies"][start:])) == 1
+                  and task_count(pending["idempotency_key"]) == 1,
+                  {"state": recovered["current_state"], "attempts": recovered["attempts"],
+                   "destination_tasks": task_count(pending["idempotency_key"])})
+
+        control["mode"] = "drop_all"
+        pending, _ = prepare("exhausted")
+        start = len(control["bodies"])
+        exhausted = cli("resume", "--submission", pending["submission_id"])
+        before = control["http"]
+        again = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("three lost replies exhaust one frozen submission without fabricating refusal",
+                  exhausted["current_state"] == "unknown" and exhausted["attempts"] == 3
+                  and not exhausted["retry_allowed"] and exhausted["remote_receipt"] is None
+                  and again == exhausted and control["http"] == before
+                  and len(control["bodies"][start:]) == 3 and len(set(control["bodies"][start:])) == 1
+                  and task_count(pending["idempotency_key"]) == 1, exhausted)
+
+        control["mode"] = "wrong_receipt"
+        pending, _ = prepare("wrong-receipt")
+        wrong = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("an authenticated but mismatched receipt remains unresolved",
+                  wrong["current_state"] == "unknown" and wrong["attempts"] == 1
+                  and wrong["last_error"] == "invalid_response" and wrong["remote_receipt"] is None
+                  and not wrong["retry_allowed"], wrong)
+
+        control["mode"] = "hold_once"
+        pending, _ = prepare("crash")
+        start = len(control["bodies"])
+        process = subprocess.Popen([str(origin.tachi), "a2a", "remote", "resume", "--config", str(origin_path),
+                                    "--submission", pending["submission_id"]], env=origin.env, cwd=origin.home,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ctx.require("destination commits before simulated origin crash", committed.wait(timeout=15), "real gateway reply held")
+        process.kill()
+        process.communicate(timeout=5)
+        release.set()
+        crashed = cli("status", "--submission", pending["submission_id"])
+        early = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("restart retains the in-flight attempt and fences early recovery",
+                  crashed == early and early["current_state"] == "in_flight" and early["attempts"] == 1
+                  and len(control["bodies"][start:]) == 1, early)
+        until = datetime.fromisoformat(early["attempt_until"].replace("Z", "+00:00"))
+        time.sleep(max(0, (until - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+        resumed = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("crashed origin recovers through the same durable key after reservation expiry",
+                  resumed["current_state"] == "refused" and resumed["attempts"] == 2
+                  and len(control["bodies"][start:]) == 2 and len(set(control["bodies"][start:])) == 1
+                  and task_count(pending["idempotency_key"]) == 1, resumed)
+
+        pending, _ = prepare("endpoint-change")
+        changed_config = json.loads(json.dumps(configured))
+        changed_config["peers"][0]["endpoint"] = f"https://localhost:{free_port()}"
+        _private_text(origin_path, json.dumps(changed_config))
+        before = control["http"]
+        stopped = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("existing submission cannot be redirected to another endpoint",
+                  stopped["current_state"] == "blocked" and stopped["attempts"] == 0
+                  and control["http"] == before, stopped)
+        _private_text(origin_path, json.dumps(configured))
+
+        changed_config = json.loads(json.dumps(configured))
+        changed_config["peers"][0]["public_key_sha256"] = leaves["second"]["public_key_sha256"]
+        _private_text(origin_path, json.dumps(changed_config))
+        pending, _ = prepare("wrong-pin")
+        before = control["http"]
+        pin = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("outbound task bytes never reach a destination with the wrong enrolled key",
+                  pin["current_state"] == "unknown" and pin["attempts"] == 3 and control["http"] == before, pin)
+        _private_text(origin_path, json.dumps(configured))
+
+        before = control["http"]
+        for case, change in (("forged-claim", {"origin_claim": {"claim_id": "unowned", "transition_version": 0}}),
+                             ("wrong-head", {"head_sha": "f" * 40}),
+                             ("dgx-context", {"job": "verify_pr", "pull_request": 1940})):
+            result = cli("submit", "--request", str(request(case, **change)), success=False)
+            ctx.check(f"origin refuses {case} before any HTTP", result.returncode != 0
+                      and control["http"] == before, _output(result))
+
+        pending, _ = prepare("released-claim")
+        ok, released, raw = source.call("tachi_task", action="release", claim_id=claim["claim_id"],
+                                       transition_version=claim["transition_version"])
+        ctx.require("origin WorkClaim releases through MCP", ok, released if ok else raw)
+        before = control["http"]
+        stale = cli("resume", "--submission", pending["submission_id"])
+        ctx.check("current claim release blocks already prepared egress",
+                  stale["current_state"] == "blocked" and stale["attempts"] == 0
+                  and stale["last_error"] == "origin_authority_changed" and control["http"] == before, stale)
+
+        # Claims/submissions and key retirement may use separate existing stores.
+        ok, claim, raw = source.call("tachi_task", action="claim", claim_scope=["src/egress.rs"],
+            claim_mode="read_only", claim_role="reviewer", worktree_path=str(repo), expected_head=head,
+            lease_expires_at=lease, issue_ref="owner/example#1940")
+        ctx.require("fresh origin claim for revocation boundary", ok, claim if ok else raw)
+        authority_gateway = type(origin)(origin.tachi, root / "origin-authority-process", free_port())
+        authority_config = {**configured, "bind": f"127.0.0.1:{authority_gateway.port}"}
+        authority_path = root / "origin-authority.json"
+        _private_text(authority_path, json.dumps(authority_config))
+        _start_gateway(ctx, authority_gateway, authority_path)
+        destination = _client(ca, authority_gateway.port, leaves["server"])
+        try:
+            status, admitted = _request(destination)
+        finally:
+            destination.close()
+        ctx.require("destination key has a real admission in origin gateway authority", status == 200,
+                    {"status": status, "peer": admitted.get("peer")})
+        after_tls, _ = prepare("revoke-after-health")
+        before_tls, _ = prepare("revoke-before-attempt")
+
+        def revoke_after_health():
+            control["revocation"] = subprocess.run([str(origin.tachi), "a2a", "remote", "revoke",
+                "--config", str(origin_path), "--admission", admitted["peer"]["admission_id"]],
+                env=origin.env, cwd=origin.home, capture_output=True, timeout=15)
+
+        control["after_health"] = revoke_after_health
+        start = len(control["bodies"])
+        denied = cli("resume", "--submission", after_tls["submission_id"])
+        ctx.require("operator revocation during health commits in gateway ledger",
+                    control["revocation"].returncode == 0, _output(control["revocation"]))
+        with closing(sqlite3.connect(db)) as conn:
+            origin_revocations = conn.execute("SELECT COUNT(*) FROM identity_admission_verification_revocations").fetchone()[0]
+        with closing(sqlite3.connect(origin.app_home / "global.db")) as conn:
+            gateway_revocations = conn.execute("SELECT COUNT(*) FROM identity_admission_verification_revocations").fetchone()[0]
+        ctx.check("gateway revocation after TLS prevents POST even when claim DB has no revocation",
+                  denied["current_state"] == "unknown" and denied["attempts"] == 1
+                  and denied["last_error"] == "destination_authority_changed" and not denied["retry_allowed"]
+                  and len(control["bodies"]) == start and origin_revocations == 0 and gateway_revocations == 1, denied)
+        before = control["http"]
+        denied = cli("resume", "--submission", before_tls["submission_id"], success=False)
+        fresh = cli("submit", "--request", str(request("revoked-key")), success=False)
+        untouched = cli("status", "--submission", before_tls["submission_id"])
+        ctx.check("gateway key retirement blocks new and already prepared submissions before any HTTP",
+                  denied.returncode != 0 and fresh.returncode != 0 and untouched["attempts"] == 0
+                  and control["http"] == before, {"resume": _output(denied), "submit": _output(fresh)})
+    finally:
+        release.set()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
+        origin.stop()
+        if authority_gateway is not None:
+            authority_gateway.stop()
+        _private_text(origin_path, json.dumps(original))
+
+
+def register_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_repo):
     @scenario("remote-admission", "a2a-remote", "identity", shared_daemon=False)
     def remote_admission_enforces_tls_identity_and_revocation(ctx):
         root = ctx.daemon.home / f"remote-admission-{ctx.tag}"
@@ -546,6 +852,19 @@ def register_scenarios(scenario, Daemon, free_port):
                        "output": _output(result)})
 
             dgx_request, dgx_task = _remote_tasks(ctx, gateway, ca, leaves, alpha, beta, db)
+
+            # Origin crash recovery intentionally spans the durable reservation.
+            # Do not leave the separate revocation controls idle past the
+            # gateway's bounded header wait; admit live controls afterward.
+            alpha.close()
+            beta.close()
+            _origin_submissions(ctx, origin, origin_config, origin_path, gateway, ca, leaves,
+                                root, McpSession, make_fixture_repo, free_port)
+            alpha = connection(leaves["cloud"])
+            alpha_health = health(alpha, "agent-cloud", "host-cloud")
+            alpha_socket = alpha.sock
+            beta = connection(leaves["second"])
+            beta_health = health(beta, "agent-second", "host-second")
 
             before_revoke = _snapshot(db)
             result = cli(gateway, "revoke", gateway_path, "--admission", alpha_health["peer"]["admission_id"])

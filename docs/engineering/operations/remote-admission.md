@@ -40,7 +40,7 @@ The configured home is the explicit Product runtime home; the existing store
 is `home/global.db`. No project or implicit default store is selected. An older
 store still requires the existing explicit `--allow-schema-migration` flag.
 The original method addition changed no schema. The remote task receipt slice
-uses Product schema 45 / Portable 44. Test against an isolated home or an
+uses Product schema 46 / Portable 44 after the origin submission addition. Test against an isolated home or an
 authorized stopped copy, never an incidental live user store.
 
 The home, config and private key must belong to the gateway OS account and have
@@ -134,3 +134,9 @@ python3 scripts/dogfood_e2e.py --tachi /absolute/candidate/tachi --only remote-a
 The scenario uses temporary certificates and stores, exercises actual TLS and
 the packaged CLI, and requires OpenSSL. Its evidence is transport/admission
 behavior on that host, not owner-Mac deployment or agent-memory recall quality.
+
+Origin `submit`, `resume` and `status` commands, explicit outbound grants and
+the existing daemon database selection are documented in
+[remote task receipts](remote-task-receipts.md#configure-and-submit-from-the-origin).
+The gateway key-revocation ledger remains `home/global.db` even when origin
+WorkClaims/submissions use the explicitly selected normal daemon database.

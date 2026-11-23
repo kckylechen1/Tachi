@@ -3,6 +3,8 @@ use super::*;
 
 mod remote;
 pub(crate) use remote::migrate_v45_remote_mailbox;
+mod submissions;
+pub(crate) use submissions::migrate_v46_remote_submissions;
 
 const KIND_CHECK: &str = "CHECK (kind IN ('turn_response/v1','coordination/v1'))";
 const IDEMPOTENCY_CHECK: &str =
@@ -59,6 +61,9 @@ pub(crate) fn validate_a2a_mailbox_v31_schema(conn: &Connection) -> Result<(), M
 
 pub(crate) fn validate_a2a_mailbox_schema(conn: &Connection) -> Result<(), MemoryError> {
     let stored = super::super::version_policy::VersionHeader::read(conn)?.stored;
+    if stored >= 46 {
+        submissions::validate(conn)?;
+    }
     if stored >= 45 {
         return remote::validate(conn);
     }

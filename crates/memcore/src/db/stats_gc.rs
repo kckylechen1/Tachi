@@ -73,6 +73,7 @@ fn gc_tables_at(
         "orphaned_agent_known_state": count("agent_known_state_orphan"),
         "recall_impression_groups_pruned": count("recall_impression_groups_age_or_quota"),
         "a2a_bodies_scrubbed": count("a2a_terminal_body_scrub"),
+        "a2a_submission_bodies_scrubbed": count("a2a_remote_submission_body_scrub"),
     }))
 }
 

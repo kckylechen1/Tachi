@@ -4,6 +4,7 @@ mod admission;
 mod config;
 mod profile;
 mod rpc;
+mod submissions;
 mod transport;
 
 use config::GatewayConfig;
@@ -16,6 +17,9 @@ pub(crate) fn run(
 ) -> Result<(), Box<dyn Error>> {
     let path = match action {
         RemoteA2aAction::Serve { config }
+        | RemoteA2aAction::Submit { config, .. }
+        | RemoteA2aAction::Resume { config, .. }
+        | RemoteA2aAction::Status { config, .. }
         | RemoteA2aAction::Probe { config, .. }
         | RemoteA2aAction::Revoke { config, .. } => config,
     };
@@ -40,10 +44,19 @@ pub(crate) fn run(
         } else {
             memcore::MigrationAuthority::Deny
         };
+        let database = match action {
+            RemoteA2aAction::Submit { .. }
+            | RemoteA2aAction::Resume { .. }
+            | RemoteA2aAction::Status { .. } => config
+                .origin_database
+                .clone()
+                .unwrap_or_else(|| config.home.join("global.db")),
+            _ => config.home.join("global.db"),
+        };
         let server = crate::MemoryServer::new_without_background_workers(
-            config.home.join("global.db"),
+            database,
             None,
-            migration,
+            migration.clone(),
             config.home.clone(),
         )?;
         match action {
@@ -54,6 +67,23 @@ pub(crate) fn run(
                 Ok(())
             }
             RemoteA2aAction::Probe { .. } => unreachable!(),
+            RemoteA2aAction::Submit { .. }
+            | RemoteA2aAction::Resume { .. }
+            | RemoteA2aAction::Status { .. } => {
+                // Origin WorkClaims may live in the ordinary daemon's store;
+                // Serve/Revoke retain the gateway authority ledger.
+                let authority = if config.origin_database.is_some() {
+                    crate::MemoryServer::new_without_background_workers(
+                        config.home.join("global.db"),
+                        None,
+                        migration,
+                        config.home.clone(),
+                    )?
+                } else {
+                    server.clone()
+                };
+                submissions::run(&server, &authority, &config, action).await
+            }
         }
     })
 }
