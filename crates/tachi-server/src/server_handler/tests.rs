@@ -1195,3 +1195,46 @@ fn successful_result_is_unchanged() {
     );
     assert_eq!(format!("{result:?}"), before);
 }
+
+#[test]
+fn emit_mcp_tool_audit_logs_structured_fields_without_arguments() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let writer = CaptureWriter::default();
+    let layer = tracing_subscriber::fmt::Layer::new()
+        .with_writer(writer.clone())
+        .with_ansi(false)
+        .with_target(true);
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        protocol::emit_mcp_tool_audit(Some("staff:disp-1"), "tachi_memory", Some("briefing"), true);
+    });
+    let output = String::from_utf8(writer.0.lock().expect("lock").clone()).expect("utf8");
+    assert!(output.contains("tachi_server::mcp_audit:"), "{output}");
+    assert!(output.contains("mcp_tool_call"), "{output}");
+    assert!(output.contains("agent_identity=staff:disp-1"), "{output}");
+    assert!(output.contains("tool=tachi_memory"), "{output}");
+    assert!(output.contains("action=briefing"), "{output}");
+    assert!(output.contains("ok=true"), "{output}");
+}

@@ -428,6 +428,10 @@ impl ServerHandler for MemoryServer {
             };
             let server = admitted_target_server.as_ref().unwrap_or(server);
             let bound_project = server.session_project();
+            let audit_agent_identity = server
+                .work_claim_connection()
+                .and_then(|(id, _, _)| id)
+                .or_else(|| request_identity(Some(&context.meta), &context).agent_identity_id);
             if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_server_session_project(
                     server,
@@ -541,6 +545,12 @@ impl ServerHandler for MemoryServer {
                     if let Some(warn) = stuck_warning.clone() {
                         hit.content.push(rmcp::model::ContentBlock::text(warn));
                     }
+                    emit_mcp_tool_audit(
+                        audit_agent_identity.as_deref(),
+                        name,
+                        action_arg.as_deref(),
+                        hit.is_error != Some(true),
+                    );
                     return Ok(hit.into());
                 }
                 server
@@ -683,6 +693,13 @@ impl ServerHandler for MemoryServer {
                 (other, _) => other,
             };
 
+            emit_mcp_tool_audit(
+                audit_agent_identity.as_deref(),
+                name,
+                action_arg.as_deref(),
+                result.as_ref().is_ok_and(|res| res.is_error != Some(true)),
+            );
+
             result.map(|mut result| {
                 // Native constructors already carry this discriminator, but a
                 // directly exposed legacy MCP upstream does not. Hydrate at
@@ -696,6 +713,22 @@ impl ServerHandler for MemoryServer {
             })
         }
     }
+}
+
+pub(super) fn emit_mcp_tool_audit(
+    agent_identity: Option<&str>,
+    tool: &str,
+    action: Option<&str>,
+    ok: bool,
+) {
+    tracing::info!(
+        target: "tachi_server::mcp_audit",
+        agent_identity = %agent_identity.unwrap_or(""),
+        tool = %tool,
+        action = %action.unwrap_or(""),
+        ok = ok,
+        "mcp_tool_call"
+    );
 }
 
 #[cfg(any(unix, windows))]
