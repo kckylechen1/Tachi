@@ -161,5 +161,46 @@ class HostCredentialFingerprintTests(unittest.TestCase):
             acceptance.host_credential_fingerprint("opencode")
 
 
+class DaemonMcpAuditAndProfileSpecTests(unittest.TestCase):
+    def test_parse_profile_spec(self):
+        self.assertEqual(acceptance.parse_profile_spec("codex_sol_review"), ("codex_sol_review", None))
+        self.assertEqual(
+            acceptance.parse_profile_spec("opencode_review = deepseek/deepseek-flash"),
+            ("opencode_review", "deepseek/deepseek-flash"),
+        )
+        for bad in ("", "opencode_review=", "=deepseek/deepseek-flash"):
+            with self.assertRaises(ValueError):
+                acceptance.parse_profile_spec(bad)
+
+    def test_daemon_recorded_mcp_call_matches_exact_staff_identity_and_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "tachi.log"
+            self.assertFalse(acceptance.daemon_recorded_mcp_call(log, "disp-1"))
+            log.write_text(
+                "\n".join(
+                    [
+                        "2026-11-24T00:00:00Z  INFO tachi_server::mcp_audit: mcp_tool_call agent_identity=staff:disp-10 tool=tachi_memory action=briefing ok=true",
+                        "2026-11-24T00:00:01Z  INFO tachi_server::mcp_audit: mcp_tool_call agent_identity=staff:disp-1 tool=tachi_memory action=search ok=true",
+                        "2026-11-24T00:00:02Z  INFO tachi_server::mcp_audit: mcp_tool_call agent_identity=staff:disp-1 tool=tachi_memory action=briefing ok=false",
+                    ]
+                )
+                + "\n"
+            )
+            self.assertFalse(acceptance.daemon_recorded_mcp_call(log, "disp-1"))
+            with log.open("a") as fh:
+                fh.write(
+                    "2026-11-24T00:00:03Z  INFO tachi_server::mcp_audit: mcp_tool_call agent_identity=staff:disp-1 tool=tachi_memory action=briefing ok=true\n"
+                )
+            self.assertTrue(acceptance.daemon_recorded_mcp_call(log, "disp-1"))
+
+    def test_ensure_opencode_staff_allowlist_writes_owner_only_deduplicated_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            acceptance.ensure_opencode_staff_allowlist(home, ["deepseek", "openai", "deepseek", " "])
+            cfg = home / "staff.json"
+            self.assertEqual(json.loads(cfg.read_text()), {"opencode": {"providers": ["deepseek", "openai"]}})
+            self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

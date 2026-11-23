@@ -115,13 +115,60 @@ def worker_used(events: list[dict], kind: str) -> bool:
     return False
 
 
-def accept(ctx: d.Context, daemon: d.Daemon, owner: d.McpSession, profile: str) -> None:
+def parse_profile_spec(spec: str) -> tuple[str, str | None]:
+    profile, sep, model = spec.partition("=")
+    profile = profile.strip()
+    if not profile:
+        raise ValueError(f"empty profile spec: {spec!r}")
+    if not sep:
+        return profile, None
+    model = model.strip()
+    if not model:
+        raise ValueError(f"empty model in profile spec: {spec!r}")
+    return profile, model
+
+
+def daemon_recorded_mcp_call(
+    log_path: Path, dispatch_id: str, tool: str = "tachi_memory", action: str = "briefing"
+) -> bool:
+    """Server-side evidence that the worker's staff identity completed an injected MCP call."""
+    if not log_path.is_file():
+        return False
+    expected = {
+        "tachi_server::mcp_audit:",
+        "mcp_tool_call",
+        f"agent_identity=staff:{dispatch_id}",
+        f"tool={tool}",
+        f"action={action}",
+        "ok=true",
+    }
+    for line in log_path.read_text(errors="replace").splitlines():
+        tokens = set(line.split())
+        if expected.issubset(tokens):
+            return True
+    return False
+
+
+def ensure_opencode_staff_allowlist(app_home: Path, providers: list[str]) -> None:
+    """Write a restricted $TACHI_HOME/staff.json allowing requested OpenCode providers."""
+    path = app_home / "staff.json"
+    unique = sorted({p.strip() for p in providers if p.strip()})
+    path.write_text(json.dumps({"opencode": {"providers": unique}}) + "\n")
+    path.chmod(0o600)
+
+
+def accept(ctx: d.Context, daemon: d.Daemon, owner: d.McpSession, spec: str) -> None:
+    profile, model = parse_profile_spec(spec)
     backend = profile.split("_", 1)[0]
     before = host_credential_fingerprint(backend)
-    ok, payload, raw = owner.call("tachi_staff", action="start", profile=profile, task=TASK,
-                                  staffing_reason="explicit_user_request", format="json")
+    start_kwargs: dict[str, object] = dict(
+        action="start", profile=profile, task=TASK, staffing_reason="explicit_user_request", format="json"
+    )
+    if model is not None:
+        start_kwargs["model"] = model
+    ok, payload, raw = owner.call("tachi_staff", **start_kwargs)
     dispatch = d.find_key(payload, "dispatch_id") if ok else None
-    ctx.require(f"{profile} starts a native session", bool(dispatch), raw)
+    ctx.require(f"{spec} starts a native session", bool(dispatch), raw)
     status: dict = {}
     deadline = time.monotonic() + 900
     while time.monotonic() < deadline:
@@ -131,11 +178,11 @@ def accept(ctx: d.Context, daemon: d.Daemon, owner: d.McpSession, profile: str) 
             break
         time.sleep(2)
     session = d.find_key(status, "native_session") or {}
-    ctx.require(f"{profile} real turn reaches the supervised boundary", session.get("phase") == "awaiting_instruction",
+    ctx.require(f"{spec} real turn reaches the supervised boundary", session.get("phase") == "awaiting_instruction",
                 {k: session.get(k) for k in ("phase", "failure_class", "failure")})
     requested = session.get("requested") or {}
     observed = session.get("observed") or {}
-    ctx.check(f"{profile} observed model and effort equal the pinned profile",
+    ctx.check(f"{spec} observed model and effort equal the pinned profile",
               observed.get("model") == requested.get("model")
               and (requested.get("effort") is None or observed.get("effort") == requested.get("effort")),
               {"requested": requested, "observed": observed})
@@ -143,26 +190,28 @@ def accept(ctx: d.Context, daemon: d.Daemon, owner: d.McpSession, profile: str) 
     result = (run_dir / "result.md").read_text() if (run_dir / "result.md").is_file() else ""
     events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()] \
         if (run_dir / "events.jsonl").is_file() else []
-    ctx.check(f"{profile} worker reports the acceptance line",
+    ctx.check(f"{spec} worker reports the acceptance line",
               "ACCEPTANCE_OK" in result and "inside_work_tree=true" in result and "mcp=ok" in result, result[-300:])
-    ctx.check(f"{profile} worker ran a shell command inside the sandbox", worker_used(events, "shell"), len(events))
-    ctx.check(f"{profile} worker called the injected tachi MCP", worker_used(events, "mcp"), len(events))
+    ctx.check(f"{spec} worker ran a shell command inside the sandbox", worker_used(events, "shell"), len(events))
+    log_path = daemon.app_home / "logs" / "tachi.log"
+    ctx.check(f"{spec} worker called the injected tachi MCP", daemon_recorded_mcp_call(log_path, dispatch), str(log_path))
     ok, final, raw = owner.call("tachi_staff", action="finish", dispatch_id=dispatch,
                                 expected_status_revision=d.find_key(status, "status_revision"), format="json")
     settled = until(lambda: d.find_key(owner.call("tachi_staff", action="status", dispatch_id=dispatch,
                                                     format="json")[1], "state") == "TASK_STATE_COMPLETED", 60) if ok else False
-    ctx.check(f"{profile} owner finish settles the run", settled, raw if not ok else dispatch)
+    ctx.check(f"{spec} owner finish settles the run", settled, raw if not ok else dispatch)
     residue = [p.name for p in (run_dir / "runtime").rglob("*")
                if p.name in ("auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm")]
-    ctx.check(f"{profile} credential snapshot is removed at terminal", not residue, residue)
-    ctx.check(f"{profile} host credential fingerprint is unchanged",
+    ctx.check(f"{spec} credential snapshot is removed at terminal", not residue, residue)
+    ctx.check(f"{spec} host credential fingerprint is unchanged",
               host_credential_fingerprint(backend) == before, {"before": before})
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tachi", type=Path, required=True, help="candidate tachi binary")
-    parser.add_argument("--profiles", default="codex_sol_review,opencode_sol_review")
+    parser.add_argument("--profiles", default="codex_sol_review,opencode_sol_review",
+                        help="Comma-separated profiles or profile=provider/model specs")
     parser.add_argument("--keep", action="store_true", help="keep the temporary home for inspection")
     arguments = parser.parse_args()
     tachi = arguments.tachi.expanduser().resolve()
@@ -170,6 +219,14 @@ def main() -> int:
     print(f"## macOS {platform.mac_ver()[0]} ({platform.machine()})")
     print(f"## {version(str(tachi))}")
     print(f"## codex {version(codex)} | opencode {version(opencode)}")
+
+    specs = [p.strip() for p in arguments.profiles.split(",") if p.strip()]
+    parsed_specs = [(spec, *parse_profile_spec(spec)) for spec in specs]
+    opencode_providers = [
+        model.split("/", 1)[0]
+        for _, profile, model in parsed_specs
+        if profile.startswith("opencode") and model and "/" in model
+    ]
 
     run = d.Run()
     root = Path(tempfile.mkdtemp(prefix="tachi-native-acceptance-"))
@@ -187,14 +244,16 @@ def main() -> int:
             daemon.env[key] = os.environ[key]
     try:
         repo = d.make_fixture_repo(root)
+        if opencode_providers:
+            ensure_opencode_staff_allowlist(daemon.app_home, sorted({"openai", *opencode_providers}))
         daemon.start()
         ctx = d.Context(daemon, repo, run)
         owner = d.McpSession(daemon.url, {"X-Tachi-Workspace-Root": str(repo),
                                           "X-Tachi-Agent-Identity": f"native-acceptance-{ctx.tag}"})
-        for profile in [p.strip() for p in arguments.profiles.split(",") if p.strip()]:
-            ctx.current = profile
+        for spec, _, _ in parsed_specs:
+            ctx.current = spec
             try:
-                accept(ctx, daemon, owner, profile)
+                accept(ctx, daemon, owner, spec)
             except d.ScenarioAborted:
                 pass
     finally:
