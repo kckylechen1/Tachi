@@ -4,6 +4,11 @@ Implementation contract for #2232 and #2252 phases 2–3. Phase 1 was accepted
 in #2238. This change extends the existing mailbox and identity admissions;
 there is no separate sticky store, second registry, or general message bus.
 
+Cross-host admission and execution are covered by the
+[remote V1 proposal](remote-execution-v1.md), which is not an implemented mailbox
+extension. This local contract retains its self-asserted admission, physical
+project binding and existing replay scope.
+
 ## Wire and admission
 
 | Action | Addressing and effect |
