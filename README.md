@@ -28,14 +28,14 @@ Named after the Tachikomas from *Ghost in the Shell*: agents that evolve through
 - **Hybrid recall**: semantic (sqlite-vec + Voyage), lexical (FTS5 with CJK tuning), temporal decay, and graph spreading activation, fused with RRF.
 - **Workspace-first**: Tachi works out which project a call comes from and searches that project's library before global memory and the shared Wiki.
 - **Task briefs and a shared work board**: compact briefings, who is working on what, and whether a task has only finished running or has actually been delivered.
-- **Encrypted local Vault**: API keys and OAuth tokens, including those for third-party MCP servers, stay in the Vault and never appear in agent configuration.
-- **One MCP connection**: register third-party MCP servers once in Tachi, and agents see their tools through the same Tachi connection.
+- **Encrypted local Vault**: scoped API and connection credentials stay encrypted and are materialized for admitted commands.
+- **One resident Tachi connection**: agents share Tachi's memory and work tools over HTTP. Configure third-party MCP servers directly in each host; Hub manages retained skill and plugin assets.
 - **Zero external database**: one Rust binary and one SQLite file per store.
 
 ## Release status
 
 - **Current release:** `v2.0.0` (store schema 39). See the [2.0.0 notes](CHANGELOG.md#200---2026-09-25).
-- **On `main`, not yet released:** first-party MCP is HTTP-only, the agent entry is a single default profile, and workspace binding, briefings, and CJK recall have improved. See [Unreleased](CHANGELOG.md#unreleased).
+- **On `main`, not yet released:** first-party MCP is HTTP-only, the agent entry is a single default profile, and workspace binding, briefings, and CJK recall have improved. Hub's upstream MCP proxy and automatic advice producers have been retired. The capability descriptions below follow `main`; use the matching tag's documentation for a released binary. See [Unreleased](CHANGELOG.md#unreleased).
 - **Upgrading** from 1.9.x, or from a setup that launched Tachi as a stdio subprocess? Read [docs/UPGRADING.md](docs/UPGRADING.md) first.
 
 ---
@@ -152,11 +152,13 @@ Connect an ordinary agent without choosing a profile. The default tool list has 
 | `tachi_memory` | Search, save, brief, and reuse memory. |
 | `tachi_task` | Task briefs, the work board, claims, progress, and completion evidence. |
 | `tachi_agent_eval` | Record and inspect bounded native-worker experience. |
-| `tachi_staff` | Track external workers under the explicit staffing policy. |
-| `tachi_a2a` | Admitted agent-to-agent coordination. |
+| `tachi_staff` | Start, supervise, and inspect workers under the explicit staffing policy. |
+| `tachi_a2a` | Same-host project coordination and mailbox receipts. |
 | `vault_connections` | Read saved connection metadata and prepare host commands without exposing secrets. |
 
-Worker (`delegate`) sessions get `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`: five tools, no `tachi_agent_eval`, and no recursive staffing. Tools from third-party MCP servers registered in Tachi appear alongside, named `server__tool`, with their upstream schemas and results unchanged.
+Worker (`delegate`) sessions get `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`: five tools, no `tachi_agent_eval`, and no Staff start action.
+
+Ordinary local delegation defaults to the host's native subagent. Staff start requires an explicit `staffing_reason` and an admitted profile. Tachi supervises the resulting managed native session through the installed harness's protocol; externally attached harnesses retain their own lifecycle.
 
 Hosts that support the MCP Skills extension can load Tachi's usage guide on demand from `skill://tachi/SKILL.md`, which keeps the always-loaded server instructions short.
 
@@ -192,7 +194,7 @@ See [Vault connections](docs/engineering/architecture/vault-connections.md).
 
 ### Continuity and project lifecycle
 
-Tachi records typed project events, turns repeated behavior into reusable pattern memories, labels outcomes, and links issues, PRs, docs, Wiki pages, and run artifacts. Future agents can then pick up a project cycle without rebuilding it from chat history. GitHub is a read-only source for intake and status.
+Tachi records typed project events and links issues, PRs, docs, Wiki pages, and run artifacts. Session capture preserves source memories and `session.captured` events; the host submits outcome labels explicitly. Projections and daily batch distillation remain available. GitHub status snapshots are read-only, while historical CurrentTruth reconciliation retains its recorded revision and reports stale or unavailable evidence without inventing freshness.
 
 Design docs: [continuity memory](docs/engineering/architecture/tachi-continuity-memory-architecture.md) · [project-cycle spine](docs/engineering/architecture/project-cycle-memory-spine.md) · [pattern timeline](docs/engineering/architecture/pattern-timeline-bonding-memory.md)
 

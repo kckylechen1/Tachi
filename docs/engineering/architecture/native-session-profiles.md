@@ -19,8 +19,9 @@ separately admitted `dsh_executor` headless path remains distinct.
 | `opencode_astra_review` | OpenCode | `openai/gpt-6-astra` | Unspecified | No | 4 | 600 |
 | `opencode_terra_write` | OpenCode | `openai/gpt-6.1-terra` | Unspecified | Managed worktree | 8 | 600 |
 
-All six profiles use supervised native ACP Session transport. Each run also has a
-fixed total lifetime of `turn ceiling × seconds per turn`, including time spent
+All six profiles share Tachi's native session supervisor. Codex uses its local
+app-server dialect; OpenCode uses ACP, as listed below. Each run also has a fixed
+total lifetime of `turn ceiling × seconds per turn`, including time spent
 waiting for supervision; each active turn independently has the listed timeout. These are requested
 pins, not assertions about adapter installation, account access or model
 availability. OpenCode has no claimed effort control in these profiles. Its
