@@ -83,7 +83,7 @@ impl SubmissionRequest {
         }
         // Freeze semantic input before mutable profile defaults are applied.
         // Explicit fields keep future optional fields from changing old keys.
-        let input = json!({
+        let mut input = json!({
             "schema": "tachi.staff_submission_input.v1",
             "staffing_reason": request.staffing_reason,
             "task": request.task.trim(),
@@ -99,6 +99,16 @@ impl SubmissionRequest {
             "recommendation_ref": request.recommendation_ref,
             "declared_file_scope": request.declared_file_scope,
         });
+        if let Some(model) = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            if let Some(obj) = input.as_object_mut() {
+                obj.insert("model".to_string(), json!(model));
+            }
+        }
         let dispatch_id = scoped_dispatch_id(&owner, key)?;
         Ok(Some(Self {
             owner,
@@ -303,6 +313,7 @@ pub(crate) fn recovery_key(params: &TachiStaffParams) -> Result<&str, String> {
         ("task", params.task.is_some()),
         ("staffing_reason", params.staffing_reason.is_some()),
         ("profile", params.profile.is_some()),
+        ("model", params.model.is_some()),
         ("worker", params.worker.is_some()),
         ("stage", params.stage.is_some()),
         ("issue_ref", params.issue_ref.is_some()),

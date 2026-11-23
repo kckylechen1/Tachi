@@ -17,6 +17,7 @@ mod profiles;
 mod registry;
 mod routing;
 pub mod signatures;
+mod staff_config;
 
 pub mod eval;
 pub use authority::{
@@ -71,10 +72,11 @@ pub use profiles::{
     profile_required_skill_ids, profile_resolved_model, profile_skill_loadout_json,
     profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
     resolve_and_apply_dispatch_profile, resolve_and_apply_staff_assignment_profile,
-    resolve_dispatch_profile, retired_dispatch_profile, DispatchProfileAlias, DispatchProfileDef,
-    NativeSessionPolicy, NativeSessionProfile, ResolvedDispatchProfile, DISPATCH_PROFILES,
-    DISPATCH_PROFILE_ALIASES, MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS,
-    ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    resolve_and_apply_staff_assignment_profile_with_config, resolve_dispatch_profile,
+    retired_dispatch_profile, DispatchProfileAlias, DispatchProfileDef, NativeSessionPolicy,
+    NativeSessionProfile, ResolvedDispatchProfile, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
+    MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported,
@@ -96,6 +98,7 @@ pub use signatures::{
     SignatureEvidenceRow, SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE,
     ACT_R_MIN_AGE_DAYS, COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY, SIGNATURE_ALIASES,
 };
+pub use staff_config::{load_staff_config, OpencodeStaffConfig, SeatModelConfig, StaffConfig};
 pub use tachi_params::{
     ExecutionGrant, LaunchSpec, ResolvedStaffAssignment, StaffAssignmentRequest, StaffRunReceipt,
 };

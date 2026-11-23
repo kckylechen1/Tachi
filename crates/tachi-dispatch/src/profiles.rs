@@ -316,6 +316,30 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         },
     ),
     native_profile(
+        "opencode_review",
+        "OpenCode Reviewer",
+        "opencode",
+        "openai/gpt-6.1-sol",
+        false,
+        NativeSessionPolicy {
+            effort: None,
+            max_turns: 4,
+            turn_timeout_secs: 300,
+        },
+    ),
+    native_profile(
+        "opencode_write",
+        "OpenCode Implementer",
+        "opencode",
+        "openai/gpt-6.1-terra",
+        true,
+        NativeSessionPolicy {
+            effort: None,
+            max_turns: 8,
+            turn_timeout_secs: 600,
+        },
+    ),
+    native_profile(
         "opencode_sol_review",
         "OpenCode Sol Reviewer",
         "opencode",
@@ -382,7 +406,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         backend: "custom",
         role: "explore",
         stage: Some("explore"),
-        model: Some("deepseek/deepseek-v4-flash"),
+        model: Some("deepseek/deepseek-flash"),
         model_alias: None,
         native_session: None,
         allow_cross_lineage_override: false,
@@ -911,9 +935,31 @@ where
 /// launch default needed by the server-owned canonical launch kernel.
 pub fn resolve_and_apply_staff_assignment_profile<F, S, E>(
     request: &mut StaffAssignmentRequest,
+    profile_required_skills: S,
+    profile_evidence_required: E,
+    harness_attach_ready: F,
+) -> Result<ResolvedDispatchProfile, String>
+where
+    F: FnMut(&str) -> bool,
+    S: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
+    E: FnMut(&DispatchProfileDef) -> Result<Vec<String>, String>,
+{
+    let default_config = crate::StaffConfig::default();
+    resolve_and_apply_staff_assignment_profile_with_config(
+        request,
+        profile_required_skills,
+        profile_evidence_required,
+        harness_attach_ready,
+        &default_config,
+    )
+}
+
+pub fn resolve_and_apply_staff_assignment_profile_with_config<F, S, E>(
+    request: &mut StaffAssignmentRequest,
     mut profile_required_skills: S,
     mut profile_evidence_required: E,
     _harness_attach_ready: F,
+    staff_config: &crate::StaffConfig,
 ) -> Result<ResolvedDispatchProfile, String>
 where
     F: FnMut(&str) -> bool,
@@ -929,6 +975,16 @@ where
         .worker
         .clone()
         .filter(|value| !value.trim().is_empty());
+    let requested_model = match request.model.as_deref() {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err("requested model must not be empty".to_string());
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
     let alias = requested_profile
         .as_deref()
         .and_then(dispatch_profile_alias);
@@ -951,7 +1007,7 @@ where
     let profile = Some(admitted);
     let identity_requested = crate::DispatchIdentityRequest {
         profile: request.profile.clone(),
-        model: None,
+        model: requested_model.clone(),
         agent: request.worker.clone(),
         harness: None,
     };
@@ -1012,7 +1068,44 @@ where
         if request.stage.is_none() {
             request.stage = profile.stage.map(str::to_string);
         }
-        selected_model = profile_resolved_model(profile);
+        if profile.backend == "opencode" && profile.native_session.is_some() {
+            let candidate = requested_model
+                .clone()
+                .or_else(|| {
+                    staff_config
+                        .seat_default_model(profile.name)
+                        .map(str::to_string)
+                })
+                .or_else(|| profile_resolved_model(profile))
+                .ok_or_else(|| {
+                    format!(
+                        "native OpenCode profile '{}' resolved no model",
+                        profile.name
+                    )
+                })?;
+            let validated = staff_config.validate_opencode_model(&candidate)?;
+            if requested_model.is_some() {
+                route_explanation.push(format!(
+                    "explicit model override selected '{validated}' within staff.json opencode.providers"
+                ));
+            } else if staff_config.seat_default_model(profile.name).is_some() {
+                route_explanation.push(format!(
+                    "staff.json default_model selected '{validated}' for seat '{}'",
+                    profile.name
+                ));
+            }
+            selected_model = Some(validated);
+        } else {
+            selected_model = profile_resolved_model(profile);
+            if let Some(req_model) = requested_model.as_deref() {
+                if Some(req_model) != selected_model.as_deref() {
+                    return Err(format!(
+                        "profile '{}' fixes its model; model override is supported only for OpenCode native profiles",
+                        profile.name
+                    ));
+                }
+            }
+        }
         if profile.backend == "dsh" {
             harness_transport = Some("dsh_headless".to_string());
             route_explanation.push("profile selected DeepSeek Harness headless; workspace authority is advisory and model/auth remain host-owned".to_string());
@@ -1105,9 +1198,10 @@ where
         crate::DispatchIdentityEffective {
             profile: selected_profile.clone(),
             model: selected_model.clone(),
-            model_lineage_id: profile
-                .map(profile_model_lineage_id)
-                .unwrap_or_else(|| crate::model_lineage_id(selected_model.as_deref(), &agent)),
+            model_lineage_id: crate::model_lineage_id(
+                selected_model.as_deref(),
+                profile.map(|profile| profile.backend).unwrap_or(&agent),
+            ),
             concrete_model_release,
             provider_model,
             provider_model_version,

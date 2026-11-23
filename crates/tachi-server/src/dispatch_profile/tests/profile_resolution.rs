@@ -404,7 +404,7 @@ fn custom_profile_populates_opencode_command() {
             "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
-            "deepseek/deepseek-v4-flash".to_string()
+            "deepseek/deepseek-flash".to_string()
         ]
     );
     assert!(resolved
@@ -427,4 +427,57 @@ fn kimi_ux_profile_is_registered_as_read_only_experience_reviewer() {
         .strong_against
         .iter()
         .any(|item| item == &"tool_surface_friction"));
+}
+
+#[test]
+fn staff_json_reloads_per_start_and_cards_surface_configured_default() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = NativeAdapterFixture::new();
+    if !tachi_dispatch::native_sandbox_available() {
+        return;
+    }
+    let server = crate::staffing_ops::tests::test_server();
+    let staff_json = server.tachi_home_dir().join("staff.json");
+    std::fs::write(
+        &staff_json,
+        serde_json::to_vec(&serde_json::json!({
+            "opencode": {"providers": ["openai", "deepseek", "zhipuai-coding-plan"]},
+            "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let mut req = staff_profile_request("opencode_review");
+    let resolved =
+        resolve_and_apply_staff_assignment_profile_for_server(&server, &mut req).unwrap();
+    assert_eq!(
+        resolved.selected_model.as_deref(),
+        Some("deepseek/deepseek-flash")
+    );
+
+    let mut req_override =
+        staff_profile_request("opencode_review").with_model("zhipuai-coding-plan/glm-5.3");
+    let resolved_override =
+        resolve_and_apply_staff_assignment_profile_for_server(&server, &mut req_override).unwrap();
+    assert_eq!(
+        resolved_override.selected_model.as_deref(),
+        Some("zhipuai-coding-plan/glm-5.3")
+    );
+
+    let catalog = dispatch_profiles_json_for_server(&server, false).unwrap();
+    let row = catalog["dispatch_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "opencode_review")
+        .expect("opencode_review listed");
+    assert_eq!(row["model"], json!("deepseek/deepseek-flash"));
 }

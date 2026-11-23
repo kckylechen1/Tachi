@@ -45,7 +45,7 @@ use rmcp::schemars::JsonSchema;
 use rmcp::schemars;
 mod preflight;
 pub(crate) mod presence;
-pub(crate) use preflight::staff_preflight;
+pub(crate) use preflight::staff_preflight_for_server;
 
 /// Minimal semantic request for externally staffing a worker. The model may
 /// only set intent fields here; execution fields (cwd, command, transport,
@@ -960,6 +960,7 @@ pub(crate) mod tests {
             task: "prove the retained canonical kernel lifecycle".to_string(),
             staffing_reason: TachiDispatchReason::DurableCrossSession,
             profile: Some("kernel_codex_review".to_string()),
+            model: None,
             worker: Some("codex".to_string()),
             project: Some(project.to_string()),
             stage: None,
@@ -1240,6 +1241,7 @@ pub(crate) mod tests {
             task: "prove reason is carried through".to_string(),
             staffing_reason: TachiDispatchReason::CrossDeviceRemote,
             profile: Some("codex_astra_review".to_string()),
+            model: None,
             worker: Some("codex".to_string()),
             project: Some("tachi".to_string()),
             stage: Some("execute".to_string()),
@@ -1794,6 +1796,7 @@ pub(crate) mod tests {
                 task: "refuse stale recommendation".to_string(),
                 staffing_reason: TachiDispatchReason::ExplicitUserRequest,
                 profile: Some("codex_sol_review".to_string()),
+                model: None,
                 worker: Some("codex".to_string()),
                 project: Some("named-project".to_string()),
                 stage: None,

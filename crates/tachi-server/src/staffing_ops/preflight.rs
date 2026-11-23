@@ -90,6 +90,7 @@ fn reject_irrelevant_fields(params: &TachiStaffParams) -> Result<(), String> {
     }
     for (name, present) in [
         ("submission_id", params.submission_id.is_some()),
+        ("model", params.model.is_some()),
         ("task", params.task.is_some()),
         ("staffing_reason", params.staffing_reason.is_some()),
         ("stage", params.stage.is_some()),
@@ -109,9 +110,25 @@ fn reject_irrelevant_fields(params: &TachiStaffParams) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) async fn staff_preflight_for_server(
+    server: &crate::MemoryServer,
+    params: &TachiStaffParams,
+) -> Result<String, String> {
+    let staff_config = tachi_dispatch::load_staff_config(&server.tachi_home_dir())?;
+    staff_preflight_with_config(params, &staff_config).await
+}
+
 /// Production boundary for `tachi_staff(action='preflight')`. Every refusal path
 /// returns `Err` before the version probe runs.
-pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String, String> {
+#[cfg(test)]
+async fn staff_preflight(params: &TachiStaffParams) -> Result<String, String> {
+    staff_preflight_with_config(params, &tachi_dispatch::StaffConfig::default()).await
+}
+
+async fn staff_preflight_with_config(
+    params: &TachiStaffParams,
+    staff_config: &tachi_dispatch::StaffConfig,
+) -> Result<String, String> {
     reject_irrelevant_fields(params)?;
 
     let requested_worker = params
@@ -172,6 +189,39 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
 
     if let Some(profile_name) = params.profile.as_deref() {
         if let Some(profile) = tachi_dispatch::native_session_profile(profile_name) {
+            if profile.backend == "opencode" {
+                if let Some(configured) = staff_config.seat_default_model(profile_name) {
+                    // `NativeSessionProfile` borrows static metadata; expose effective
+                    // configured default via JSON while keeping static fallback intact.
+                    let mut contract = serde_json::to_value(profile).map_err(|e| e.to_string())?;
+                    contract["model"] = json!(configured);
+                    let profile_name = profile_name.to_string();
+                    let (adapter, sandbox) = tokio::task::spawn_blocking(move || {
+                        (
+                            tachi_dispatch::native_session_adapter_available(&profile_name),
+                            tachi_dispatch::native_sandbox_available(),
+                        )
+                    })
+                    .await
+                    .map_err(|error| format!("native Staff preflight task failed: {error}"))?;
+                    return serde_json::to_string(&json!({
+                        "worker": backend,
+                        "profile": profile_section,
+                        "transport": "acp_native",
+                        "mode": "session",
+                        "profile_contract": contract,
+                        "admitted_opencode_providers": staff_config.admitted_opencode_providers(),
+                        "adapter_available": adapter,
+                        "filesystem_confinement": { "provider": tachi_dispatch::native_sandbox_provider(), "available": sandbox, "scope": "private runtime and declared managed workspace writes; network and host reads remain available" },
+                        "authentication_observation": "unknown",
+                        "model_support": "requires exact advertised model and observed acknowledgement at start",
+                        "tool_execution_verification": "not_executed",
+                        "cancel_cleanup_verification": "not_executed",
+                        "launch_admission": "not_evaluated",
+                        "next_steps": if adapter && sandbox { "start the profile to negotiate its exact model and effort; preflight is not authenticated-run evidence" } else { "install the profile ACP adapter and enable the host filesystem confinement primitive" },
+                    })).map_err(|error| error.to_string());
+                }
+            }
             let profile_name = profile_name.to_string();
             let (adapter, sandbox) = tokio::task::spawn_blocking(move || {
                 (
@@ -187,6 +237,7 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
                 "transport": "acp_native",
                 "mode": "session",
                 "profile_contract": profile,
+                "admitted_opencode_providers": (backend == "opencode").then(|| staff_config.admitted_opencode_providers()),
                 "adapter_available": adapter,
                 "filesystem_confinement": { "provider": tachi_dispatch::native_sandbox_provider(), "available": sandbox, "scope": "private runtime and declared managed workspace writes; network and host reads remain available" },
                 "authentication_observation": "unknown",
@@ -445,6 +496,8 @@ mod tests {
         for (field, value) in [
             ("dispatch_id", json!("20260823T010101Z-custom-deadbeef")),
             ("expected_status_revision", json!(7)),
+            ("submission_id", json!("sub-1")),
+            ("model", json!("deepseek/deepseek-flash")),
             ("task", json!("do work")),
             ("staffing_reason", json!("explicit_user_request")),
             ("stage", json!("plan")),

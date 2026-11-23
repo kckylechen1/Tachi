@@ -297,9 +297,14 @@ pub struct StaffAssignmentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submission_id: Option<String>,
 
-    /// Semantic dispatch profile hint (e.g. "claude_plan", "codex_55_review").
+    /// Semantic dispatch profile hint (e.g. "claude_plan", "opencode_review").
     #[serde(default)]
     pub profile: Option<String>,
+
+    /// Optional explicit model pin for admitted OpenCode native role seats
+    /// (format: `provider/model`), subject to the owner `staff.json` allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 
     /// Semantic worker backend hint (e.g. "claude", "codex", "custom").
     #[serde(default)]
@@ -349,6 +354,7 @@ impl StaffAssignmentRequest {
             task: task.into(),
             submission_id: None,
             profile: None,
+            model: None,
             worker: None,
             stage: None,
             execution_level: None,
@@ -364,6 +370,11 @@ impl StaffAssignmentRequest {
 
     pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
         self.profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
         self
     }
 

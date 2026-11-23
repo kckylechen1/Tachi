@@ -58,7 +58,7 @@ fn legacy_operator_custom_profile_can_attach_to_opencode_serve() {
             "--agent".to_string(),
             "explore".to_string(),
             "--model".to_string(),
-            "deepseek/deepseek-v4-flash".to_string()
+            "deepseek/deepseek-flash".to_string()
         ]
     );
     assert!(resolved
@@ -123,7 +123,7 @@ fn legacy_operator_custom_profile_falls_back_to_cli_when_serve_is_unreachable() 
             "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
-            "deepseek/deepseek-v4-flash".to_string()
+            "deepseek/deepseek-flash".to_string()
         ]
     );
     assert!(resolved

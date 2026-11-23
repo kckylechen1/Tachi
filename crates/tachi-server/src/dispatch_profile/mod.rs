@@ -26,11 +26,26 @@ pub(crate) fn dispatch_profiles_json_for_server(
     server: &MemoryServer,
     verbose: bool,
 ) -> Result<Value, String> {
+    let staff_config = tachi_dispatch::load_staff_config(&server.tachi_home_dir())?;
     let profiles = DISPATCH_PROFILES
         .iter()
         .filter(|profile| crate::host_profile::native_staff_profile_available(profile))
-        .map(|profile| profile_json_for_server(server, profile))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|profile| {
+            let mut card = profile_json_for_server(server, profile)?;
+            if profile.backend == "opencode" {
+                if let Some(default_model) = staff_config.seat_default_model(profile.name) {
+                    card["model"] = json!(default_model);
+                    if let Some(native) = card
+                        .get_mut("native_session")
+                        .and_then(Value::as_object_mut)
+                    {
+                        native.insert("model".to_string(), json!(default_model));
+                    }
+                }
+            }
+            Ok(card)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let profiles = if verbose {
         profiles
     } else {
@@ -93,6 +108,7 @@ pub(crate) fn resolve_and_apply_staff_assignment_profile_for_server(
     server: &MemoryServer,
     request: &mut tachi_params::StaffAssignmentRequest,
 ) -> Result<ResolvedDispatchProfile, String> {
+    let staff_config = tachi_dispatch::load_staff_config(&server.tachi_home_dir())?;
     if let Some(profile) = request
         .profile
         .as_deref()
@@ -104,10 +120,11 @@ pub(crate) fn resolve_and_apply_staff_assignment_profile_for_server(
             return Err(format!("native Session profile '{}' is unavailable: install its ACP adapter and enable the host filesystem confinement primitive; authentication and model support are negotiated at start", profile.name));
         }
     }
-    tachi_dispatch::resolve_and_apply_staff_assignment_profile(
+    tachi_dispatch::resolve_and_apply_staff_assignment_profile_with_config(
         request,
         |profile| profile_required_skill_ids_for_server(server, profile),
         |profile| profile_evidence_required_for_server(server, profile),
         |server_url| crate::dispatch_ops::harness_server_attach_ready(server_url),
+        &staff_config,
     )
 }

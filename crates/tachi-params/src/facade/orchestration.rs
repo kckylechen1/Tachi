@@ -216,9 +216,14 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub staffing_reason: Option<TachiDispatchReason>,
 
-    /// Required admitted profile for start. Fixes provider, model, authority and turn budget.
+    /// Required admitted profile for start. Fixes provider, authority and turn budget.
     #[serde(default)]
     pub profile: Option<String>,
+
+    /// Optional start-only `provider/model` override for OpenCode native profiles,
+    /// constrained by `$TACHI_HOME/staff.json` (`opencode.providers`).
+    #[serde(default)]
+    pub model: Option<String>,
 
     /// Required provider for preflight; on start may only repeat the profile's provider.
     #[serde(default)]
@@ -299,6 +304,7 @@ impl TachiStaffParams {
             ("task", self.task.is_some()),
             ("staffing_reason", self.staffing_reason.is_some()),
             ("profile", self.profile.is_some()),
+            ("model", self.model.is_some()),
             ("worker", self.worker.is_some()),
             ("project", self.project.is_some()),
             ("stage", self.stage.is_some()),
@@ -345,6 +351,7 @@ impl TachiStaffParams {
             task,
             submission_id: self.submission_id.clone(),
             profile: self.profile.clone(),
+            model: self.model.clone(),
             worker: self.worker.clone(),
             stage: self.stage.clone(),
             execution_level: None,

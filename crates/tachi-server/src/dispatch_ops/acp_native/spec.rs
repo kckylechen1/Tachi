@@ -38,8 +38,17 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         } else {
             "read-only"
         };
+        let valid_model = if native.backend == "opencode" {
+            let staff_config = tachi_dispatch::load_staff_config(home)?;
+            assignment
+                .selected_model
+                .as_deref()
+                .is_some_and(|model| staff_config.validate_opencode_model(model).is_ok())
+        } else {
+            assignment.selected_model.as_deref() == Some(native.model)
+        };
         if assignment.selected_backend != native.backend
-            || assignment.selected_model.as_deref() != Some(native.model)
+            || !valid_model
             || grant.sandbox.as_deref() != Some(expected_sandbox)
             || grant.max_turns != Some(native.max_turns)
             || grant.timeout_secs != native.lifetime_timeout_secs
@@ -401,5 +410,56 @@ mod tests {
         let spec = build_spec(&request, &assignment, &grant, &command, "hello")
             .expect("no sandbox requested should build cleanly");
         assert_eq!(spec.command, "python3");
+    }
+
+    #[test]
+    fn opencode_native_spec_accepts_allowlisted_model_override_while_codex_stays_fixed() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _adapters = crate::test_support::NativeAdapterFixture::new();
+        let home = tempfile::tempdir().expect("temp home");
+        let (request, mut assignment, mut grant, _) = test_owners(Some("read-only"));
+        grant.env_id = Some("env-opencode".to_string());
+        grant.max_turns = Some(4);
+        grant.timeout_secs = 1200;
+
+        assignment.selected_backend = "opencode".to_string();
+        assignment.selected_worker = "opencode".to_string();
+        assignment.selected_profile = Some("opencode_review".to_string());
+        assignment.selected_model = Some("deepseek/deepseek-v4-pro".to_string());
+
+        let rejected =
+            build_native_acp_run_spec(home.path(), &request, &assignment, &grant, &[], "review")
+                .expect_err("default openai-only allowlist must reject deepseek");
+        assert!(rejected.contains("fixed profile model"), "{rejected}");
+
+        let staff_json = home.path().join("staff.json");
+        std::fs::write(
+            &staff_json,
+            r#"{"opencode":{"providers":["openai","deepseek"]}}"#,
+        )
+        .expect("write staff.json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 0600 staff.json");
+        }
+
+        let spec =
+            build_native_acp_run_spec(home.path(), &request, &assignment, &grant, &[], "review")
+                .expect("opencode_review should accept allowlisted provider/model override");
+        assert_eq!(spec.command, "opencode");
+
+        assignment.selected_backend = "codex".to_string();
+        assignment.selected_worker = "codex".to_string();
+        assignment.selected_profile = Some("codex_sol_review".to_string());
+        assignment.selected_model = Some("gpt-6-astra".to_string());
+
+        let err =
+            build_native_acp_run_spec(home.path(), &request, &assignment, &grant, &[], "review")
+                .expect_err("codex profile must still reject non-profile model");
+        assert!(err.contains("fixed profile model"), "{err}");
     }
 }

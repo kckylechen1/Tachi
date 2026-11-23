@@ -541,6 +541,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         staffing_reason: params.staffing_reason,
         task: params.task.clone(),
         profile: params.profile.clone(),
+        model: params.model.clone(),
         worker: params.agent.clone(),
         stage: params.stage.clone(),
         execution_level: params.execution_level,

@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 pub const GLM_CODING_MODEL_ALIAS: &str = "glm_coding";
-pub const GLM_CODING_DEFAULT_MODEL: &str = "zhipuai-coding-plan/glm-5.2";
+pub const GLM_CODING_DEFAULT_MODEL: &str = "zhipuai-coding-plan/glm-5.3";
 pub const GLM_CODING_ENV_OVERRIDE: &str = "TACHI_DISPATCH_GLM_CODING_MODEL";
 
 #[derive(Debug, Clone, Copy, Serialize)]
