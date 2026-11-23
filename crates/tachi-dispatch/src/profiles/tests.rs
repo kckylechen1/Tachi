@@ -558,6 +558,11 @@ fn opencode_role_profiles_support_staff_json_defaults_and_allowlisted_overrides(
         std::env::temp_dir().join(format!("tachi-staff-cfg-{}", uuid::Uuid::new_v4())),
     );
     std::fs::create_dir_all(&dir.0).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let staff_json = dir.0.join("staff.json");
     std::fs::write(
         &staff_json,
@@ -661,12 +666,51 @@ fn opencode_role_profiles_support_staff_json_defaults_and_allowlisted_overrides(
     .unwrap_err();
     assert!(err.contains("OpenCode native profiles"), "{err}");
 
-    // 5. Group/world-writable staff.json is rejected cleanly on Unix.
+    // 5. Group/world-writable staff.json, writable home dir, symlinks, and non-canonical keys fail closed.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o664)).unwrap();
         let err = crate::load_staff_config(&dir.0).unwrap_err();
         assert!(err.contains("group- or world-writable"), "{err}");
+
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let err = crate::load_staff_config(&dir.0).unwrap_err();
+        assert!(err.contains("owner-only directory"), "{err}");
+
+        std::fs::remove_file(&staff_json).unwrap();
+        assert_eq!(
+            crate::load_staff_config(&dir.0).unwrap(),
+            crate::StaffConfig::default()
+        );
+
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = dir.0.join("target.json");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &staff_json).unwrap();
+        let err = crate::load_staff_config(&dir.0).unwrap_err();
+        assert!(err.contains("not a symlink"), "{err}");
+        std::fs::remove_file(&staff_json).unwrap();
     }
+
+    std::fs::write(
+        &staff_json,
+        serde_json::to_vec(&serde_json::json!({
+            "opencode": {"providers": ["openai", "deepseek"]},
+            "seats": {"OPENCODE_REVIEW": {"default_model": "deepseek/deepseek-flash"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let err = crate::load_staff_config(&dir.0).unwrap_err();
+    assert!(
+        err.contains("opencode_review") && err.contains("canonical"),
+        "{err}"
+    );
 }

@@ -114,20 +114,20 @@ pub(crate) async fn staff_preflight_for_server(
     server: &crate::MemoryServer,
     params: &TachiStaffParams,
 ) -> Result<String, String> {
-    let staff_config = tachi_dispatch::load_staff_config(&server.tachi_home_dir())?;
-    staff_preflight_with_config(params, &staff_config).await
+    let home = server.tachi_home_dir();
+    staff_preflight_with_home(params, Some(&home)).await
 }
 
 /// Production boundary for `tachi_staff(action='preflight')`. Every refusal path
 /// returns `Err` before the version probe runs.
 #[cfg(test)]
 async fn staff_preflight(params: &TachiStaffParams) -> Result<String, String> {
-    staff_preflight_with_config(params, &tachi_dispatch::StaffConfig::default()).await
+    staff_preflight_with_home(params, None).await
 }
 
-async fn staff_preflight_with_config(
+async fn staff_preflight_with_home(
     params: &TachiStaffParams,
-    staff_config: &tachi_dispatch::StaffConfig,
+    tachi_home: Option<&std::path::Path>,
 ) -> Result<String, String> {
     reject_irrelevant_fields(params)?;
 
@@ -149,16 +149,13 @@ async fn staff_preflight_with_config(
     // A requested profile is validated (unknown -> refuse; backend mismatch ->
     // refuse) but never applied here: profile-owned launch defaults belong to
     // action='start'. This keeps the start semantics unchanged.
-    let profile_section = match params
+    let resolved_profile = match params
         .profile
         .as_deref()
         .map(str::trim)
         .filter(|profile| !profile.is_empty())
     {
-        None => json!({
-            "requested": Value::Null,
-            "note": "no profile requested; capability is reported for the worker backend only",
-        }),
+        None => None,
         Some(raw) => match resolve_dispatch_profile(raw) {
             None => {
                 if let Some(replacement) = tachi_dispatch::retired_dispatch_profile(raw) {
@@ -177,52 +174,41 @@ async fn staff_preflight_with_config(
                     profile.name, profile.backend, backend
                 ));
             }
-            Some(profile) => json!({
-                "requested": raw,
-                "resolved": profile.name,
-                "backend": profile.backend,
-                "runtime_tool_profile": profile.tool_profile,
-                "note": "resolvable; profile-owned launch defaults are applied by action='start'",
-            }),
+            Some(profile) => Some((raw, profile)),
         },
     };
+    let profile_section = match resolved_profile {
+        None => json!({
+            "requested": Value::Null,
+            "note": "no profile requested; capability is reported for the worker backend only",
+        }),
+        Some((raw, profile)) => json!({
+            "requested": raw,
+            "resolved": profile.name,
+            "backend": profile.backend,
+            "runtime_tool_profile": profile.tool_profile,
+            "note": "resolvable; profile-owned launch defaults are applied by action='start'",
+        }),
+    };
 
-    if let Some(profile_name) = params.profile.as_deref() {
-        if let Some(profile) = tachi_dispatch::native_session_profile(profile_name) {
-            if profile.backend == "opencode" {
-                if let Some(configured) = staff_config.seat_default_model(profile_name) {
-                    // `NativeSessionProfile` borrows static metadata; expose effective
-                    // configured default via JSON while keeping static fallback intact.
-                    let mut contract = serde_json::to_value(profile).map_err(|e| e.to_string())?;
-                    contract["model"] = json!(configured);
-                    let profile_name = profile_name.to_string();
-                    let (adapter, sandbox) = tokio::task::spawn_blocking(move || {
-                        (
-                            tachi_dispatch::native_session_adapter_available(&profile_name),
-                            tachi_dispatch::native_sandbox_available(),
-                        )
-                    })
-                    .await
-                    .map_err(|error| format!("native Staff preflight task failed: {error}"))?;
-                    return serde_json::to_string(&json!({
-                        "worker": backend,
-                        "profile": profile_section,
-                        "transport": "acp_native",
-                        "mode": "session",
-                        "profile_contract": contract,
-                        "admitted_opencode_providers": staff_config.admitted_opencode_providers(),
-                        "adapter_available": adapter,
-                        "filesystem_confinement": { "provider": tachi_dispatch::native_sandbox_provider(), "available": sandbox, "scope": "private runtime and declared managed workspace writes; network and host reads remain available" },
-                        "authentication_observation": "unknown",
-                        "model_support": "requires exact advertised model and observed acknowledgement at start",
-                        "tool_execution_verification": "not_executed",
-                        "cancel_cleanup_verification": "not_executed",
-                        "launch_admission": "not_evaluated",
-                        "next_steps": if adapter && sandbox { "start the profile to negotiate its exact model and effort; preflight is not authenticated-run evidence" } else { "install the profile ACP adapter and enable the host filesystem confinement primitive" },
-                    })).map_err(|error| error.to_string());
+    if let Some((_, profile_def)) = resolved_profile {
+        if let Some(native) = tachi_dispatch::native_session_profile(profile_def.name) {
+            let staff_config = if native.backend == "opencode" {
+                match tachi_home {
+                    Some(home) => Some(tachi_dispatch::load_staff_config(home)?),
+                    None => Some(tachi_dispatch::StaffConfig::default()),
                 }
+            } else {
+                None
+            };
+            let mut contract = serde_json::to_value(native).map_err(|e| e.to_string())?;
+            if let Some(configured) = staff_config
+                .as_ref()
+                .and_then(|cfg| cfg.seat_default_model(profile_def.name))
+            {
+                contract["model"] = json!(configured);
             }
-            let profile_name = profile_name.to_string();
+            let profile_name = profile_def.name.to_string();
             let (adapter, sandbox) = tokio::task::spawn_blocking(move || {
                 (
                     tachi_dispatch::native_session_adapter_available(&profile_name),
@@ -236,8 +222,10 @@ async fn staff_preflight_with_config(
                 "profile": profile_section,
                 "transport": "acp_native",
                 "mode": "session",
-                "profile_contract": profile,
-                "admitted_opencode_providers": (backend == "opencode").then(|| staff_config.admitted_opencode_providers()),
+                "profile_contract": contract,
+                "admitted_opencode_providers": staff_config
+                    .as_ref()
+                    .map(tachi_dispatch::StaffConfig::admitted_opencode_providers),
                 "adapter_available": adapter,
                 "filesystem_confinement": { "provider": tachi_dispatch::native_sandbox_provider(), "available": sandbox, "scope": "private runtime and declared managed workspace writes; network and host reads remain available" },
                 "authentication_observation": "unknown",
@@ -743,5 +731,91 @@ mod tests {
             run.runs_root_before, run.runs_root_after,
             "a read-only preflight must create no lease/run artifact"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_uses_canonical_opencode_seat_and_isolates_invalid_staff_json_from_codex() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _adapters = crate::test_support::NativeAdapterFixture::new();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = crate::staffing_ops::tests::test_server();
+        let staff_json = temp_home.path().join("staff.json");
+
+        std::fs::write(
+            &staff_json,
+            serde_json::to_vec(&json!({
+                "opencode": {"providers": ["openai", "deepseek"]},
+                "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let ok_raw = runtime
+            .block_on(staff_preflight_for_server(
+                &server,
+                &params(json!({
+                    "action": "preflight",
+                    "worker": "opencode",
+                    "profile": " OPENCODE_REVIEW "
+                })),
+            ))
+            .expect("canonical lookup should succeed");
+        let value: Value = serde_json::from_str(&ok_raw).expect("preflight JSON");
+        assert_eq!(value["profile"]["resolved"], json!("opencode_review"));
+        assert_eq!(
+            value["profile_contract"]["model"],
+            json!("deepseek/deepseek-flash")
+        );
+        assert_eq!(
+            value["admitted_opencode_providers"],
+            json!(["openai", "deepseek"])
+        );
+
+        std::fs::write(
+            &staff_json,
+            serde_json::to_vec(&json!({
+                "opencode": {"providers": ["openai"]},
+                "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(
+            runtime
+                .block_on(staff_preflight_for_server(
+                    &server,
+                    &params(json!({
+                        "action": "preflight",
+                        "worker": "codex",
+                        "profile": "codex_sol_review"
+                    })),
+                ))
+                .is_ok(),
+            "Codex preflight must survive invalid OpenCode staff.json"
+        );
+        let err = runtime
+            .block_on(staff_preflight_for_server(
+                &server,
+                &params(json!({
+                    "action": "preflight",
+                    "worker": "opencode",
+                    "profile": "opencode_review"
+                })),
+            ))
+            .unwrap_err();
+        assert!(err.contains("opencode.providers"), "{err}");
     }
 }

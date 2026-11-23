@@ -438,7 +438,10 @@ fn staff_json_reloads_per_start_and_cards_surface_configured_default() {
     if !tachi_dispatch::native_sandbox_available() {
         return;
     }
+    let temp_home = tempfile::tempdir().unwrap();
+    let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
     let server = crate::staffing_ops::tests::test_server();
+    assert_eq!(server.tachi_home_dir(), temp_home.path());
     let staff_json = server.tachi_home_dir().join("staff.json");
     std::fs::write(
         &staff_json,
@@ -480,4 +483,60 @@ fn staff_json_reloads_per_start_and_cards_surface_configured_default() {
         .find(|entry| entry["name"] == "opencode_review")
         .expect("opencode_review listed");
     assert_eq!(row["model"], json!("deepseek/deepseek-flash"));
+}
+
+#[test]
+fn invalid_staff_json_isolates_opencode_without_breaking_codex_or_catalog() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = NativeAdapterFixture::new();
+    if !tachi_dispatch::native_sandbox_available() {
+        return;
+    }
+    let temp_home = tempfile::tempdir().unwrap();
+    let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let server = crate::staffing_ops::tests::test_server();
+    assert_eq!(server.tachi_home_dir(), temp_home.path());
+    let staff_json = temp_home.path().join("staff.json");
+    std::fs::write(
+        &staff_json,
+        serde_json::to_vec(&serde_json::json!({
+            "opencode": {"providers": ["openai"]},
+            "seats": {"opencode_review": {"default_model": "deepseek/deepseek-flash"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staff_json, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let mut codex_req = staff_profile_request("codex_sol_review");
+    assert!(
+        resolve_and_apply_staff_assignment_profile_for_server(&server, &mut codex_req).is_ok(),
+        "Codex start must remain available when OpenCode staff.json is invalid"
+    );
+
+    let catalog = dispatch_profiles_json_for_server(&server, false)
+        .expect("profile discovery must survive broken OpenCode staff.json");
+    assert!(catalog["staff_config_error"]
+        .as_str()
+        .is_some_and(|err| err.contains("opencode.providers")));
+    let opencode_row = catalog["dispatch_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "opencode_review")
+        .expect("opencode_review listed with error note");
+    assert!(opencode_row["staff_config_error"]
+        .as_str()
+        .is_some_and(|err| err.contains("opencode.providers")));
+
+    let mut opencode_req = staff_profile_request("opencode_review");
+    let err = resolve_and_apply_staff_assignment_profile_for_server(&server, &mut opencode_req)
+        .unwrap_err();
+    assert!(err.contains("opencode.providers"), "{err}");
 }
