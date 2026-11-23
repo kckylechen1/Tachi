@@ -376,6 +376,7 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
         "declared_file_scope",
         "flow_id",
         "issue_ref",
+        "model",
         "pr_ref",
         "profile",
         "project",
@@ -423,8 +424,10 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
         !required.iter().any(|r| r == "staffing_reason"),
         "staffing_reason must NOT be schema-level required (status must be able to omit it); required={required:?}"
     );
-    // No execution- or model-control fields leak through the boundary. These
-    // must be rejected by the same deny-unknown-fields facade used by cancel,
+    // No execution-control fields leak through the boundary (`model` is the only
+    // start-only allowlisted OpenCode override and is refused by the handler on
+    // cancel/status/continue/finish/preflight). Other model/execution knobs must
+    // still be rejected by the same deny-unknown-fields facade used by cancel,
     // rather than merely omitted from a documentation list.
     for removed in [
         "pid",

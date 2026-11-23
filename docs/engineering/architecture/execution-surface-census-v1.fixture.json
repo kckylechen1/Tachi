@@ -156,8 +156,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 107106,
-        "total_tool_definition_bytes": 126222,
+        "total_input_schema_bytes": 107306,
+        "total_tool_definition_bytes": 126422,
         "visible_tool_count": 47,
         "visible_tools": [
           "archive_memory",
@@ -210,8 +210,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39904,
-        "total_tool_definition_bytes": 44585,
+        "total_input_schema_bytes": 40104,
+        "total_tool_definition_bytes": 44785,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -222,8 +222,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39805,
-        "total_tool_definition_bytes": 43886,
+        "total_input_schema_bytes": 40005,
+        "total_tool_definition_bytes": 44086,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -234,8 +234,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 51038,
-        "total_tool_definition_bytes": 56261,
+        "total_input_schema_bytes": 51238,
+        "total_tool_definition_bytes": 56461,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -349,8 +349,8 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 4186,
-            "property_count": 16,
+            "input_schema_bytes": 4386,
+            "property_count": 17,
             "property_names": [
               "action",
               "declared_file_scope",
@@ -359,6 +359,7 @@
               "flow_id",
               "format",
               "issue_ref",
+              "model",
               "pr_ref",
               "profile",
               "project",
@@ -443,8 +444,8 @@
         },
         "coordinate": {
           "tachi_staff": {
-            "input_schema_bytes": 4167,
-            "property_count": 16,
+            "input_schema_bytes": 4367,
+            "property_count": 17,
             "property_names": [
               "action",
               "declared_file_scope",
@@ -453,6 +454,7 @@
               "flow_id",
               "format",
               "issue_ref",
+              "model",
               "pr_ref",
               "profile",
               "project",
@@ -621,8 +623,8 @@
           ]
         },
         "tachi_staff": {
-          "input_schema_bytes": 4167,
-          "property_count": 16,
+          "input_schema_bytes": 4367,
+          "property_count": 17,
           "property_names": [
             "action",
             "declared_file_scope",
@@ -631,6 +633,7 @@
             "flow_id",
             "format",
             "issue_ref",
+            "model",
             "pr_ref",
             "profile",
             "project",
