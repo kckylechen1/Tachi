@@ -170,7 +170,7 @@ fn snapshot_provider_auth(
             let target = runtime.join("home/.codex");
             command.env("CODEX_HOME", &target);
             (
-                source.map(|dir| SnapshotSource::File(dir.join("auth.json"))),
+                source.map(|dir| SnapshotSource::CodexFile(dir.join("auth.json"))),
                 target.join("auth.json"),
             )
         }
@@ -187,11 +187,9 @@ fn snapshot_provider_auth(
             // releases keep sessions in the same db file and auth in auth.json.
             let source = store.map(|store| {
                 let db = store.join("opencode.db");
-                let legacy = store.join("auth.json");
-                if db.is_file() {
-                    SnapshotSource::OpencodeDb { db, legacy }
-                } else {
-                    SnapshotSource::File(legacy)
+                SnapshotSource::Opencode {
+                    db: db.is_file().then_some(db),
+                    legacy: store.join("auth.json"),
                 }
             });
             (source, runtime.join("data/opencode/auth.json"))
@@ -223,18 +221,22 @@ fn snapshot_provider_auth(
         std::fs::read(source).map_err(|_| "native provider auth snapshot is unreadable".into())
     };
     let body = match source.ok_or_else(unavailable)? {
-        SnapshotSource::File(source) => read_file(&source)?,
-        SnapshotSource::OpencodeDb { db, legacy } => {
+        SnapshotSource::CodexFile(source) => read_file(&source)?,
+        SnapshotSource::Opencode { db, legacy } => {
             let model = contract["model"].as_str().unwrap_or("");
             let lifetime = contract["lifetime_timeout_secs"].as_u64().unwrap_or(0);
-            match opencode_db_auth_snapshot(
-                &db,
-                model,
-                lifetime,
-                jiff::Timestamp::now().as_second(),
-            )? {
+            let now_secs = jiff::Timestamp::now().as_second();
+            match db
+                .as_deref()
+                .map(|db| opencode_db_auth_snapshot(db, model, lifetime, now_secs))
+                .transpose()?
+                .flatten()
+            {
                 Some(body) => body,
-                None => read_file(&legacy)?,
+                None => {
+                    let raw = read_file(&legacy)?;
+                    opencode_legacy_auth_snapshot(&raw, model, lifetime, now_secs)?
+                }
             }
         }
     };
@@ -252,9 +254,9 @@ fn snapshot_provider_auth(
 }
 
 enum SnapshotSource {
-    File(std::path::PathBuf),
-    OpencodeDb {
-        db: std::path::PathBuf,
+    CodexFile(std::path::PathBuf),
+    Opencode {
+        db: Option<std::path::PathBuf>,
         legacy: std::path::PathBuf,
     },
 }
@@ -264,6 +266,103 @@ const NATIVE_AUTH_SNAPSHOT_MAX_BYTES: usize = 1024 * 1024;
 /// Refuse OAuth snapshots whose access token could expire mid-run: a refresh
 /// inside the sandbox may rotate the refresh token and sign out the host copy.
 const OAUTH_EXPIRY_MARGIN_SECS: i64 = 600;
+
+fn opencode_provider_prefix(model: &str) -> Result<&str, String> {
+    model
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .filter(|provider| !provider.is_empty())
+        .ok_or_else(|| {
+            "native opencode profile model has no provider prefix; no adapter process was spawned"
+                .to_string()
+        })
+}
+
+fn encode_opencode_auth_snapshot(
+    provider: &str,
+    stored: &serde_json::Map<String, serde_json::Value>,
+    lifetime_secs: u64,
+    now_secs: i64,
+) -> Result<Vec<u8>, String> {
+    use serde_json::Value;
+
+    let text = |field: &str| {
+        stored
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(|value| Value::String(value.to_string()))
+    };
+    let malformed = || {
+        format!("native opencode {provider} credential is incomplete; re-authenticate on the host before starting; no adapter process was spawned")
+    };
+    let entry = match stored.get("type").and_then(Value::as_str) {
+        Some("key" | "api") => {
+            serde_json::json!({"type": "api", "key": text("key").ok_or_else(malformed)?})
+        }
+        Some("oauth") => {
+            let expires_ms = stored
+                .get("expires")
+                .and_then(Value::as_i64)
+                .ok_or_else(malformed)?;
+            let required_secs = i64::try_from(lifetime_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_add(OAUTH_EXPIRY_MARGIN_SECS);
+            if expires_ms / 1000 - now_secs < required_secs {
+                return Err(format!("native opencode {provider} OAuth access token expires before the run lifetime ends; refresh it by using opencode on the host before starting; no adapter process was spawned"));
+            }
+            let mut entry = serde_json::json!({
+                "type": "oauth",
+                "refresh": text("refresh").ok_or_else(malformed)?,
+                "access": text("access").ok_or_else(malformed)?,
+                "expires": expires_ms,
+            });
+            if let Some(account) = stored
+                .get("accountId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    stored
+                        .get("metadata")
+                        .and_then(|metadata| metadata.get("accountID"))
+                        .and_then(Value::as_str)
+                })
+                .filter(|account| !account.is_empty())
+            {
+                entry["accountId"] = Value::String(account.to_string());
+            }
+            entry
+        }
+        _ => return Err(format!("native opencode {provider} credential type is unsupported; no adapter process was spawned")),
+    };
+    serde_json::to_vec(&serde_json::json!({ provider: entry }))
+        .map_err(|e| format!("encode native opencode auth snapshot: {e}"))
+}
+
+/// Filter legacy multi-provider `auth.json` to only the pinned provider's entry
+/// while preserving the same completeness and OAuth expiry checks as the DB path.
+fn opencode_legacy_auth_snapshot(
+    raw: &[u8],
+    model: &str,
+    lifetime_secs: u64,
+    now_secs: i64,
+) -> Result<Vec<u8>, String> {
+    let provider = opencode_provider_prefix(model)?;
+    let providers: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(raw)
+        .map_err(|_| {
+            "native provider auth snapshot is not a nonempty JSON object; no adapter process was spawned"
+                .to_string()
+        })?;
+    let entry = providers
+        .get(provider)
+        .ok_or_else(|| {
+            format!("native opencode authentication snapshot has no active {provider} credential; run `opencode auth login` on the host before starting; no adapter process was spawned")
+        })?
+        .as_object()
+        .ok_or_else(|| {
+            format!("native opencode {provider} credential is not a JSON object; no adapter process was spawned")
+        })?;
+    encode_opencode_auth_snapshot(provider, entry, lifetime_secs, now_secs)
+}
 
 /// Transcode the pinned provider's single active opencode v2 credential into the
 /// legacy auth.json shape, which opencode imports into the private runtime store.
@@ -278,13 +377,7 @@ fn opencode_db_auth_snapshot(
     use rusqlite::{Connection, OpenFlags};
     use serde_json::{Map, Value};
 
-    let provider = model
-        .split_once('/')
-        .map(|(provider, _)| provider)
-        .filter(|provider| !provider.is_empty())
-        .ok_or(
-            "native opencode profile model has no provider prefix; no adapter process was spawned",
-        )?;
+    let provider = opencode_provider_prefix(model)?;
     let store_error = |_| {
         "native opencode credential store is unreadable or has an unsupported layout; no adapter process was spawned".to_string()
     };
@@ -326,50 +419,7 @@ fn opencode_db_auth_snapshot(
     };
     let stored: Map<String, Value> = serde_json::from_str(value)
         .map_err(|_| format!("native opencode {provider} credential is not a JSON object; no adapter process was spawned"))?;
-    let text = |field: &str| {
-        stored
-            .get(field)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(|value| Value::String(value.to_string()))
-    };
-    let malformed = || {
-        format!("native opencode {provider} credential is incomplete; re-authenticate on the host before starting; no adapter process was spawned")
-    };
-    let entry = match stored.get("type").and_then(Value::as_str) {
-        Some("key") => serde_json::json!({"type": "api", "key": text("key").ok_or_else(malformed)?}),
-        Some("oauth") => {
-            let expires_ms = stored
-                .get("expires")
-                .and_then(Value::as_i64)
-                .ok_or_else(malformed)?;
-            let required_secs = i64::try_from(lifetime_secs)
-                .unwrap_or(i64::MAX)
-                .saturating_add(OAUTH_EXPIRY_MARGIN_SECS);
-            if expires_ms / 1000 - now_secs < required_secs {
-                return Err(format!("native opencode {provider} OAuth access token expires before the run lifetime ends; refresh it by using opencode on the host before starting; no adapter process was spawned"));
-            }
-            let mut entry = serde_json::json!({
-                "type": "oauth",
-                "refresh": text("refresh").ok_or_else(malformed)?,
-                "access": text("access").ok_or_else(malformed)?,
-                "expires": expires_ms,
-            });
-            if let Some(account) = stored
-                .get("metadata")
-                .and_then(|metadata| metadata.get("accountID"))
-                .and_then(Value::as_str)
-                .filter(|account| !account.is_empty())
-            {
-                entry["accountId"] = Value::String(account.to_string());
-            }
-            entry
-        }
-        _ => return Err(format!("native opencode {provider} credential type is unsupported; no adapter process was spawned")),
-    };
-    serde_json::to_vec(&serde_json::json!({ provider: entry }))
-        .map(Some)
-        .map_err(|e| format!("encode native opencode auth snapshot: {e}"))
+    encode_opencode_auth_snapshot(provider, &stored, lifetime_secs, now_secs).map(Some)
 }
 
 #[cfg(test)]
@@ -1274,5 +1324,121 @@ mod auth_snapshot_tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(left, ["log"]);
+    }
+
+    #[test]
+    fn legacy_auth_json_exports_only_pinned_provider_and_enforces_oauth_lifetime() {
+        let valid_oauth = serde_json::json!({
+            "type": "oauth",
+            "refresh": "secret-r",
+            "access": "secret-a",
+            "expires": (NOW + 86_400) * 1000,
+            "accountId": "acct-1"
+        });
+        let expiring_oauth = serde_json::json!({
+            "type": "oauth",
+            "refresh": "secret-exp-r",
+            "access": "secret-exp-a",
+            "expires": (NOW + 1500) * 1000
+        });
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "openai": valid_oauth,
+            "deepseek": {"type": "api", "key": "secret-ds"},
+            "google": {"type": "key", "key": "secret-google"},
+            "anthropic": expiring_oauth,
+            "xai": {"type": "api"}
+        }))
+        .unwrap();
+
+        let ds: serde_json::Value = serde_json::from_slice(
+            &opencode_legacy_auth_snapshot(&raw, "deepseek/deepseek-flash", 1200, NOW).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ds,
+            serde_json::json!({"deepseek": {"type": "api", "key": "secret-ds"}})
+        );
+
+        let oa: serde_json::Value = serde_json::from_slice(
+            &opencode_legacy_auth_snapshot(&raw, "openai/gpt-6.1-sol", 1200, NOW).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(oa, serde_json::json!({"openai": valid_oauth}));
+
+        for (model, expected) in [
+            ("anthropic/sonnet", "expires before the run lifetime ends"),
+            ("kimi/k3", "no active kimi credential"),
+            ("xai/grok", "credential is incomplete"),
+            ("deepseek-flash", "no provider prefix"),
+        ] {
+            let error = opencode_legacy_auth_snapshot(&raw, model, 1200, NOW).unwrap_err();
+            assert!(error.contains(expected), "{model}: {error}");
+            assert!(!error.contains("secret"), "{model}: {error}");
+        }
+    }
+
+    #[test]
+    fn snapshot_provider_auth_filters_legacy_opencode_file_when_db_lacks_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        let store = xdg.join("opencode");
+        std::fs::create_dir_all(&store).unwrap();
+        rusqlite::Connection::open(store.join("opencode.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE session (id text PRIMARY KEY);")
+            .unwrap();
+        std::fs::write(
+            store.join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "secret-openai"},
+                "deepseek": {"type": "api", "key": "k-ds"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let spec = super::super::NativeAcpRunSpec {
+            managed: true,
+            sandbox_cwd: None,
+            #[cfg(any(unix, windows))]
+            approval: None,
+            mcp_servers: Vec::new(),
+            command: "opencode".to_string(),
+            args: vec!["acp".to_string()],
+            cwd: dir.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: String::new(),
+            mode: super::super::NativeAcpRunMode::Session,
+            permission_label: "server-read-only".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: serde_json::json!({
+                "profile_contract": {
+                    "backend": "opencode",
+                    "model": "deepseek/deepseek-v4-pro",
+                    "lifetime_timeout_secs": 1200
+                }
+            }),
+            env: std::collections::HashMap::from([(
+                "XDG_DATA_HOME".to_string(),
+                xdg.to_string_lossy().into_owned(),
+            )]),
+            env_remove: std::collections::HashSet::new(),
+        };
+        let mut command = Command::new("opencode");
+        let mut cleanup = NativeAuthCleanup::default();
+        snapshot_provider_auth(&spec, &runtime, &mut command, &mut cleanup).unwrap();
+
+        let exported: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(runtime.join("data/opencode/auth.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exported,
+            serde_json::json!({"deepseek": {"type": "api", "key": "k-ds"}})
+        );
     }
 }
