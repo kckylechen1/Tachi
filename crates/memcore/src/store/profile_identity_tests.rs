@@ -969,13 +969,13 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
                 "v40_work_claim_project_binding"
                     | "v42_coordination_mailbox"
                     | "v43_adjudication_provenance"
+                    | "v45_remote_job_mailbox"
             )
         })
         .collect();
     assert_eq!(marked_sentinels(&portable), portable_expected);
-    // D7: Full reaches the Product head; Portable carries its own portable
-    // output stamp. The two are equal today only because both floors sit at
-    // 39, so assert through the policy function, not a shared constant.
+    // D7: Full reaches the Product head; Portable carries its own output
+    // stamp without importing Product-only migrations.
     assert_eq!(
         user_version(&full),
         crate::db::migrations::EXPECTED_SCHEMA_VERSION

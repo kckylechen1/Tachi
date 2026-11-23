@@ -742,9 +742,9 @@ fn collect_gc_candidates(
                 AND r.state=e.current_state
                 AND r.envelope_version=e.state_version
               WHERE e.body IS NOT NULL
-                AND ((e.current_state IN ('consumed','expired')
+                AND ((e.current_state IN ('consumed','expired','remote_rejected')
                       AND unixepoch(r.occurred_at,'+90 days') <= unixepoch(?1))
-                     OR (e.kind='coordination/v1' AND unixepoch(e.expires_at,'+90 days') <= unixepoch(?1)))
+                     OR (e.kind IN ('coordination/v1','tachi.remote_job/v1') AND unixepoch(e.expires_at,'+90 days') <= unixepoch(?1)))
               ORDER BY r.occurred_at,e.envelope_id LIMIT ?2",
             vec![
                 Value::Text(as_of.to_string()),

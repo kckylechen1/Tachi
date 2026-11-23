@@ -2,6 +2,8 @@
 
 mod admission;
 mod config;
+mod profile;
+mod rpc;
 mod transport;
 
 use config::GatewayConfig;

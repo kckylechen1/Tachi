@@ -1,4 +1,4 @@
-//! Product-only local A2A mailbox persistence (#1751).
+//! Product-only local mailbox and remote job receipt persistence.
 //!
 //! This module owns database identity, idempotency and transition atomicity.
 //! It does not scrub content or grant authority: those remain server
@@ -19,6 +19,15 @@ mod coordination;
 #[cfg(feature = "admin")]
 pub use coordination::record_a2a_project_admission;
 pub use coordination::{consume_a2a_for_project, insert_a2a_coordination, list_a2a_project_status};
+#[cfg(feature = "admin")]
+mod remote;
+#[cfg(feature = "admin")]
+pub use remote::{
+    insert_remote_rejection, list_remote_tasks, read_remote_task, NewRemoteTask, RemoteJobGrant,
+    RemoteReceiptDetail, RemoteRejectionReason, RemoteTask, RemoteTaskAccess, RemoteTaskEnvelope,
+    RemoteTaskHeader, RemoteTaskInsertOutcome, RemoteTaskPage, RemoteTaskReceipt,
+    A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES,
+};
 
 pub const A2A_COORDINATION_KIND: &str = "coordination/v1";
 pub const A2A_TURN_RESPONSE_KIND: &str = "turn_response/v1";
@@ -534,6 +543,7 @@ fn list_scoped_status(
                 e.issuer_trust_basis,e.recipient_trust_basis
          FROM a2a_envelopes e
          WHERE (e.issuer_agent_identity_id=?1 OR e.recipient_agent_identity_id=?1)
+           AND e.kind IN ('turn_response/v1','coordination/v1')
            AND (e.kind='turn_response/v1' OR e.canonical_project=?3)
          ORDER BY e.created_at DESC,e.envelope_id DESC LIMIT ?2",
     )?;
@@ -628,6 +638,7 @@ fn expire_a2a_for_recipient_in_tx(
     let mut stmt = tx.prepare(&format!(
         "SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes
          WHERE recipient_agent_identity_id=?1 AND current_state IN ('received','accepted')
+           AND kind IN ('turn_response/v1','coordination/v1')
            AND expires_at<=?2 AND (kind='turn_response/v1' OR canonical_project=?4)
          ORDER BY expires_at,envelope_id LIMIT ?3"
     ))?;
@@ -733,6 +744,7 @@ fn consume_scoped(
     let mut stmt = tx.prepare(&format!(
         "SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes
          WHERE recipient_agent_identity_id=?1 AND current_state='received' AND expires_at>?2
+           AND kind IN ('turn_response/v1','coordination/v1')
            AND (kind='turn_response/v1' OR canonical_project=?4)
          ORDER BY created_at,envelope_id LIMIT ?3"
     ))?;

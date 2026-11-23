@@ -12,7 +12,9 @@ pub(crate) mod current_store_admission;
 mod ddl;
 #[cfg(test)]
 pub(crate) use a2a::validate_a2a_mailbox_v31_schema;
-pub(crate) use a2a::{migrate_v42_coordination_mailbox, validate_a2a_mailbox_schema};
+pub(crate) use a2a::{
+    migrate_v42_coordination_mailbox, migrate_v45_remote_mailbox, validate_a2a_mailbox_schema,
+};
 #[cfg(test)]
 pub(crate) mod inventory;
 mod legacy_rows;

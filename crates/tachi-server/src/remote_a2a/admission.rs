@@ -15,6 +15,7 @@ pub(super) struct Connection {
     pub server: MemoryServer,
     pub peer: Peer,
     pub config: Arc<GatewayConfig>,
+    pub gateway_actor: memcore::db::a2a::A2aTransitionActor,
     certificates: Vec<CertificateDer<'static>>,
     verifier: Arc<dyn ClientCertVerifier>,
 }
@@ -56,6 +57,15 @@ impl Connection {
             .find(|p| p.public_key_sha256 == key)
             .ok_or("remote peer is not enrolled")?
             .clone();
+        let (Some(gateway_id), gateway_connection, state) = base
+            .work_claim_connection()
+            .ok_or("gateway local admission is unavailable")?
+        else {
+            return Err("gateway local admission is unavailable".into());
+        };
+        if gateway_id != config.agent_identity_id || state != "self_asserted" {
+            return Err("gateway local admission does not match its operator identity".into());
+        }
         let connection_id = format!("remote-{}", uuid::Uuid::new_v4());
         let exporter = tls
             .export_keying_material(
@@ -121,6 +131,10 @@ impl Connection {
             server,
             peer,
             config,
+            gateway_actor: memcore::db::a2a::A2aTransitionActor {
+                agent_identity_id: gateway_id,
+                connection_id: gateway_connection,
+            },
             certificates,
             verifier,
         })
