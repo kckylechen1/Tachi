@@ -21,7 +21,7 @@ const PLAN_VERSION: u32 = 1;
 const RECEIPT_VERSION: u32 = 1;
 const AUTHORITY_VERSION: u32 = 1;
 const POLICY_VERSION: &str = "tachi-memory-maintenance-v1";
-const GC_POLICY_VERSION: &str = "tachi-memory-maintenance-v2";
+const GC_POLICY_VERSION: &str = "tachi-memory-maintenance-v3";
 const KANBAN_MAX_AGE_DAYS: u64 = crate::kanban::DEFAULT_KANBAN_GC_MAX_AGE_DAYS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

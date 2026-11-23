@@ -17,6 +17,14 @@ pub(super) struct RepositoryGrant {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct OriginGrant {
+    pub repository: String,
+    pub canonical_project: String,
+    pub jobs: Vec<JobKind>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Peer {
     pub agent_identity_id: String,
     pub host_id: String,
@@ -24,6 +32,9 @@ pub(super) struct Peer {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub repositories: Vec<RepositoryGrant>,
+    /// Independent outbound permission; inbound grants never authorize egress.
+    #[serde(default)]
+    pub outbound: Vec<OriginGrant>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -35,6 +46,9 @@ pub(super) struct GatewayConfig {
     pub issuer_id: String,
     pub trust_domain: String,
     pub home: PathBuf,
+    /// Existing origin global store, selected only by the protected operator
+    /// configuration. Serve/revoke continue to use the gateway's own global.db.
+    pub origin_database: Option<PathBuf>,
     pub bind: SocketAddr,
     pub certificate: PathBuf,
     pub private_key: PathBuf,
@@ -73,6 +87,29 @@ impl GatewayConfig {
             return Err("invalid remote gateway identity, schema or enrollment count".into());
         }
         protected_path(&config.home, true)?;
+        if let Some(path) = &config.origin_database {
+            if !path.is_absolute()
+                || !path
+                    .canonicalize()?
+                    .starts_with(config.home.canonicalize()?)
+            {
+                return Err(
+                    "origin database must be an existing absolute path under its protected home"
+                        .into(),
+                );
+            }
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err("origin database must be an existing regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+                    return Err("origin database has unsafe ownership or write permissions".into());
+                }
+            }
+        }
         if let Some(endpoint) = &config.public_endpoint {
             validate_endpoint(endpoint)?;
         }
@@ -113,6 +150,22 @@ impl GatewayConfig {
                     || jobs.len() != grant.jobs.len()
                 {
                     return Err("invalid or ambiguous remote repository grant".into());
+                }
+            }
+            let mut outbound = HashSet::new();
+            if peer.outbound.len() > 64 {
+                return Err("remote outbound grants exceed the bounded profile".into());
+            }
+            for grant in &peer.outbound {
+                let jobs: HashSet<_> = grant.jobs.iter().collect();
+                if !repository_id(&grant.repository)
+                    || !identifier(&grant.canonical_project)
+                    || !outbound.insert(&grant.repository)
+                    || jobs.is_empty()
+                    || jobs.len() != grant.jobs.len()
+                    || peer.endpoint.is_none()
+                {
+                    return Err("invalid or ambiguous remote outbound grant".into());
                 }
             }
         }
@@ -163,7 +216,7 @@ fn validate_endpoint(endpoint: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn read_operator_file(path: &Path, private: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+pub(super) fn read_operator_file(path: &Path, private: bool) -> Result<Vec<u8>, Box<dyn Error>> {
     if !path.is_absolute() {
         return Err("remote gateway paths must be explicit absolute paths".into());
     }

@@ -18,6 +18,30 @@ pub enum A2aAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum RemoteA2aAction {
+    /// Freeze an authorized origin job, then make at most three durable attempts.
+    Submit {
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        request: PathBuf,
+        /// Persist without network I/O; resume later by the returned submission id.
+        #[arg(long)]
+        prepare_only: bool,
+    },
+    /// Resume the same frozen submission within its original budget and window.
+    Resume {
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+        #[arg(long)]
+        submission: String,
+    },
+    /// Inspect body-free origin state; unknown is not remote refusal or completion.
+    Status {
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+        #[arg(long)]
+        submission: String,
+    },
     /// Serve mutual-TLS admission only; this does not expose MCP or start jobs.
     Serve {
         #[arg(long, value_name = "PATH")]

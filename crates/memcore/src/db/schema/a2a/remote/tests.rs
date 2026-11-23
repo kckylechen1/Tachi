@@ -34,7 +34,7 @@ fn old_columns(conn: &Connection, table: &str) -> String {
 }
 
 #[test]
-fn v44_to_v45_preserves_local_rows_replay_keys_foreign_keys_and_portable_44() {
+fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_portable_44() {
     let mut conn = version_44(StoreProfile::TachiFull);
     let project = "a".repeat(64);
     conn.execute(
@@ -110,7 +110,7 @@ fn v44_to_v45_preserves_local_rows_replay_keys_foreign_keys_and_portable_44() {
     assert!(query_rows(&conn, "PRAGMA foreign_key_check").is_empty());
     assert_eq!(
         crate::db::migrations::read_schema_version(&conn).unwrap(),
-        45
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
     );
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM a2a_envelopes WHERE remote_nonce IS NOT NULL OR remote_metadata IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert!(matches!(

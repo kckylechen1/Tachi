@@ -104,6 +104,7 @@ const PRODUCT_TABLES: &[&str] = &[
     "identity_admission_verification_revocations",
     "a2a_envelopes",
     "a2a_delivery_receipts",
+    "a2a_remote_submissions",
 ];
 
 /// Kernel tables every store must carry, whatever its profile.
@@ -970,6 +971,7 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
                     | "v42_coordination_mailbox"
                     | "v43_adjudication_provenance"
                     | "v45_remote_job_mailbox"
+                    | "v46_remote_submissions"
             )
         })
         .collect();

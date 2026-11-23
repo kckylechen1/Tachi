@@ -974,7 +974,7 @@ from dogfood_remote_admission import register_scenarios as register_remote_admis
 from dogfood_retirement import register_scenarios as register_retirement_scenarios
 
 register_memory_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port, fixture_connection)
-register_remote_admission_scenarios(scenario, Daemon, free_port)
+register_remote_admission_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_repo)
 register_retirement_scenarios(scenario, Daemon, McpSession, free_port, find_key, fixture_connection)
 
 

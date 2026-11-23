@@ -149,7 +149,7 @@ fn frozen_plan(store: &MemoryStore, path: &std::path::Path) -> OperatorMaintenan
         target_physical_identity: store.opened_physical_db_identity().unwrap().to_string(),
         profile: store.store_profile().as_str().to_string(),
         as_of: AS_OF,
-        policy_version: "tachi-memory-maintenance-v2",
+        policy_version: "tachi-memory-maintenance-v3",
         policy: Policy::Gc {
             access_history_keep_per_memory: cfg.access_history_keep_per_memory,
             processed_events_max_days: cfg.processed_events_max_days,
@@ -165,7 +165,11 @@ fn frozen_plan(store: &MemoryStore, path: &std::path::Path) -> OperatorMaintenan
     };
     // The same regression runs against the old policy and the repaired one.
     // Selection/apply semantics, not unsupported-version rejection, must fail.
-    for policy in ["tachi-memory-maintenance-v2", "tachi-memory-maintenance-v1"] {
+    for policy in [
+        "tachi-memory-maintenance-v3",
+        "tachi-memory-maintenance-v2",
+        "tachi-memory-maintenance-v1",
+    ] {
         plan.policy_version = policy;
         plan.digest.clear();
         plan.digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap()));
