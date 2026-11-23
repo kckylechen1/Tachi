@@ -34,7 +34,7 @@ pub struct RecallCoverageArgs {
 pub enum Commands {
     /// Start MCP Server (default when no subcommand is provided)
     Serve,
-    /// Same-host AgentIdentity envelope administration.
+    /// Local mailbox and remote admission administration.
     A2a {
         #[command(subcommand)]
         action: A2aAction,

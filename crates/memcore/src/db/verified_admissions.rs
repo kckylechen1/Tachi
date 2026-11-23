@@ -14,9 +14,21 @@ mod rowid_tests;
 #[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_METHOD: &str = "device-envelope";
 #[cfg(any(feature = "admin", test))]
+pub const VERIFIED_ADMISSION_MTLS_METHOD: &str = "mtls-peer";
+#[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_VERSION: &str = "v1";
 #[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_SCOPE: &str = "agent_identity:remote_admission";
+
+/// Supported evidence policies; method labels alone do not establish authority.
+#[cfg(any(feature = "admin", test))]
+pub fn is_supported_verified_admission_policy(method: &str, version: &str, scope: &str) -> bool {
+    matches!(
+        method,
+        VERIFIED_ADMISSION_METHOD | VERIFIED_ADMISSION_MTLS_METHOD
+    ) && version == VERIFIED_ADMISSION_VERSION
+        && scope == VERIFIED_ADMISSION_SCOPE
+}
 
 #[cfg(feature = "admin")]
 const RECEIPT_COLUMNS: &str = "receipt_id, admission_id, agent_identity_id, connection_id, \
@@ -419,6 +431,37 @@ pub fn get_verified_admission_receipt(
         .optional()?)
 }
 
+/// An mTLS revocation retires the enrolled key for this issuer, across connections.
+#[cfg(any(feature = "admin", test))]
+pub fn verified_mtls_key_is_revoked(
+    conn: &Connection,
+    issuer_id: &str,
+    evidence_ref: &str,
+) -> Result<bool, MemoryError> {
+    let canonical = evidence_ref
+        .strip_prefix("attestation:mtls-peer:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    if !canonical {
+        return Err(MemoryError::InvalidArg(
+            "verified mTLS evidence reference must bind a canonical SPKI SHA-256".into(),
+        ));
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM identity_admission_verification_receipts r
+             JOIN identity_admission_verification_revocations v ON v.admission_id=r.admission_id
+             WHERE r.issuer_id=?1 AND r.verification_method=?2 AND r.evidence_ref=?3
+         )",
+        params![issuer_id, VERIFIED_ADMISSION_MTLS_METHOD, evidence_ref],
+        |row| row.get(0),
+    )?)
+}
+
 /// Exact-bound, authoritative-clock gate for remote verified authority.
 ///
 /// The admission id, identity, live connection/placement, issuer policy,
@@ -442,9 +485,16 @@ pub fn has_current_verified_admission(
     trust_domain: &str,
     verification_scope: &str,
 ) -> Result<bool, MemoryError> {
-    let found: bool = conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1
+    if !is_supported_verified_admission_policy(
+        verification_method,
+        verification_version,
+        verification_scope,
+    ) {
+        return Ok(false);
+    }
+    let evidence_ref: Option<String> = conn
+        .query_row(
+            "SELECT r.evidence_ref
              FROM identity_admission_verification_receipts r
              JOIN identity_admissions a ON a.admission_id = r.admission_id
              WHERE r.admission_id=?1 AND r.agent_identity_id=?2 AND r.connection_id=?3
@@ -458,21 +508,31 @@ pub fn has_current_verified_admission(
                AND NOT EXISTS (
                    SELECT 1 FROM identity_admission_verification_revocations v
                    WHERE v.admission_id=r.admission_id
-               )
-         )",
-        params![
-            admission_id,
-            agent_identity_id,
-            connection_id,
+               )",
+            params![
+                admission_id,
+                agent_identity_id,
+                connection_id,
+                issuer_id,
+                verification_method,
+                verification_version,
+                trust_domain,
+                verification_scope,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(evidence_ref) = evidence_ref else {
+        return Ok(false);
+    };
+    if verification_method == VERIFIED_ADMISSION_MTLS_METHOD {
+        return Ok(!verified_mtls_key_is_revoked(
+            conn,
             issuer_id,
-            verification_method,
-            verification_version,
-            trust_domain,
-            verification_scope,
-        ],
-        |row| row.get(0),
-    )?;
-    Ok(found)
+            &evidence_ref,
+        )?);
+    }
+    Ok(true)
 }
 
 /// Serialize a verified-authority check with the write it authorizes.

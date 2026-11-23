@@ -71,7 +71,9 @@ pub(super) fn run(
     app_home: &Path,
     action: A2aAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let A2aAction::StickyCutover { action } = action;
+    let A2aAction::StickyCutover { action } = action else {
+        return Err("remote A2A uses its separate authenticated entry point".into());
+    };
     match action {
         StickyCutoverAction::Plan => plan(global_db_path),
         StickyCutoverAction::Apply { plan, confirm } => {
