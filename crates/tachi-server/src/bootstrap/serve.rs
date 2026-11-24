@@ -1394,6 +1394,11 @@ async fn tokio_main_inner(
     };
 
     let state = build_server_state(&cli, &ctx, &global_db_path, &hygiene)?;
+    let daemon_wal_paths = if cli.daemon && matches!(ctx.command, Commands::Serve) {
+        opened_daemon_wal_paths(&state.server)
+    } else {
+        Vec::new()
+    };
     start_server_transport(
         &cli,
         &ctx,
@@ -1403,11 +1408,33 @@ async fn tokio_main_inner(
         daemon_lock.as_ref(),
     )
     .await?;
-    if cli.daemon && matches!(ctx.command, Commands::Serve) {
-        shutdown_checkpoint
-            .arm(std::iter::once(global_db_path).chain(hygiene.project_db_path.clone()));
+    if !daemon_wal_paths.is_empty() {
+        shutdown_checkpoint.arm(daemon_wal_paths);
     }
     Ok(())
+}
+
+fn opened_daemon_wal_paths(server: &MemoryServer) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut push_conn_path = |conn_path: Option<&str>| {
+        if let Some(raw) = conn_path.filter(|p| !p.is_empty() && *p != ":memory:") {
+            let candidate = PathBuf::from(raw);
+            if !paths.contains(&candidate) {
+                paths.push(candidate);
+            }
+        }
+    };
+    let _ = server.with_global_store(|store| {
+        push_conn_path(store.connection().path());
+        Ok(())
+    });
+    if server.has_project_db() {
+        let _ = server.with_project_store(|store| {
+            push_conn_path(store.connection().path());
+            Ok(())
+        });
+    }
+    paths
 }
 
 #[cfg(test)]

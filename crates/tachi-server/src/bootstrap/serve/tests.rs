@@ -1840,4 +1840,26 @@ async fn in_process_remember_on_fresh_repo_lazily_creates_plan_c_symlink() {
     assert!(alias_db.exists(), "Plan C symlink must resolve cleanly");
 }
 
+#[cfg(unix)]
+#[test]
+fn opened_daemon_wal_paths_resolves_symlinked_global_db_to_canonical_target() {
+    let fixture = tempfile::tempdir().expect("tempdir");
+    let real_dir = fixture.path().join("real");
+    let home = fixture.path().join("home");
+    let link_dir = home.join("global");
+    std::fs::create_dir_all(&real_dir).expect("real dir");
+    std::fs::create_dir_all(&link_dir).expect("link dir");
+
+    let real_db = real_dir.join(memcore::MEMORY_DB_FILENAME);
+    drop(MemoryStore::open(real_db.to_str().expect("real utf8")).expect("seed real global db"));
+
+    let link_db = link_dir.join(memcore::MEMORY_DB_FILENAME);
+    std::os::unix::fs::symlink(&real_db, &link_db).expect("symlink global db");
+
+    let server = MemoryServer::new_isolated_with_home_for_test(link_db, None, home)
+        .expect("server opens symlinked global db");
+    let canonical_real = std::fs::canonicalize(&real_db).expect("canonical real db");
+    assert_eq!(opened_daemon_wal_paths(&server), vec![canonical_real]);
+}
+
 mod legacy_copy;
