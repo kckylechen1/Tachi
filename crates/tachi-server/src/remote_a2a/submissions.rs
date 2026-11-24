@@ -4,7 +4,7 @@ use super::profile::{self, RemoteJob, DELEGATION, PROVENANCE};
 use super::transport;
 use memcore::db::a2a::{
     self, A2aTransitionActor, RemoteSubmission, RemoteSubmissionAttempt, RemoteSubmissionBinding,
-    RemoteSubmissionResult,
+    RemoteSubmissionResult, REMOTE_CLOCK_SKEW_TOLERANCE_SECS,
 };
 use serde_json::{json, Value};
 use std::error::Error;
@@ -225,22 +225,95 @@ fn unknown(error_class: &'static str, retry_allowed: bool) -> RemoteSubmissionRe
     }
 }
 
+/// Answer of the gateway authority ledger about the destination key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayKeyCheck {
+    Current,
+    /// The ledger says the key is retired; asking again cannot change that.
+    Revoked,
+    /// The ledger could not be read. Nothing was sent, so a later resume may
+    /// ask again instead of recording a permanent authority loss.
+    Unavailable,
+}
+
+/// What the origin store established about the claim and key of an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginAuthority {
+    Current,
+    /// The claim, key or attempt no longer authorizes egress.
+    Changed,
+    /// Storage could not answer.
+    Unavailable,
+}
+
+fn revoked_key(
+    store: &mut memcore::MemoryStore,
+    binding: &RemoteSubmissionBinding,
+) -> Result<bool, String> {
+    memcore::verified_mtls_key_is_revoked(
+        store.connection(),
+        &binding.issuer_id,
+        &format!("attestation:mtls-peer:{}", binding.destination_key_sha256),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn classify_key_check(answer: Result<bool, String>) -> GatewayKeyCheck {
+    match answer {
+        Ok(true) => GatewayKeyCheck::Revoked,
+        Ok(false) => GatewayKeyCheck::Current,
+        Err(_) => GatewayKeyCheck::Unavailable,
+    }
+}
+
+fn gateway_key_check(
+    authority: &crate::MemoryServer,
+    binding: &RemoteSubmissionBinding,
+) -> GatewayKeyCheck {
+    classify_key_check(authority.with_global_store_read(|store| revoked_key(store, binding)))
+}
+
 fn require_gateway_key(
     authority: &crate::MemoryServer,
     binding: &RemoteSubmissionBinding,
 ) -> Result<(), Box<dyn Error>> {
-    let revoked = authority.with_global_store_read(|store| {
-        memcore::verified_mtls_key_is_revoked(
-            store.connection(),
-            &binding.issuer_id,
-            &format!("attestation:mtls-peer:{}", binding.destination_key_sha256),
-        )
-        .map_err(|_| "gateway key revocation state unavailable".to_string())
-    })?;
-    if revoked {
-        return Err("destination key is revoked by the gateway authority".into());
+    match gateway_key_check(authority, binding) {
+        GatewayKeyCheck::Current => Ok(()),
+        GatewayKeyCheck::Revoked => {
+            Err("destination key is revoked by the gateway authority".into())
+        }
+        GatewayKeyCheck::Unavailable => Err("gateway key revocation state unavailable".into()),
     }
-    Ok(())
+}
+
+fn classify_attempt_check(answer: Result<bool, memcore::MemoryError>) -> OriginAuthority {
+    match answer {
+        Ok(true) => OriginAuthority::Current,
+        Ok(false) => OriginAuthority::Changed,
+        Err(memcore::MemoryError::InvalidArg(_)) => OriginAuthority::Changed,
+        Err(_) => OriginAuthority::Unavailable,
+    }
+}
+
+/// Decision of the local authority rechecks, which run after the TLS health
+/// round trip and immediately before the task POST. Only an authority that
+/// really changed ends the submission. A store that could not answer keeps
+/// the attempt retryable, because no bytes were sent.
+fn admit_egress(
+    key: GatewayKeyCheck,
+    origin: Result<OriginAuthority, String>,
+) -> Result<(), RemoteSubmissionResult> {
+    let (class, retry_allowed) = match (key, origin) {
+        (GatewayKeyCheck::Current, Ok(OriginAuthority::Current)) => return Ok(()),
+        (GatewayKeyCheck::Revoked, _) => ("destination_authority_changed", false),
+        (GatewayKeyCheck::Unavailable, _) => ("destination_authority_unavailable", true),
+        (GatewayKeyCheck::Current, Ok(OriginAuthority::Changed)) => {
+            ("origin_authority_changed", false)
+        }
+        (GatewayKeyCheck::Current, Ok(OriginAuthority::Unavailable))
+        | (GatewayKeyCheck::Current, Err(_)) => ("origin_authority_unavailable", true),
+    };
+    Err(unknown(class, retry_allowed))
 }
 
 async fn send(
@@ -274,17 +347,16 @@ async fn send(
     if !current_policy.is_ok_and(|current| current == attempt.submission.binding) {
         return unknown("operator_binding_changed", false);
     }
-    if require_gateway_key(authority, &attempt.submission.binding).is_err() {
-        return unknown("destination_authority_changed", false);
-    }
-    if !server
-        .with_global_store(|store| {
-            a2a::remote_submission_attempt_is_current(store.connection(), actor, attempt)
-                .map_err(|error| error.to_string())
-        })
-        .unwrap_or(false)
-    {
-        return unknown("origin_authority_changed", false);
+    let key = classify_key_check(
+        authority.with_global_store_read(|store| revoked_key(store, &attempt.submission.binding)),
+    );
+    let origin = server.with_global_store(|store| {
+        Ok(classify_attempt_check(
+            a2a::remote_submission_attempt_is_current(store.connection(), actor, attempt),
+        ))
+    });
+    if let Err(result) = admit_egress(key, origin) {
+        return result;
     }
     let Ok(bytes) = request_bytes(&attempt.submission, &attempt.body) else {
         return unknown("invalid_frozen_request", false);
@@ -471,7 +543,14 @@ fn valid_refusal(task: &Value, submission: &RemoteSubmission) -> bool {
         else {
             return false;
         };
-        if time > jiff::Timestamp::now() || previous.is_some_and(|previous| time < previous) {
+        // The destination stamped this receipt with its own clock. Accept it
+        // when that clock runs ahead of this host, within the same bound the
+        // destination allows for this origin's issued_at.
+        if time
+            > jiff::Timestamp::now()
+                + jiff::SignedDuration::from_secs(REMOTE_CLOCK_SKEW_TOLERANCE_SECS)
+            || previous.is_some_and(|previous| time < previous)
+        {
             return false;
         }
         previous = Some(time);

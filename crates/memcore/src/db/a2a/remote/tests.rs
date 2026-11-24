@@ -368,6 +368,61 @@ fn sender_wide_replay_nonce_and_body_header_binding_cannot_be_reassigned() {
 }
 
 #[test]
+fn first_admission_tolerates_a_bounded_origin_clock_ahead_but_never_local_expiry() {
+    let conn = memory_connection();
+    let (binding, gateway, access) = setup(&conn);
+    let stamped_by = |id: &str, issued_in: i64| {
+        let now = jiff::Timestamp::now();
+        let mut request = request(id, &binding);
+        // `issued_in` > 0 models an origin whose clock runs ahead of this host.
+        request.issued_at =
+            crate::time_compat::millis_z(now + jiff::SignedDuration::from_secs(issued_in));
+        request.expires_at =
+            crate::time_compat::millis_z(now + jiff::SignedDuration::from_secs(issued_in + 300));
+        body(&mut request, &binding);
+        request
+    };
+    let half = REMOTE_CLOCK_SKEW_TOLERANCE_SECS / 2;
+    assert!(matches!(
+        insert_remote_rejection(
+            &conn,
+            &binding,
+            &gateway,
+            &access,
+            &stamped_by("ahead-within-tolerance", half)
+        )
+        .unwrap(),
+        RemoteTaskInsertOutcome::Created(_)
+    ));
+    assert!(matches!(
+        insert_remote_rejection(
+            &conn,
+            &binding,
+            &gateway,
+            &access,
+            &stamped_by(
+                "ahead-beyond-tolerance",
+                REMOTE_CLOCK_SKEW_TOLERANCE_SECS + half
+            )
+        ),
+        Err(MemoryError::InvalidArg(_))
+    ));
+    // The tolerance is not a lease extension: a window that closed on this
+    // host's clock less than the tolerance ago is still refused.
+    let now = jiff::Timestamp::now();
+    let mut closed = request("closed-window", &binding);
+    closed.issued_at =
+        crate::time_compat::millis_z(now - jiff::SignedDuration::from_secs(2 * half));
+    closed.expires_at = crate::time_compat::millis_z(now - jiff::SignedDuration::from_secs(half));
+    body(&mut closed, &binding);
+    assert!(matches!(
+        insert_remote_rejection(&conn, &binding, &gateway, &access, &closed),
+        Err(MemoryError::InvalidArg(_))
+    ));
+    assert_eq!(counts(&conn), (1, 2));
+}
+
+#[test]
 fn reads_counts_cursors_and_replay_recheck_principal_domain_destination_host_and_grants() {
     let conn = memory_connection();
     let (binding, gateway, access) = setup(&conn);

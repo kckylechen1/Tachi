@@ -115,6 +115,16 @@ recall bytes already sent. Destination execution and cancellation remain a
 separate admission/lifecycle seam. Redirects, ambient proxies and implicit HTTP
 retries are disabled.
 
+Each host judges the other's timestamps with its own clock, so both sides
+tolerate the other clock running ahead by up to 60 seconds
+(`REMOTE_CLOCK_SKEW_TOLERANCE_SECS`, one constant shared by origin and
+destination). The destination admits a first submission whose `issued_at` is at
+most that far ahead; the origin accepts refusal receipts stamped at most that
+far ahead. Expiry is never relaxed: a first submission whose `expires_at` has
+passed on the destination's clock is refused, and the 15-minute TTL bound is
+unchanged. Timestamps a host writes for its own rows use the canonical
+millisecond UTC form.
+
 Automatic submission is bounded to three attempts across all CLI invocations,
 inside the original start window. A 45-second durable reservation covers the
 health and POST deadlines (15 seconds each); concurrent/early resumes return the
@@ -129,6 +139,12 @@ the attempt token. No database write lock is held during network I/O.
 | `refused` | A verified, exactly bound destination Task and both refusal receipts were saved. This slice only recognizes `execution_unavailable`. |
 | `blocked` | No attempt was made; the start window, claim or frozen destination binding prevented egress. |
 | `unknown` | At least one attempt was reserved, but no valid destination outcome is established. Includes lost replies, invalid receipts and exhausted retries. |
+
+A store that cannot answer an authority recheck is not an authority verdict. The
+attempt is then recorded as `unknown` with `destination_authority_unavailable`
+or `origin_authority_unavailable` and stays retryable, because no task bytes
+were sent. Only a revoked key or a changed claim, binding or attempt records a
+`*_authority_changed` error and stops automatic retries.
 
 Status contains headers, counters and validated receipts, never the frozen
 question/context. `retry_allowed` records the remaining automatic-retry policy;
@@ -175,7 +191,7 @@ The business object contains exactly:
 | `kind` | `tachi.remote_job/v1` |
 | `sender`, `recipient`, `trust_domain` | Exact admitted peer and destination bindings; bounded identifiers |
 | `idempotency_key`, `nonce` | Distinct opaque tokens of 1–128 bytes |
-| `issued_at`, `expires_at` | UTC `Z` timestamps, a positive start window no longer than 15 minutes |
+| `issued_at`, `expires_at` | UTC `Z` timestamps, a positive start window no longer than 15 minutes; `issued_at` may be up to 60 seconds ahead of the destination's own clock |
 | `repository` | Exact repository in this peer's configured grant |
 | `head_sha` | A 40- or 64-character lowercase commit ID; recorded as input, not asserted fetched |
 | `origin_claim` | `{ "claim_id": "...", "transition_version": 0 }`; revision is an integer at most 2^53−1 |

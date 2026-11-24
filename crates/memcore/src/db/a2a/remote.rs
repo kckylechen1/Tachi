@@ -22,6 +22,12 @@ pub const A2A_REMOTE_JOB_KIND: &str = "tachi.remote_job/v1";
 pub const MAX_REMOTE_JOB_BYTES: usize = 32768;
 const MAX_JOB_TTL_SECS: i64 = 15 * 60;
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+/// Largest accepted difference between the other host's clock and this one.
+/// Origin and destination compare each other's timestamps against their own
+/// clock, so only "the other host's timestamp is ahead of us" is relaxed by
+/// this bound. Expiry keeps using the local clock: a first submission is never
+/// admitted once its declared window has closed here.
+pub const REMOTE_CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
 
 /// Retained after body GC. The destination host comes from gateway config,
 /// not from a claim by the remote sender.
@@ -407,13 +413,17 @@ pub fn insert_remote_rejection(
         let issued = parse(&request.issued_at)?;
         let expires = parse(&request.expires_at)?;
         let authoritative_now = parse(&now)?;
-        if issued > authoritative_now
+        // The origin stamped issued_at with its own clock. Admit a job it just
+        // created even when that clock runs ahead of this host, bounded by the
+        // shared tolerance; expires_at is still judged by the local clock.
+        if issued
+            > authoritative_now + jiff::SignedDuration::from_secs(REMOTE_CLOCK_SKEW_TOLERANCE_SECS)
             || expires <= authoritative_now
             || expires <= issued
             || expires - issued > jiff::SignedDuration::from_secs(MAX_JOB_TTL_SECS)
         {
             return Err(invalid(
-                "first admission requires issued_at <= now < expires_at and TTL <= 15 minutes",
+                "first admission requires issued_at within the clock tolerance, now < expires_at and TTL <= 15 minutes",
             ));
         }
         let created_at = crate::db::common::normalize_utc_iso(&request.issued_at)?;
