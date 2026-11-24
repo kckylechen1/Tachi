@@ -107,8 +107,13 @@ expand the writable mount boundary. A bounded probe must succeed; an installed
 binary alone is insufficient.
 
 On macOS, sandbox-exec denies filesystem writes except the canonical runtime and
-the optional managed worktree, and denies process-group control escape. Before
-exec the runner closes inheritance of non-stdio descriptors after applying its
+the optional managed worktree, and denies process-group control escape. It also
+denies lookups of the host services that write or launch on a process's behalf
+(cfprefsd, LaunchServices, launchd and RunningBoard); without that, a confined
+child had a preference plist written under the user's Library and started an
+unconfined helper through `open`. Neither native adapter needs those services to
+start. Other mach services, Apple Events and the pasteboard are not filtered.
+Before exec the runner closes inheritance of non-stdio descriptors after applying its
 anchored-directory hooks. Linux uses close_range with CLOEXEC where supported,
 or enumerates the actual descriptors through procfs on older kernels. macOS
 uses a bounded proc_pidinfo descriptor snapshot and refuses a full 4096-entry

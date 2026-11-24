@@ -464,7 +464,10 @@ pub fn native_sandbox_command(
         }
         "macos" => {
             invocation.program = "/usr/bin/sandbox-exec".into();
-            let mut policy = format!("(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}(allow file-write* (subpath {}))", sbpl_path(&runtime)?);
+            let mut policy = format!(
+                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}{MACOS_IPC_BROKERS}(allow file-write* (subpath {}))",
+                sbpl_path(&runtime)?
+            );
             if writable {
                 policy.push_str(&format!(
                     "(allow file-write* (subpath {}))",
@@ -484,6 +487,11 @@ pub fn native_sandbox_command(
 /// Standard device sinks: `/dev/fd` reopens an already-held descriptor with its
 /// existing access mode, so none of these widens file-system writes.
 const MACOS_DEVICE_SINKS: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (subpath \"/dev/fd\"))";
+
+/// Host services that act for a confined process outside the filesystem
+/// rules: cfprefsd writes its preferences, LaunchServices and its job brokers
+/// start applications for it. Neither native adapter needs one to start.
+const MACOS_IPC_BROKERS: &str = r#"(deny mach-lookup (global-name-regex #"^com\.apple\.(cfprefsd|launchd|coreservices|CoreServices|lsd|runningboard|RunningBoard)"))"#;
 
 fn sbpl_path(path: &Path) -> Result<String, String> {
     let path = path
@@ -613,6 +621,117 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(f.runtime.join("home/allowed")).unwrap(),
             "ok"
+        );
+    }
+
+    /// A background-only application that records one line when launched and
+    /// exits at once.
+    #[cfg(target_os = "macos")]
+    fn launch_probe_app(root: &Path, marker: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let contents = root.join("Launch Probe.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Probe</string>
+<key>CFBundleIdentifier</key><string>local.tachi.sandbox-launch-probe</string>
+<key>CFBundleName</key><string>TachiSandboxLaunchProbe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let executable = contents.join("MacOS/Probe");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\n/bin/echo launched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        root.join("Launch Probe.app")
+    }
+
+    // `open` hands a launch to LaunchServices, which starts the application
+    // outside Seatbelt. A confined child could use it to write where the
+    // profile denies.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_launch_an_unconfined_helper() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let marker = f.root.join("launched-outside");
+        let app = launch_probe_app(&f.root, &marker);
+        // Control: the same launch reaches the helper without the profile. A
+        // host without a GUI session cannot run this probe.
+        let control = Command::new("/usr/bin/open")
+            .args(["-n", "-W", "-g"])
+            .arg(&app)
+            .status()
+            .unwrap();
+        if std::fs::remove_file(&marker).is_err() {
+            eprintln!("open launched nothing on this host ({control:?}); probe skipped");
+            return;
+        }
+
+        let args = ["-n", "-W", "-g"].map(OsString::from);
+        let wrapper = native_sandbox_command(
+            OsStr::new("/usr/bin/open"),
+            &[args.as_slice(), &[app.into_os_string()]].concat(),
+            &f.cwd,
+            &f.runtime,
+            true,
+        )
+        .unwrap();
+        let status = Command::new(wrapper.program)
+            .args(wrapper.args)
+            .envs(wrapper.env)
+            .current_dir(&f.cwd)
+            .status()
+            .unwrap();
+        let launched = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            !launched,
+            "a confined child launched an unconfined helper ({status:?})"
+        );
+    }
+
+    // cfprefsd writes preference plists for its client under the user's
+    // Library, wherever that client is allowed to write.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_write_preferences_outside_the_runtime() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let domain = format!(
+            "local.tachi.sandbox-probe.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let plist =
+            PathBuf::from(std::env::var_os("HOME").expect("HOME locates the user's preferences"))
+                .join("Library/Preferences")
+                .join(format!("{domain}.plist"));
+        let status = f
+            .command(
+                true,
+                &format!("/usr/bin/defaults write {domain} probe -string from-sandbox"),
+            )
+            .status()
+            .unwrap();
+        let written = plist.exists();
+        let _ = std::fs::remove_file(&plist);
+        assert!(
+            !written,
+            "a confined child wrote {plist:?} through cfprefsd ({status:?})"
         );
     }
 
