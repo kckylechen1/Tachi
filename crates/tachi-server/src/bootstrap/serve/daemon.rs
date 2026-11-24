@@ -272,7 +272,12 @@ pub(super) async fn serve_http_daemon(
                     // provider before building any client or `.build()` panics (even
                     // for loopback http, the builder resolves the provider eagerly).
                     crate::ensure_tls_provider();
+                    // Loopback only: an environment or system proxy must
+                    // neither receive the probe nor turn into false
+                    // "surface dead" exits.
                     let client = match reqwest::Client::builder()
+                        .no_proxy()
+                        .connect_timeout(std::time::Duration::from_secs(2))
                         .timeout(std::time::Duration::from_secs(5))
                         .build()
                     {
@@ -535,6 +540,10 @@ pub(crate) fn daemon_http_router(
     http_config.legacy_session_mode = true;
     http_config.stateless_protocol_metadata_required = true;
     http_config.cancellation_token = ct.child_token();
+    // No browser origin is registered. A page on another site must not drive
+    // the daemon through a visitor's browser; clients that send no `Origin`
+    // (CLI, MCP hosts) are unaffected.
+    let http_config = http_config.enforce_origin_validation();
 
     let service = StreamableHttpService::new(
         move || Ok(server.clone_for_mcp_session()),
@@ -595,6 +604,60 @@ pub(crate) fn daemon_http_router(
         .layer(axum::middleware::from_fn(
             normalize_malformed_mcp_json_response,
         ))
+        // Outermost: it runs before any route, including `/health`.
+        .layer(axum::middleware::from_fn(require_loopback_host))
+}
+
+/// Whether a `Host` header names the loopback daemon: `localhost`, `127.0.0.1`
+/// or `[::1]`, each with an optional port. It mirrors the hosts the `/mcp`
+/// service accepts on its own.
+pub(super) fn is_loopback_host(value: &str) -> bool {
+    let value = value.trim();
+    let (name, port) = if let Some(bracketed) = value.strip_prefix('[') {
+        let Some((name, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        (name, rest.strip_prefix(':'))
+    } else {
+        match value.rsplit_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (value, None),
+        }
+    };
+    let port_is_valid = match port {
+        None => true,
+        Some(port) => !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()),
+    };
+    port_is_valid
+        && (name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1")
+}
+
+/// Rejects requests whose `Host` does not name the loopback daemon.
+///
+/// The listener binds 127.0.0.1 only, but a page on another site can still
+/// reach it through a name it controls (DNS rebinding) and would otherwise
+/// read `/health` or present the owner capability to `/internal/vault`.
+async fn require_loopback_host(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let named_loopback = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_host);
+    if !named_loopback {
+        // The rejected value is attacker-chosen text and is not logged.
+        tracing::warn!(
+            target: "tachi::daemon",
+            "rejected request whose Host is not the loopback daemon"
+        );
+        return axum::response::IntoResponse::into_response((
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "Host header is not allowed" })),
+        ));
+    }
+    next.run(request).await
 }
 
 pub(super) fn daemon_uses_manifest_background(
