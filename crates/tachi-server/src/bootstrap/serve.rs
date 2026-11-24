@@ -1326,14 +1326,17 @@ pub(super) fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Tachi MCP stdio has been retired. Start the resident HTTP server with `tachi --daemon --port 6919 serve`, then configure a native Streamable HTTP client at http://127.0.0.1:6919/mcp. Existing command/args MCP entries must be replaced with an HTTP URL; no stdin proxy or automatic daemon fallback is available.".into());
     }
     let mut owner = StartupRuntime::new()?;
-    owner
-        .runtime
-        .block_on(tokio_main_inner(cli, &mut owner.daemon_lock))
+    owner.runtime.block_on(tokio_main_inner(
+        cli,
+        &mut owner.daemon_lock,
+        &mut owner.shutdown_checkpoint,
+    ))
 }
 
 async fn tokio_main_inner(
     cli: Cli,
     daemon_lock: &mut Option<crate::daemon_lock::DaemonLock>,
+    shutdown_checkpoint: &mut ShutdownWalCheckpointer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Commands::Mcp {
         action: tachi_bootstrap::cli::McpAction::Task(args),
@@ -1399,7 +1402,12 @@ async fn tokio_main_inner(
         state,
         daemon_lock.as_ref(),
     )
-    .await
+    .await?;
+    if cli.daemon && matches!(ctx.command, Commands::Serve) {
+        shutdown_checkpoint
+            .arm(std::iter::once(global_db_path).chain(hygiene.project_db_path.clone()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
