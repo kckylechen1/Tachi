@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tachi_hub::ToolProfile;
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct AgentRuntime {
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) tool_profile: Option<ToolProfile>,
@@ -42,6 +42,32 @@ pub(crate) struct AgentRuntime {
     // `handoff_leave`/`handoff_check` handlers) removed — it was the
     // "second memo lifecycle" the #1099 acceptance criteria call out;
     // nothing wrote or read it once those handlers went away.
+}
+
+impl std::fmt::Debug for AgentRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRuntime")
+            .field("agent_profile", &self.agent_profile)
+            .field("tool_profile", &self.tool_profile)
+            .field("session_client", &self.session_client)
+            .field("presence_client_label", &self.presence_client_label)
+            .field("presence_session_id", &self.presence_session_id)
+            .field("presence_report_error", &self.presence_report_error)
+            .field("presence_report", &self.presence_report)
+            .field("session_project", &self.session_project)
+            .field("work_claim_connection", &self.work_claim_connection)
+            .field(
+                "daemon_proxy_token",
+                &self
+                    .daemon_proxy_token
+                    .as_ref()
+                    .map(|_| crate::utils::Redacted),
+            )
+            .field("published_daemon_mcp_url", &self.published_daemon_mcp_url)
+            .field("session_dispatch_depth", &self.session_dispatch_depth)
+            .field("rate_limit_session_id", &self.rate_limit_session_id)
+            .finish()
+    }
 }
 
 impl AgentRuntime {
@@ -91,4 +117,37 @@ pub(crate) struct EnrichmentRuntime {
 pub(crate) struct FoundryRuntime {
     pub(crate) foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
     pub(crate) foundry_stats: Arc<FoundryWorkerStats>,
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    // Session runtime is printed with `{:?}` on tracing paths; the proxy
+    // capability inside it admits owner operations on the local daemon.
+    #[test]
+    fn agent_runtime_debug_never_shows_the_proxy_token() {
+        let runtime = AgentRuntime {
+            agent_profile: None,
+            tool_profile: None,
+            session_client: Some("claude-code".to_string()),
+            presence_client_label: None,
+            presence_session_id: "session-1".to_string(),
+            presence_report_error: None,
+            presence_report: None,
+            session_project: Some("tachi".to_string()),
+            work_claim_connection: None,
+            daemon_proxy_token: Some("owner-proxy-capability".to_string()),
+            published_daemon_mcp_url: Some("http://127.0.0.1:6919/mcp".to_string()),
+            session_dispatch_depth: None,
+            rate_limit_session_id: "rate-1".to_string(),
+        };
+        let rendered = format!("{runtime:?}");
+        assert!(!rendered.contains("owner-proxy-capability"), "{rendered}");
+        assert!(
+            rendered.contains("daemon_proxy_token: Some([REDACTED])"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("claude-code"), "{rendered}");
+    }
 }

@@ -126,10 +126,22 @@ pub struct CredentialApplyOptions {
     pub run_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CredentialApplyResult {
     pub report: CredentialMaterializeReport,
     pub env: HashMap<String, String>,
+}
+
+/// `env` carries decrypted values for the child, so `Debug` names it only.
+impl std::fmt::Debug for CredentialApplyResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut names: Vec<&str> = self.env.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        f.debug_struct("CredentialApplyResult")
+            .field("report", &self.report)
+            .field("env", &names)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

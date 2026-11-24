@@ -8,7 +8,7 @@ use serde_json::Value;
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Discovery info for a running Tachi daemon.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct DaemonInfo {
     pub url: String,
     pub global_db: Option<String>,
@@ -19,6 +19,28 @@ pub(crate) struct DaemonInfo {
     /// Owner-only per-daemon capability used by local CLI requests. Never
     /// print or expose this value in caller-visible diagnostics.
     pub internal_proxy_token: Option<String>,
+}
+
+impl std::fmt::Debug for DaemonInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("DaemonInfo");
+        debug
+            .field("url", &self.url)
+            .field("global_db", &self.global_db)
+            .field("project_db", &self.project_db)
+            .field("version", &self.version);
+        #[cfg(test)]
+        debug.field("pid", &self.pid);
+        debug
+            .field(
+                "internal_proxy_token",
+                &self
+                    .internal_proxy_token
+                    .as_ref()
+                    .map(|_| crate::utils::Redacted),
+            )
+            .finish()
+    }
 }
 
 /// Why a daemon probe returned nothing. Routine in-process CLI fallbacks use
@@ -293,6 +315,21 @@ mod tests {
             pid: Some(1),
             internal_proxy_token: None,
         }
+    }
+
+    // `{:?}` on the discovery record is one log statement away from showing a
+    // capability that admits owner operations on the local daemon.
+    #[test]
+    fn daemon_info_debug_never_shows_the_proxy_token() {
+        let mut daemon = info(Some("1.9.0"), None, None);
+        daemon.internal_proxy_token = Some("owner-proxy-capability".to_string());
+        let rendered = format!("{daemon:?}");
+        assert!(!rendered.contains("owner-proxy-capability"), "{rendered}");
+        assert!(
+            rendered.contains("internal_proxy_token: Some([REDACTED])"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(r#""1.9.0""#), "{rendered}");
     }
 
     #[test]

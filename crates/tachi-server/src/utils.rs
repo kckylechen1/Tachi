@@ -28,7 +28,7 @@ pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover}
 #[cfg(any(test, feature = "delivery-test-api", feature = "vault-test-api"))]
 pub(crate) use self::test_fixtures::{test_fixture_path, test_fixture_root};
 pub(super) use self::text::redact_sensitive_value;
-pub(crate) use self::text::{append_warning, compact_text_line, sanitize_safe_path_name};
+pub(crate) use self::text::{append_warning, compact_text_line, sanitize_safe_path_name, Redacted};
 pub(super) use self::validation::{is_trusted_command, normalize_supported_values};
 pub(crate) use self::validation::{
     key_to_utc_millis_z, parse_relaxed_datetime, parse_rfc3339, relaxed_datetime_key,

@@ -87,4 +87,5 @@ mod dry_run;
 mod file_materialization;
 mod manual_cleanup;
 mod profile_discovery;
+mod redacted_debug;
 mod run_scoped_cleanup;

@@ -836,7 +836,7 @@ fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
     tool.input_schema = std::sync::Arc::new(schema);
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
@@ -882,6 +882,32 @@ struct HttpSessionIdentity {
     /// failing the request, because it selects a rate-limit bucket only and
     /// never identity, profile, or authority.
     rate_limit_session: Option<String>,
+}
+
+impl std::fmt::Debug for HttpSessionIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpSessionIdentity")
+            .field("profile", &self.profile)
+            .field("client", &self.client)
+            .field(
+                "internal_proxy_token",
+                &self
+                    .internal_proxy_token
+                    .as_ref()
+                    .map(|_| crate::utils::Redacted),
+            )
+            .field("owner_tool", &self.owner_tool)
+            .field("owner_tool_error", &self.owner_tool_error)
+            .field("agent_identity_id", &self.agent_identity_id)
+            .field("agent_identity_error", &self.agent_identity_error)
+            .field("project", &self.project)
+            .field("project_error", &self.project_error)
+            .field("workspace_root", &self.workspace_root)
+            .field("workspace_root_error", &self.workspace_root_error)
+            .field("dispatch_depth", &self.dispatch_depth)
+            .field("rate_limit_session", &self.rate_limit_session)
+            .finish()
+    }
 }
 
 /// #1120 PR1: which session-identity field supplies the bound project, when

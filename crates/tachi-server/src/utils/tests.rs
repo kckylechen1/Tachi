@@ -275,6 +275,34 @@ fn redact_sensitive_value_redacts_secret_keys_and_url_params() {
     );
 }
 
+// One value can carry several URLs or several tokens. Redacting only the
+// first left the rest in whatever log or echo the value reached.
+#[test]
+fn redact_sensitive_value_covers_every_url_and_bearer_token_in_a_value() {
+    let mut value = json!({
+        "redirects": "https://a.test/cb?state=ok https://b.test/cb#done https://c.test/cb?token=second-secret",
+        "nested": "https://a.test/cb?next=https://b.test/cb?api_key=nested-secret",
+        "prose": "Bearer first-secret, then Bearer second-secret and bearer third-secret",
+    });
+
+    redact_sensitive_value(&mut value);
+
+    assert_eq!(
+        value["redirects"],
+        json!(
+            "https://a.test/cb?state=ok https://b.test/cb#done https://c.test/cb?token=[REDACTED]"
+        )
+    );
+    assert_eq!(
+        value["nested"],
+        json!("https://a.test/cb?next=https://b.test/cb?api_key=[REDACTED]")
+    );
+    assert_eq!(
+        value["prose"],
+        json!("Bearer [REDACTED] then Bearer [REDACTED] and bearer [REDACTED]")
+    );
+}
+
 #[test]
 fn write_owner_only_file_atomic_replaces_file_without_temp_leftovers() {
     let dir = tempfile::tempdir().expect("tempdir");
