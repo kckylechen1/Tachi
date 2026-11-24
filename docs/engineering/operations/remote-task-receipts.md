@@ -227,6 +227,10 @@ checked in the same existing SQLite transaction. Expired first submissions are
 refused; an already recorded task remains readable and replayable after its start
 window, subject to current authority.
 
+One issuer may hold at most 5,000 tasks whose body is still retained. A further
+first submission is refused with `-32006 Peer task quota exceeded` until
+retention scrubs bodies; another issuer, and an exact replay, are unaffected.
+
 For a new allowed input, one transaction records the envelope, a `received`
 receipt and an `authorization_refused` receipt with reason
 `execution_unavailable`. The A2A state is `TASK_STATE_REJECTED`. The receipt includes

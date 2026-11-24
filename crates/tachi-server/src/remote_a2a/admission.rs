@@ -31,32 +31,100 @@ impl TrustedAdmissionVerifier for TlsProof {
     }
 }
 
+/// Why a connection was not admitted. `key` carries the first 16 hex digits
+/// of the presented public-key digest when a certificate parsed, so an
+/// operator can recognize or enroll the peer. Nothing else about the peer or
+/// its request is kept for logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Rejection {
+    pub reason: String,
+    pub key: String,
+}
+
+impl From<&'static str> for Rejection {
+    fn from(reason: &'static str) -> Self {
+        Self {
+            reason: reason.into(),
+            key: String::new(),
+        }
+    }
+}
+
+/// Facts of one completed TLS handshake. Reading them touches neither the
+/// store nor SQLite, so it stays on the async worker.
+pub(super) struct TlsEvidence {
+    /// SHA-256 of the enrolled SPKI, as written in the operator configuration.
+    key: String,
+    certificates: Vec<CertificateDer<'static>>,
+    connection_id: String,
+    exporter: [u8; 32],
+}
+
 impl Connection {
     // Only a completed rustls handshake supplies this proof. No HTTP header,
     // JSON field or local MCP route can construct a TlsProof.
-    pub fn from_tls(
-        base: &MemoryServer,
-        config: Arc<GatewayConfig>,
+    pub fn evidence(
+        config: &GatewayConfig,
         tls: &rustls::ServerConnection,
-        verifier: Arc<dyn ClientCertVerifier>,
-    ) -> Result<Self, String> {
+    ) -> Result<(Peer, TlsEvidence), Rejection> {
         if tls.is_handshaking() {
             return Err("remote TLS handshake is incomplete".into());
         }
         let certificates = tls
             .peer_certificates()
-            .ok_or("remote peer certificate required")?
+            .ok_or_else(|| Rejection::from("remote peer certificate required"))?
             .to_vec();
         let leaf = certificates
             .first()
-            .ok_or("remote peer certificate required")?;
+            .ok_or_else(|| Rejection::from("remote peer certificate required"))?;
         let key = public_key_digest(leaf).map_err(|_| "remote peer certificate is invalid")?;
         let peer = config
             .peers
             .iter()
-            .find(|p| p.public_key_sha256 == key)
-            .ok_or("remote peer is not enrolled")?
+            .find(|peer| peer.public_key_sha256 == key)
+            .ok_or(Rejection {
+                reason: "remote peer is not enrolled".into(),
+                key: key.clone(),
+            })?
             .clone();
+        let connection_id = format!("remote-{}", uuid::Uuid::new_v4());
+        let exporter = tls
+            .export_keying_material(
+                [0_u8; 32],
+                b"EXPORTER-Tachi-Admission-v1",
+                Some(connection_id.as_bytes()),
+            )
+            .map_err(|_| "remote TLS channel binding is unavailable")?;
+        Ok((
+            peer,
+            TlsEvidence {
+                key,
+                certificates,
+                connection_id,
+                exporter,
+            },
+        ))
+    }
+
+    /// Store side of admission: the certificate-window check and the
+    /// synchronous SQLite admission write. Run it on the blocking pool, never
+    /// on a Tokio worker.
+    pub fn admit(
+        base: MemoryServer,
+        config: Arc<GatewayConfig>,
+        peer: Peer,
+        evidence: TlsEvidence,
+        verifier: Arc<dyn ClientCertVerifier>,
+    ) -> Result<Self, Rejection> {
+        let TlsEvidence {
+            key,
+            certificates,
+            connection_id,
+            exporter,
+        } = evidence;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Rejection::from("remote peer certificate required"))?;
         let (Some(gateway_id), gateway_connection, state) = base
             .work_claim_connection()
             .ok_or("gateway local admission is unavailable")?
@@ -66,14 +134,6 @@ impl Connection {
         if gateway_id != config.agent_identity_id || state != "self_asserted" {
             return Err("gateway local admission does not match its operator identity".into());
         }
-        let connection_id = format!("remote-{}", uuid::Uuid::new_v4());
-        let exporter = tls
-            .export_keying_material(
-                [0_u8; 32],
-                b"EXPORTER-Tachi-Admission-v1",
-                Some(connection_id.as_bytes()),
-            )
-            .map_err(|_| "remote TLS channel binding is unavailable")?;
         let now = jiff::Timestamp::now();
         let expires_at = now + jiff::SignedDuration::from_mins(15);
         let end_seconds: u64 = expires_at
@@ -109,7 +169,8 @@ impl Connection {
                     .concat()
                 )
             ),
-            evidence_ref: VerifiedEvidenceRef::attestation("mtls-peer", &key)?,
+            evidence_ref: VerifiedEvidenceRef::attestation("mtls-peer", &key)
+                .map_err(|_| Rejection::from("remote peer certificate is invalid"))?,
             issued_at: now,
             expires_at,
             nonce: uuid::Uuid::new_v4().to_string(),
@@ -126,7 +187,16 @@ impl Connection {
             idempotency_key: uuid::Uuid::new_v4().to_string(),
         };
         let server = base.clone_for_mcp_session();
-        admit_verified_agent_connection(&server, &request, &TlsProof(evidence))?;
+        admit_verified_agent_connection(&server, &request, &TlsProof(evidence)).map_err(
+            |message| {
+                // The writer's own reason is static validation text; it names no
+                // key material or request content.
+                Rejection {
+                    reason: format!("remote admission was refused: {message}"),
+                    key: String::new(),
+                }
+            },
+        )?;
         Ok(Self {
             server,
             peer,
@@ -138,6 +208,19 @@ impl Connection {
             certificates,
             verifier,
         })
+    }
+
+    pub async fn from_tls(
+        base: &MemoryServer,
+        config: Arc<GatewayConfig>,
+        tls: &rustls::ServerConnection,
+        verifier: Arc<dyn ClientCertVerifier>,
+    ) -> Result<Self, Rejection> {
+        let (peer, evidence) = Self::evidence(&config, tls)?;
+        let base = base.clone();
+        tokio::task::spawn_blocking(move || Self::admit(base, config, peer, evidence, verifier))
+            .await
+            .map_err(|_| Rejection::from("remote admission task failed"))?
     }
 
     pub fn current(&self) -> Result<(), String> {

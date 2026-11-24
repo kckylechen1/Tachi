@@ -423,6 +423,80 @@ fn first_admission_tolerates_a_bounded_origin_clock_ahead_but_never_local_expiry
 }
 
 #[test]
+fn retained_task_quota_bounds_one_issuer_and_never_blocks_replay() {
+    let conn = memory_connection();
+    let (binding, gateway, access) = setup(&conn);
+    let first = request("first", &binding);
+    let task =
+        created(insert_remote_rejection(&conn, &binding, &gateway, &access, &first).unwrap());
+    let other = verified(
+        &conn,
+        "other-origin",
+        "other-first",
+        "workspace:test",
+        "mtls-peer",
+    );
+    insert_remote_rejection(&conn, &other, &gateway, &access, &request("other", &other)).unwrap();
+    // Fill this issuer's bound by copying its real producer row.
+    conn.execute_batch(&format!(
+        "WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq
+                                   WHERE x < {})
+         INSERT INTO a2a_envelopes
+         SELECT 'bulk-' || x,kind,issuer_agent_identity_id,issuer_admission_id,
+                recipient_agent_identity_id,recipient_admission_id,subject_ref,body,body_digest,
+                issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,
+                recipient_trust_domain,issuer_trust_basis,recipient_trust_basis,
+                'bulk-key-' || x,created_at,expires_at,current_state,state_version,
+                canonical_project,'bulk-nonce-' || x,remote_metadata
+         FROM a2a_envelopes JOIN seq WHERE envelope_id='first'",
+        MAX_RETAINED_REMOTE_TASKS_PER_PEER - 1,
+    ))
+    .unwrap();
+    let refused = insert_remote_rejection(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &request("over-quota", &binding),
+    )
+    .unwrap_err();
+    assert!(is_retained_task_quota_exceeded(&refused), "{refused}");
+    // Another issuer is unaffected, and an exact replay still returns its task.
+    assert!(matches!(
+        insert_remote_rejection(
+            &conn,
+            &other,
+            &gateway,
+            &access,
+            &request("other-next", &other)
+        )
+        .unwrap(),
+        RemoteTaskInsertOutcome::Created(_)
+    ));
+    assert_eq!(
+        insert_remote_rejection(&conn, &binding, &gateway, &access, &first).unwrap(),
+        RemoteTaskInsertOutcome::Replay(task)
+    );
+    // Retention scrubs bodies; capacity returns with them.
+    conn.execute(
+        "UPDATE a2a_envelopes SET body=NULL WHERE envelope_id LIKE 'bulk-%'",
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        insert_remote_rejection(
+            &conn,
+            &binding,
+            &gateway,
+            &access,
+            &request("after-scrub", &binding)
+        )
+        .unwrap(),
+        RemoteTaskInsertOutcome::Created(_)
+    ));
+}
+
+#[test]
 fn reads_counts_cursors_and_replay_recheck_principal_domain_destination_host_and_grants() {
     let conn = memory_connection();
     let (binding, gateway, access) = setup(&conn);

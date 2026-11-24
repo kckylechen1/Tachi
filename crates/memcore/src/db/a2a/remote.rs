@@ -28,6 +28,18 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 /// this bound. Expiry keeps using the local clock: a first submission is never
 /// admitted once its declared window has closed here.
 pub const REMOTE_CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
+/// Tasks with a retained body that one issuer may hold. It bounds what a
+/// single enrolled peer can store. Retention scrubs bodies after 90 days, so
+/// the capacity returns; a replay returns its existing task and never counts.
+pub const MAX_RETAINED_REMOTE_TASKS_PER_PEER: i64 = 5_000;
+/// `MemoryError::InvalidArg` message of a first submission refused by that bound.
+pub const RETAINED_TASK_QUOTA_EXCEEDED: &str = "remote task retained task quota exceeded";
+
+/// Whether a storage error is the retained-task quota refusing a first
+/// submission from an issuer that already holds its bound.
+pub fn is_retained_task_quota_exceeded(error: &MemoryError) -> bool {
+    matches!(error, MemoryError::InvalidArg(message) if message == RETAINED_TASK_QUOTA_EXCEEDED)
+}
 
 /// Retained after body GC. The destination host comes from gateway config,
 /// not from a claim by the remote sender.
@@ -428,6 +440,17 @@ pub fn insert_remote_rejection(
         }
         let created_at = crate::db::common::normalize_utc_iso(&request.issued_at)?;
         let expires_at = crate::db::common::normalize_utc_iso(&request.expires_at)?;
+        // Counted inside the admission transaction, after the replay lookup, so
+        // an issuer at its bound can still replay but not add another task.
+        let retained: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM a2a_envelopes
+             WHERE issuer_agent_identity_id=?1 AND kind='tachi.remote_job/v1' AND body IS NOT NULL",
+            params![binding.agent_identity_id],
+            |row| row.get(0),
+        )?;
+        if retained >= MAX_RETAINED_REMOTE_TASKS_PER_PEER {
+            return Err(invalid("retained task quota exceeded"));
+        }
         let metadata = serde_json::to_string(&request.header)?;
         conn.execute(
             "INSERT INTO a2a_envelopes

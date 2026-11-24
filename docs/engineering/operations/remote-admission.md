@@ -89,10 +89,25 @@ No `/mcp`, Vault or arbitrary local router is mounted. `--global-db`,
 the explicit gateway config owns those choices. Project/user dotenv startup
 and the normal daemon proxy are not used.
 
-The gateway caps concurrent connections at 64, bounds handshake/header waits,
-and ends a connection after its fifteen-minute admission lifetime. Each
-protected request rechecks certificate validity and current durable admission.
-Database expiry/revocation remains authoritative even while TLS stays open.
+The gateway caps admitted connections at 64 and handshakes in flight at 32,
+bounds handshake/header waits, and ends a connection after its fifteen-minute
+admission lifetime. A connection that has not completed TLS can only hold a
+handshake slot, so unauthenticated peers cannot occupy the admitted slots. An
+`accept` failure of the listener itself is logged and retried after a short
+pause instead of ending the process; a peer that closes first is ignored.
+Admission and every `/rpc` operation do their SQLite work on the blocking
+pool, never on a Tokio worker. Each protected request rechecks certificate
+validity and current durable admission. Database expiry/revocation remains
+authoritative even while TLS stays open.
+
+The gateway writes structured events to stderr; stdout carries its JSON
+control lines. For peers that fail the handshake, are not enrolled or find the
+gateway busy, at most twenty events per second are written. They carry the
+peer address, a static reason and the first 16 hex digits of the presented
+public-key digest, so an operator can recognize or enroll the peer; they never
+carry request bytes, headers or key material. Admitted peers and refused RPCs
+are logged with the peer identity and the JSON-RPC code. `RUST_LOG` selects
+the level.
 
 ## Revoke an enrolled key
 

@@ -23,10 +23,12 @@ pub use coordination::{consume_a2a_for_project, insert_a2a_coordination, list_a2
 mod remote;
 #[cfg(feature = "admin")]
 pub use remote::{
-    insert_remote_rejection, list_remote_tasks, read_remote_task, NewRemoteTask, RemoteJobGrant,
-    RemoteReceiptDetail, RemoteRejectionReason, RemoteTask, RemoteTaskAccess, RemoteTaskEnvelope,
-    RemoteTaskHeader, RemoteTaskInsertOutcome, RemoteTaskPage, RemoteTaskReceipt,
-    A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES, REMOTE_CLOCK_SKEW_TOLERANCE_SECS,
+    insert_remote_rejection, is_retained_task_quota_exceeded, list_remote_tasks, read_remote_task,
+    NewRemoteTask, RemoteJobGrant, RemoteReceiptDetail, RemoteRejectionReason, RemoteTask,
+    RemoteTaskAccess, RemoteTaskEnvelope, RemoteTaskHeader, RemoteTaskInsertOutcome,
+    RemoteTaskPage, RemoteTaskReceipt, A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES,
+    MAX_RETAINED_REMOTE_TASKS_PER_PEER, REMOTE_CLOCK_SKEW_TOLERANCE_SECS,
+    RETAINED_TASK_QUOTA_EXCEEDED,
 };
 #[cfg(feature = "admin")]
 mod submissions;
