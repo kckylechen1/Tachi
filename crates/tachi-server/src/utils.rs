@@ -34,7 +34,9 @@ pub(crate) use self::validation::{
     key_to_utc_millis_z, parse_relaxed_datetime, parse_rfc3339, relaxed_datetime_key,
     timestamp_key, Rfc3339Stamp,
 };
-pub(super) use tachi_params::util::{is_shell_env_name, stable_hash};
+pub(super) use tachi_params::util::{
+    is_execution_environment_name, is_shell_env_name, stable_hash,
+};
 // #1120 PR1: `find_git_root_from` is now also used by production code
 // (`project_db_ops::resolve_or_register_workspace_root`, resolving an
 // `X-Tachi-Workspace-Root` path to its git root), not just `utils/tests`

@@ -83,13 +83,10 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
     let Some(cwd) = cwd else {
         return Ok(secrets);
     };
-    let Some(bindings_path) = find_project_vault_env_file(cwd) else {
+    let Some(project) = load_project_vault_env(cwd)? else {
         return Ok(secrets);
     };
-
-    let contents = std::fs::read_to_string(&bindings_path)
-        .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
-    for (env_name, secret_name) in parse_project_vault_env_bindings(&contents) {
+    for (env_name, secret_name) in parse_project_vault_env_bindings(&project.contents) {
         let value = match read_unlocked_vault_secret(server, &secret_name, None, false) {
             Ok(value) => value,
             Err(err) => {
@@ -97,7 +94,7 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
                     "[vault] skipped project env binding {}={} from {}: {}",
                     env_name,
                     crate::provider_config::vault_alias_line(&secret_name),
-                    bindings_path.display(),
+                    project.path.display(),
                     err
                 );
                 continue;
@@ -122,22 +119,67 @@ pub(crate) struct ProjectEnvIgnoredLine {
     pub reason: String,
 }
 
-pub(crate) fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {
+/// Project env binding files, in the order they are preferred inside `.tachi`.
+const PROJECT_ENV_FILE_NAMES: [&str; 2] = ["vault.env", "vault-bindings.env"];
+/// A binding file holds `NAME=vault:SECRET` lines; anything larger is not one.
+const MAX_PROJECT_VAULT_ENV_BYTES: usize = 256 * 1024;
+
+pub(crate) struct ProjectVaultEnv {
+    pub(crate) path: PathBuf,
+    pub(crate) contents: String,
+}
+
+/// Read the nearest project env binding file at or above `cwd`.
+///
+/// The search stops at the enclosing checkout: once a directory that owns a
+/// `.git` has been checked, a nested checkout does not inherit the bindings of
+/// the project around it. The file is read through directory descriptors, so
+/// neither it nor `.tachi` can be a symlink leading out of that directory.
+pub(crate) fn load_project_vault_env(cwd: &Path) -> Result<Option<ProjectVaultEnv>, String> {
     let start = if cwd.is_file() {
         cwd.parent().unwrap_or(cwd)
     } else {
         cwd
     };
-
     for dir in start.ancestors() {
-        for rel_path in [".tachi/vault.env", ".tachi/vault-bindings.env"] {
-            let candidate = dir.join(rel_path);
-            if candidate.is_file() {
-                return Some(candidate);
+        // A removed cwd still has ancestors that may carry bindings.
+        if std::fs::symlink_metadata(dir).is_err() {
+            continue;
+        }
+        for name in PROJECT_ENV_FILE_NAMES {
+            let path = dir.join(".tachi").join(name);
+            if let Some(contents) = read_project_vault_env_file(dir, &path)? {
+                return Ok(Some(ProjectVaultEnv { path, contents }));
             }
         }
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return Ok(None);
+        }
     }
-    None
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn read_project_vault_env_file(project_dir: &Path, path: &Path) -> Result<Option<String>, String> {
+    crate::dispatch_ops::read_text_file_within(project_dir, path, MAX_PROJECT_VAULT_ENV_BYTES)
+}
+
+#[cfg(not(unix))]
+fn read_project_vault_env_file(_project_dir: &Path, path: &Path) -> Result<Option<String>, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "refusing to read a project env binding file that is not a regular file: {}",
+                path.display()
+            ))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("Failed to read {}: {err}", path.display())),
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .map_err(|err| format!("Failed to read {}: {err}", path.display()))
 }
 
 pub(crate) fn parse_project_vault_env_bindings_detailed(
@@ -167,6 +209,13 @@ pub(crate) fn parse_project_vault_env_bindings_detailed(
             });
             continue;
         }
+        if crate::utils::is_execution_environment_name(name) {
+            ignored.push(ProjectEnvIgnoredLine {
+                line: line_no,
+                reason: format!("refused: '{name}' chooses what the child loads or executes"),
+            });
+            continue;
+        }
         let value = value.split_once(" #").map_or(value, |(v, _)| v).trim();
         let Some(secret_name) = crate::provider_config::parse_vault_alias(value) else {
             ignored.push(ProjectEnvIgnoredLine {
@@ -190,16 +239,14 @@ type ProjectEnvBindingLoad = Result<
 >;
 
 pub(crate) fn load_project_env_bindings(cwd: &Path) -> ProjectEnvBindingLoad {
-    let bindings_path = find_project_vault_env_file(cwd).ok_or_else(|| {
+    let project = load_project_vault_env(cwd)?.ok_or_else(|| {
         format!(
             "No project Vault env binding file found from {}. Create .tachi/vault.env with lines like OPENAI_API_KEY=vault:OPENAI_API_KEY.",
             cwd.display()
         )
     })?;
-    let contents = std::fs::read_to_string(&bindings_path)
-        .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
-    let (bindings, ignored) = parse_project_vault_env_bindings_detailed(&contents);
-    Ok((bindings_path, bindings, ignored))
+    let (bindings, ignored) = parse_project_vault_env_bindings_detailed(&project.contents);
+    Ok((project.path, bindings, ignored))
 }
 
 fn parse_project_vault_env_bindings(contents: &str) -> Vec<(String, String)> {

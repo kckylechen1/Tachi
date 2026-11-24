@@ -700,6 +700,13 @@ the launch before spawn. Other parent variables remain inherited. Child exit
 codes propagate to the CLI caller. Export prints plaintext by explicit request;
 keep it out of logs and tracked files.
 
+The binding file is looked up from the working directory up to the enclosing
+checkout root, the nearest directory that holds a `.git`; a nested checkout never
+inherits the bindings of the project around it. It is read without following a
+symlink out of that directory. Names that choose what the child loads or executes
+(`PATH`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, ...) are reported as
+ignored lines and never injected.
+
 The bare global `tachi env`, `tachi env sync`, and implicit `tachi vault exec`
 entrypoints are retired. There is no generated-env-file writer. Keep only Vault
 references in version control. Existing `.tachi/env.generated` files are not

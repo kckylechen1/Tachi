@@ -41,9 +41,9 @@ pub const VAULT_MATERIALIZATION_INVALID_UTF8: &str =
     "A listed Vault payload is not valid UTF-8; refusing materialization";
 pub(crate) use access::read_unlocked_vault_secret;
 pub(crate) use env::{
-    find_project_vault_env_file, load_project_env_bindings,
-    load_unlocked_env_secrets_for_child_env, parse_project_vault_env_bindings_detailed,
-    resolve_explicit_environment, ProjectEnvIgnoredLine, VaultEnvironment,
+    load_project_env_bindings, load_project_vault_env, load_unlocked_env_secrets_for_child_env,
+    parse_project_vault_env_bindings_detailed, resolve_explicit_environment, ProjectEnvIgnoredLine,
+    VaultEnvironment,
 };
 pub(crate) use handlers::{
     build_vault_list_payload, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,

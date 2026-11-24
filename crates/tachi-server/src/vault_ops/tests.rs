@@ -16,6 +16,7 @@ use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
 
 mod listing_health;
+mod project_env_boundary;
 mod slot_binding_acl;
 mod slot_events;
 mod slot_materialization;
