@@ -209,12 +209,73 @@ pub(super) async fn sigterm() {
     }
 }
 
-/// Fields drop in declaration order. The runtime must finish shutting down all
-/// async workers and blocking tasks before the singleton ownership is released.
-/// Keeping the lock outside the root future also covers early errors and panic
-/// unwinding, including workers whose handles are owned by a nested scheduler.
+#[derive(Default)]
+pub(super) struct ShutdownWalCheckpointer {
+    db_paths: Vec<std::path::PathBuf>,
+    #[cfg(test)]
+    after_checkpoint: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ShutdownWalCheckpointer {
+    pub(super) fn arm(&mut self, paths: impl IntoIterator<Item = std::path::PathBuf>) {
+        self.db_paths.extend(paths);
+    }
+}
+
+impl Drop for ShutdownWalCheckpointer {
+    fn drop(&mut self) {
+        for db_path in &self.db_paths {
+            checkpoint_non_empty_wal_on_shutdown(db_path);
+        }
+        #[cfg(test)]
+        if let Some(after) = self.after_checkpoint.take() {
+            after();
+        }
+    }
+}
+
+fn checkpoint_non_empty_wal_on_shutdown(db_path: &std::path::Path) {
+    let resolved = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let mut wal_os = resolved.as_os_str().to_os_string();
+    wal_os.push("-wal");
+    let wal_path = std::path::PathBuf::from(wal_os);
+    if !std::fs::metadata(&wal_path).is_ok_and(|meta| meta.len() > 0) {
+        return;
+    }
+    let Some(path_str) = resolved.to_str() else {
+        eprintln!(
+            "[shutdown] WAL truncate checkpoint skipped for non-UTF-8 path {}",
+            resolved.display()
+        );
+        return;
+    };
+    let conn = match memcore::db::open_for_wal_checkpoint(path_str) {
+        Ok(conn) => conn,
+        Err(err) => {
+            eprintln!(
+                "[shutdown] WAL truncate checkpoint skipped for {}: {err}",
+                resolved.display()
+            );
+            return;
+        }
+    };
+    if let Err(err) = memcore::db::checkpoint_wal_truncate(&conn) {
+        eprintln!(
+            "[shutdown] WAL truncate checkpoint skipped for {}: {err}",
+            resolved.display()
+        );
+    }
+}
+
+/// Fields drop in declaration order: `runtime` drains all async and
+/// `spawn_blocking` workers first, `shutdown_checkpoint` truncates any
+/// leftover non-empty WAL once no internal handles remain, and `daemon_lock`
+/// releases singleton ownership last. Keeping the lock outside the root future
+/// also covers early errors and panic unwinding, including workers whose
+/// handles are owned by a nested scheduler.
 pub(super) struct StartupRuntime {
     pub(super) runtime: tokio::runtime::Runtime,
+    pub(super) shutdown_checkpoint: ShutdownWalCheckpointer,
     pub(super) daemon_lock: Option<crate::daemon_lock::DaemonLock>,
 }
 
@@ -224,6 +285,7 @@ impl StartupRuntime {
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?,
+            shutdown_checkpoint: ShutdownWalCheckpointer::default(),
             daemon_lock: None,
         })
     }
@@ -282,5 +344,172 @@ mod ownership_tests {
             Err(DaemonLockError::AlreadyRunning { .. })
         ));
         DaemonLock::acquire(&lock_path).expect("ownership releases after runtime teardown");
+    }
+
+    #[test]
+    fn startup_runtime_checkpoints_non_empty_wal_after_blocking_readers_drain_and_before_lock_release(
+    ) {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let real_dir = home.path().join("real");
+        let link_dir = home.path().join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&link_dir).unwrap();
+
+        let lock_path = home.path().join("daemon.lock");
+        let worker_lock_path = lock_path.clone();
+        let real_db = real_dir.join("tachi-memory.db");
+        let real_str = real_db.to_str().expect("real db utf8").to_string();
+        drop(memcore::MemoryStore::open_with_label(&real_str, "global").expect("seed real db"));
+        let canonical_real = std::fs::canonicalize(&real_db).expect("canonical real db");
+        let canonical_real_str = canonical_real.to_str().expect("canonical utf8").to_string();
+        let real_wal = std::path::PathBuf::from(format!("{}-wal", canonical_real.display()));
+
+        let link_db = link_dir.join("global.db");
+        std::os::unix::fs::symlink(&real_db, &link_db).expect("symlink global db");
+        let link_str = link_db.to_str().expect("link db utf8").to_string();
+        let link_wal = link_dir.join("global.db-wal");
+
+        let (reader_open_tx, reader_open_rx) = mpsc::channel();
+        let (release_reader_tx, release_reader_rx) = mpsc::channel();
+        let (runtime_dropping_tx, observe_runtime_drop) = mpsc::channel();
+        let after_checkpoint_verified = Arc::new(AtomicBool::new(false));
+        let after_checkpoint_flag = Arc::clone(&after_checkpoint_verified);
+
+        let check_wal = real_wal.clone();
+        let check_real_str = canonical_real_str.clone();
+        let check_lock_path = lock_path.clone();
+        let worker_link_str = link_str.clone();
+        let expected_canonical = canonical_real.clone();
+
+        let thread = std::thread::spawn(move || {
+            let mut owner = StartupRuntime::new().unwrap();
+            owner.daemon_lock = Some(DaemonLock::acquire(worker_lock_path).unwrap());
+
+            let blocking_link_str = worker_link_str.clone();
+            let entry_link_str = worker_link_str.clone();
+            let opened_path = owner.runtime.block_on(async move {
+                let mut writer = memcore::MemoryStore::open_with_label(&entry_link_str, "global")
+                    .expect("write store");
+                let opened = std::path::PathBuf::from(
+                    writer.connection().path().expect("opened sqlite path"),
+                );
+                assert_eq!(opened, expected_canonical);
+
+                tokio::task::spawn_blocking(move || {
+                    let _ro = memcore::MemoryStore::open_read_only(&blocking_link_str)
+                        .expect("blocking worker read store");
+                    let _ = reader_open_tx.send(());
+                    let _ = release_reader_rx.recv_timeout(Duration::from_secs(30));
+                });
+                reader_open_rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("blocking reader opened");
+
+                writer
+                    .upsert(&memcore::MemoryEntry {
+                        id: "shutdown-wal-drain".to_string(),
+                        path: "/notes/shutdown-wal-drain".to_string(),
+                        summary: "wal shutdown drain".to_string(),
+                        text: "wal shutdown drain".to_string(),
+                        importance: 0.5,
+                        timestamp: "2026-08-01T00:00:00Z".to_string(),
+                        valid_from: String::new(),
+                        valid_until: None,
+                        category: "fact".to_string(),
+                        topic: String::new(),
+                        keywords: Vec::new(),
+                        persons: Vec::new(),
+                        entities: Vec::new(),
+                        location: String::new(),
+                        source: "test".to_string(),
+                        scope: "general".to_string(),
+                        archived: false,
+                        access_count: 0,
+                        scored_count: 0,
+                        last_access: None,
+                        last_use_at: None,
+                        revision: 1,
+                        vector: None,
+                        retention_policy: None,
+                        domain: None,
+                        metadata: serde_json::json!({}),
+                        recall_count: 0,
+                        query_diversity: 0,
+                        tier: "raw".to_string(),
+                    })
+                    .expect("seed wal frame");
+                // Closing the write store while the blocking worker still
+                // holds `_ro` leaves a non-empty `-wal` beside the canonical DB.
+                drop(writer);
+
+                let (ready, started) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let _drop_notice = NotifyOnDrop(runtime_dropping_tx);
+                    let _ = ready.send(());
+                    std::future::pending::<()>().await;
+                });
+                started.await.unwrap();
+                opened
+            });
+
+            owner.shutdown_checkpoint.arm([opened_path]);
+            owner.shutdown_checkpoint.after_checkpoint = Some(Box::new(move || {
+                assert!(
+                    std::fs::metadata(&check_wal).map_or(true, |m| m.len() == 0),
+                    "canonical WAL must already be truncated after ShutdownWalCheckpointer runs"
+                );
+                memcore::MemoryStore::open_read_only_immutable(&check_real_str)
+                    .expect("immutable open must already succeed before daemon lock drops");
+                assert!(
+                    matches!(
+                        DaemonLock::acquire(&check_lock_path),
+                        Err(DaemonLockError::AlreadyRunning { .. })
+                    ),
+                    "daemon lock must still be held when WAL checkpoint finishes"
+                );
+                after_checkpoint_flag.store(true, Ordering::SeqCst);
+            }));
+            drop(owner);
+        });
+
+        observe_runtime_drop
+            .recv_timeout(Duration::from_secs(15))
+            .expect("runtime teardown must begin before blocking reader releases");
+        assert!(
+            std::fs::metadata(&real_wal).is_ok_and(|m| m.len() > 0),
+            "non-empty WAL must exist beside canonical target while blocking reader keeps runtime drop waiting"
+        );
+        assert!(
+            !link_wal.exists(),
+            "symlink directory must not hold the SQLite WAL sidecar"
+        );
+        assert!(
+            memcore::MemoryStore::open_read_only_immutable(&canonical_real_str).is_err(),
+            "immutable maintenance open against canonical target must still refuse non-empty WAL mid-drain"
+        );
+        assert!(matches!(
+            DaemonLock::acquire(&lock_path),
+            Err(DaemonLockError::AlreadyRunning { .. })
+        ));
+
+        let _ = release_reader_tx.send(());
+        thread.join().unwrap();
+
+        assert!(
+            after_checkpoint_verified.load(Ordering::SeqCst),
+            "after_checkpoint hook must have verified checkpoint-before-lock-release order"
+        );
+        assert!(
+            std::fs::metadata(&real_wal).map_or(true, |m| m.len() == 0),
+            "WAL must stay absent or truncated to 0 bytes after lock release"
+        );
+        memcore::MemoryStore::open_read_only_immutable(&link_str)
+            .expect("immutable maintenance plan open must succeed after shutdown");
+        DaemonLock::acquire(&lock_path).expect("daemon lock releases after WAL checkpoint");
     }
 }

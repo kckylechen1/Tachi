@@ -710,8 +710,11 @@ struct AttachPauseHook {
 
 #[derive(Clone)]
 pub struct DbRuntime {
-    pub global_store: Arc<StdMutex<MemoryStore>>,
+    // Declare the read pool BEFORE `global_store` so Rust's declaration-order
+    // drop closes read-only connections first, allowing SQLite's close-time WAL
+    // checkpoint on the write connection to truncate `-wal` without contention.
     pub global_read_pool: ReadStorePool,
+    pub global_store: Arc<StdMutex<MemoryStore>>,
     pub global_rw_gate: Arc<StdRwLock<()>>,
     /// Lazily initialized only by an explicit measurement caller (#1255).
     /// The normal path performs a single `OnceLock::get` and takes no timer.
@@ -2125,8 +2128,10 @@ impl Drop for WriteHoldWarnGuard<'_> {
 
 #[derive(Clone)]
 pub struct ProjectDbState {
-    pub store: Arc<StdMutex<MemoryStore>>,
+    // Declare `read_pool` BEFORE `store` so Rust's declaration-order drop
+    // closes read-only pool connections before the write handle truncates WAL.
     pub read_pool: ReadStorePool,
+    pub store: Arc<StdMutex<MemoryStore>>,
     pub rw_gate: Arc<StdRwLock<()>>,
     pub db_path: Arc<PathBuf>,
     /// issue #1588 R1: this state's canonical project-DB cache key
@@ -5120,6 +5125,66 @@ mod tests {
         other_runtime
             .with_path_store_with_label(&unstamped_db, "anything", |_| Ok(()))
             .expect("an unstamped bound store must keep accepting a declared claim");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn dropping_db_runtime_closes_read_pool_before_write_store_and_truncates_wal() {
+        let temp = unique_temp_dir("drop-truncates-wal");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "project-wal");
+
+        let runtime = test_runtime(global_db.clone());
+        assert!(runtime
+            .activate_project_db(project_db.clone())
+            .expect("bind project db"));
+
+        let global_entry = test_memory_entry("drop-wal-global");
+        runtime
+            .with_global_store(|store| store.upsert(&global_entry).map_err(|e| e.to_string()))
+            .expect("write global wal row");
+        assert!(runtime
+            .with_global_store_read(|store| store
+                .get(&global_entry.id)
+                .map(|row| row.is_some())
+                .map_err(|e| e.to_string()))
+            .expect("read global pool"));
+
+        let project_entry = test_memory_entry("drop-wal-project");
+        runtime
+            .with_project_store(|store| store.upsert(&project_entry).map_err(|e| e.to_string()))
+            .expect("write project wal row");
+        assert!(runtime
+            .with_project_store_read(|store| store
+                .get(&project_entry.id)
+                .map(|row| row.is_some())
+                .map_err(|e| e.to_string()))
+            .expect("read project pool"));
+
+        for db in [&global_db, &project_db] {
+            let wal = PathBuf::from(format!("{}-wal", db.display()));
+            assert!(
+                std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0),
+                "WAL at {} must contain uncommitted frames before runtime drop",
+                wal.display()
+            );
+        }
+
+        drop(runtime);
+
+        for db in [&global_db, &project_db] {
+            let wal = PathBuf::from(format!("{}-wal", db.display()));
+            assert!(
+                std::fs::metadata(&wal).map_or(true, |m| m.len() == 0),
+                "WAL at {} must be absent or 0 bytes after runtime drop",
+                wal.display()
+            );
+            MemoryStore::open_read_only_immutable(db.to_str().expect("db utf8"))
+                .expect("immutable open must succeed after runtime drop");
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }
