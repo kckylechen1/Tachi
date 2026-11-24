@@ -34,6 +34,9 @@ fn command_from_launch(spec: LaunchCommand) -> Command {
         cmd.current_dir(cwd);
     }
     bind_opencode_working_directory(&mut cmd);
+    // The daemon's marker describes this process, not the worker. Its provider
+    // keys stay inherited: the Vault child-env contract gives them precedence.
+    memcore::child_env::withhold_process_marker(cmd.as_std_mut());
     cmd
 }
 
@@ -328,6 +331,59 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect()
+    }
+
+    fn removed_names(command: &Command) -> Vec<String> {
+        let mut names: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    // A worker that inherited the marker would act as the daemon and stop
+    // forwarding its own writes. The provider keys the daemon was started
+    // with stay inherited, as the Vault child-env contract requires.
+    #[test]
+    fn workers_inherit_ambient_credentials_but_never_the_daemon_marker() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ambient_key = crate::test_support::EnvRestore::set(
+            "TACHI_LAUNCH_TEST_WORKER_API_KEY",
+            "ambient-copy",
+        );
+        let (assignment, grant) = owners("codex", None, None, None, &[], None, None);
+        let command = build_codex_command(&assignment, &grant, &[], "task").expect("codex command");
+
+        let removed = removed_names(&command);
+        assert_eq!(removed, vec!["TACHI_DAEMON".to_string()]);
+    }
+
+    #[test]
+    fn a_credential_set_for_the_worker_is_not_withheld() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ambient_key = crate::test_support::EnvRestore::set(
+            "TACHI_LAUNCH_TEST_WORKER_API_KEY",
+            "ambient-copy",
+        );
+        let mut launch =
+            build_codex_launch(&DispatchLaunchParams::default(), "task").expect("codex command");
+        launch.env_vars.insert(
+            "TACHI_LAUNCH_TEST_WORKER_API_KEY".into(),
+            "vault-copy".into(),
+        );
+        let command = command_from_launch(launch);
+        assert!(command.as_std().get_envs().any(|(key, value)| {
+            key == "TACHI_LAUNCH_TEST_WORKER_API_KEY"
+                && value == Some(std::ffi::OsStr::new("vault-copy"))
+        }));
     }
 
     #[test]

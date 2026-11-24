@@ -45,6 +45,7 @@ fn build_subprocess_command_from_launch_spec(
         command.env(key, value);
     }
     crate::dispatch_ops::launcher::bind_opencode_working_directory(&mut command);
+    memcore::child_env::withhold_process_marker(command.as_std_mut());
     Ok(command)
 }
 
@@ -319,6 +320,26 @@ pub(super) fn finalize_dispatch_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subprocess_launch_spec_does_not_hand_the_worker_the_daemon_marker() {
+        let spec = tachi_params::LaunchSpec {
+            backend: "custom".to_string(),
+            command: vec!["/bin/echo".to_string()],
+            cwd: None,
+            env_vars: std::collections::HashMap::new(),
+            prompt: String::new(),
+            timeout_secs: 5,
+            harness_transport: None,
+            harness_server_url: None,
+        };
+        let command =
+            build_subprocess_command_from_launch_spec(&spec, "custom").expect("custom launch");
+        assert!(command
+            .as_std()
+            .get_envs()
+            .any(|(name, value)| name == "TACHI_DAEMON" && value.is_none()));
+    }
 
     fn assignment(
         worker: &str,

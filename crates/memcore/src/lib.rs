@@ -51,6 +51,7 @@ pub mod agent_profile;
 #[doc(hidden)]
 pub mod anchored_fs;
 pub mod canonical_digest;
+pub mod child_env;
 pub mod typed_records;
 pub use typed_records::{
     RecordKind, RecordKindId, RecordRegistry, RecordWriter, TypedRecord, TypedRecordInput,

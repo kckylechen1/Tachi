@@ -133,6 +133,8 @@ fn native_command(
         for (key, value) in &spec.env {
             command.env(key, value);
         }
+        // An unmanaged adapter still runs with this process's environment.
+        memcore::child_env::withhold_process_marker(command.as_std_mut());
         command
     };
     if spec.cwd_authority.is_none() {
@@ -1439,6 +1441,46 @@ mod auth_snapshot_tests {
         assert_eq!(
             exported,
             serde_json::json!({"deepseek": {"type": "api", "key": "k-ds"}})
+        );
+    }
+}
+
+#[cfg(test)]
+mod inherited_env_tests {
+    use super::*;
+
+    // An unmanaged adapter runs with this process's environment, but the daemon
+    // marker describes the daemon: an adapter that inherited it would stop
+    // forwarding its own writes to the daemon.
+    #[test]
+    fn unmanaged_native_adapter_does_not_inherit_the_daemon_marker() {
+        let spec = NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
+            approval: None,
+            mcp_servers: Vec::new(),
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            cwd_authority: None,
+            prompt: String::new(),
+            mode: super::super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".into(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: serde_json::json!({}),
+            env: std::collections::HashMap::new(),
+            env_remove: std::collections::HashSet::new(),
+        };
+        let (command, _cleanup) =
+            native_command(&spec, &std::env::temp_dir()).expect("unmanaged command");
+        assert!(
+            command
+                .as_std()
+                .get_envs()
+                .any(|(name, value)| name == "TACHI_DAEMON" && value.is_none()),
+            "the daemon marker must be explicitly withheld"
         );
     }
 }
