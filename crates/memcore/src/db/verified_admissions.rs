@@ -485,6 +485,34 @@ pub fn has_current_verified_admission(
     trust_domain: &str,
     verification_scope: &str,
 ) -> Result<bool, MemoryError> {
+    has_current_verified_admission_at(
+        conn,
+        admission_id,
+        agent_identity_id,
+        connection_id,
+        issuer_id,
+        verification_method,
+        verification_version,
+        trust_domain,
+        verification_scope,
+        jiff::Timestamp::now(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "admin", test))]
+fn has_current_verified_admission_at(
+    conn: &Connection,
+    admission_id: &str,
+    agent_identity_id: &str,
+    connection_id: &str,
+    issuer_id: &str,
+    verification_method: &str,
+    verification_version: &str,
+    trust_domain: &str,
+    verification_scope: &str,
+    now: jiff::Timestamp,
+) -> Result<bool, MemoryError> {
     if !is_supported_verified_admission_policy(
         verification_method,
         verification_version,
@@ -492,9 +520,9 @@ pub fn has_current_verified_admission(
     ) {
         return Ok(false);
     }
-    let evidence_ref: Option<String> = conn
+    let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT r.evidence_ref
+            "SELECT r.evidence_ref, r.evidence_issued_at, r.evidence_expires_at
              FROM identity_admission_verification_receipts r
              JOIN identity_admissions a ON a.admission_id = r.admission_id
              WHERE r.admission_id=?1 AND r.agent_identity_id=?2 AND r.connection_id=?3
@@ -503,8 +531,6 @@ pub fn has_current_verified_admission(
                AND r.verification_scope=?8 AND r.current_state='verified'
                AND a.agent_identity_id=r.agent_identity_id
                AND a.connection_id=r.connection_id AND a.state='verified'
-               AND julianday(r.evidence_issued_at) <= julianday('now')
-               AND julianday(r.evidence_expires_at) > julianday('now')
                AND NOT EXISTS (
                    SELECT 1 FROM identity_admission_verification_revocations v
                    WHERE v.admission_id=r.admission_id
@@ -519,12 +545,21 @@ pub fn has_current_verified_admission(
                 trust_domain,
                 verification_scope,
             ],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some(evidence_ref) = evidence_ref else {
+    let Some((evidence_ref, evidence_issued_at, evidence_expires_at)) = row else {
         return Ok(false);
     };
+    let (Some(issued_at), Some(expires_at)) = (
+        crate::time_compat::parse_rfc3339_strict(&evidence_issued_at),
+        crate::time_compat::parse_rfc3339_strict(&evidence_expires_at),
+    ) else {
+        return Ok(false);
+    };
+    if issued_at > now || expires_at <= now {
+        return Ok(false);
+    }
     if verification_method == VERIFIED_ADMISSION_MTLS_METHOD {
         return Ok(!verified_mtls_key_is_revoked(
             conn,
@@ -1304,6 +1339,120 @@ mod tests {
             assert!(
                 error.to_string().contains("non-canonical conflict policy"),
                 "{policy}: {error}"
+            );
+        }
+    }
+
+    fn insert_receipt_window(
+        conn: &Connection,
+        suffix: &str,
+        issued_at: &str,
+        expires_at: &str,
+    ) -> (String, String, String) {
+        let (admission, identity, connection) = insert_admission(conn, suffix);
+        conn.execute(
+            "INSERT INTO identity_admission_verification_receipts
+             (receipt_id, admission_id, agent_identity_id, connection_id, issuer_id,
+              verification_method, verification_version, trust_domain, verification_scope,
+              evidence_digest, evidence_ref, evidence_issued_at, evidence_expires_at, nonce,
+              idempotency_key, request_digest, current_state, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     'verified', ?12)",
+            params![
+                format!("receipt-{suffix}"),
+                admission,
+                identity,
+                connection,
+                format!("issuer-{suffix}"),
+                VERIFIED_ADMISSION_METHOD,
+                VERIFIED_ADMISSION_VERSION,
+                format!("workspace:{suffix}"),
+                VERIFIED_ADMISSION_SCOPE,
+                "a".repeat(64),
+                format!("attestation:device:{suffix}"),
+                issued_at,
+                expires_at,
+                format!("nonce-{suffix}"),
+                format!("key-{suffix}"),
+                "b".repeat(64),
+            ],
+        )
+        .unwrap();
+        (admission, identity, connection)
+    }
+
+    #[test]
+    fn current_verified_admission_accepts_fresh_submillisecond_receipts() {
+        let conn = open_conn();
+        let fifteen_mins = jiff::SignedDuration::from_mins(15);
+        for i in 0..50 {
+            let now = jiff::Timestamp::now();
+            let issued_at = crate::time_compat::rfc3339_compat(now);
+            let expires_at = crate::time_compat::rfc3339_compat(now + fifteen_mins);
+            let suffix = format!("subms-{i}");
+            let (admission, identity, connection) =
+                insert_receipt_window(&conn, &suffix, &issued_at, &expires_at);
+            assert!(
+                has_current_verified_admission(
+                    &conn,
+                    &admission,
+                    &identity,
+                    &connection,
+                    &format!("issuer-{suffix}"),
+                    VERIFIED_ADMISSION_METHOD,
+                    VERIFIED_ADMISSION_VERSION,
+                    &format!("workspace:{suffix}"),
+                    VERIFIED_ADMISSION_SCOPE,
+                )
+                .unwrap(),
+                "fresh receipt rejected at iteration {i}: issued_at={issued_at}"
+            );
+        }
+
+        let fixed_now: jiff::Timestamp = "2026-11-24T02:25:35.624612123+00:00".parse().unwrap();
+        let one_ns = jiff::SignedDuration::from_nanos(1);
+        let one_min = jiff::SignedDuration::from_mins(1);
+        let now_str = crate::time_compat::rfc3339_compat(fixed_now);
+        let past_str = crate::time_compat::rfc3339_compat(fixed_now - one_min);
+        let plus_one_ns = crate::time_compat::rfc3339_compat(fixed_now + one_ns);
+        let future_str = crate::time_compat::rfc3339_compat(fixed_now + fifteen_mins);
+
+        for (suffix, issued_at, expires_at, expected) in [
+            ("exact-now", now_str.as_str(), future_str.as_str(), true),
+            (
+                "future-1ns",
+                plus_one_ns.as_str(),
+                future_str.as_str(),
+                false,
+            ),
+            ("expired-now", past_str.as_str(), now_str.as_str(), false),
+            ("valid-1ns", past_str.as_str(), plus_one_ns.as_str(), true),
+            (
+                "bad-space",
+                "2026-11-24 02:25:35.624Z",
+                future_str.as_str(),
+                false,
+            ),
+            ("bad-expires", past_str.as_str(), "not-a-timestamp", false),
+        ] {
+            let (admission, identity, connection) =
+                insert_receipt_window(&conn, suffix, issued_at, expires_at);
+            assert_eq!(
+                has_current_verified_admission_at(
+                    &conn,
+                    &admission,
+                    &identity,
+                    &connection,
+                    &format!("issuer-{suffix}"),
+                    VERIFIED_ADMISSION_METHOD,
+                    VERIFIED_ADMISSION_VERSION,
+                    &format!("workspace:{suffix}"),
+                    VERIFIED_ADMISSION_SCOPE,
+                    fixed_now,
+                )
+                .unwrap(),
+                expected,
+                "case {suffix}: issued_at={issued_at}, expires_at={expires_at}"
             );
         }
     }
