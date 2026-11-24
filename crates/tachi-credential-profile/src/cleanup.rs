@@ -1,11 +1,55 @@
 use super::managed::{
-    managed_target_current_hash, mark_metadata_cleaned, ManagedCredentialMaterialization,
+    managed_materialization_content_hash, mark_metadata_cleaned, ManagedCredentialMaterialization,
 };
 use super::types::{CredentialCleanupOptions, CredentialCleanupReport};
 use super::CREDENTIAL_MATERIALIZATION_NAMESPACE;
+#[cfg(unix)]
+use memcore::anchored_fs::AnchoredDirectory;
 use memcore::MemoryStore;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(not(unix))]
+mod fallback;
+#[cfg(unix)]
+mod unix;
+#[cfg(not(unix))]
+use fallback as target_fs;
+#[cfg(unix)]
+use unix as target_fs;
+
+/// An opened parent directory on Unix; the parent's path elsewhere.
+#[cfg(unix)]
+type TargetParent = AnchoredDirectory;
+#[cfg(not(unix))]
+type TargetParent = PathBuf;
+
+/// A regular file the cleanup may remove, held through its parent so removal
+/// never re-resolves the mutable pathname.
+struct RemovableTarget {
+    parent: TargetParent,
+    leaf: OsString,
+}
+
+/// What the cleanup found at a managed target.
+enum TargetLocation {
+    /// Nothing holds the target name.
+    Missing,
+    /// A regular file reached without following a symlink that holds it.
+    Removable(RemovableTarget),
+    /// Something the cleanup must not traverse or remove; the reason names it.
+    Unremovable(String),
+}
+
+enum Removal {
+    Removed,
+    /// The entry disappeared while the cleanup held it.
+    Vanished,
+    /// The captured bytes are no longer the managed content; the file was
+    /// restored under its own name.
+    ForeignContent,
+}
 
 pub fn cleanup_ephemeral_credential_materializations(
     store: &MemoryStore,
@@ -107,21 +151,53 @@ pub fn cleanup_managed_credential_materializations(
             report.skipped.push(metadata.target);
             continue;
         }
-        let target = PathBuf::from(&metadata.target);
-        if !target.exists() {
-            if !options.dry_run {
-                mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
+        // Every target is located through its parent directory, never by a
+        // pathname a worker could repoint between the check and the removal.
+        let removable = match target_fs::locate(&metadata, options.run_dir.as_deref()) {
+            TargetLocation::Missing => {
+                if !options.dry_run {
+                    mark_metadata_cleaned(
+                        store,
+                        &row.key,
+                        &mut metadata,
+                        options.run_dir.as_deref(),
+                    )?;
+                }
+                report.missing.push(metadata.target.clone());
+                continue;
             }
-            report.missing.push(target.to_string_lossy().to_string());
-            continue;
-        }
+            // Marking only rewrites metadata, so an entry the cleanup refuses to
+            // remove can still be marked after review.
+            TargetLocation::Unremovable(_) if options.mark_only => {
+                if options.dry_run {
+                    report.would_mark.push(metadata.target.clone());
+                } else {
+                    mark_metadata_cleaned(
+                        store,
+                        &row.key,
+                        &mut metadata,
+                        options.run_dir.as_deref(),
+                    )?;
+                    report.marked.push(metadata.target.clone());
+                }
+                continue;
+            }
+            TargetLocation::Unremovable(reason) => {
+                report.errors.push(format!(
+                    "refusing to remove credential target '{}': {reason}",
+                    metadata.target
+                ));
+                continue;
+            }
+            TargetLocation::Removable(removable) => removable,
+        };
         if options.mark_only {
             if options.dry_run {
-                report.would_mark.push(target.to_string_lossy().to_string());
+                report.would_mark.push(metadata.target.clone());
                 continue;
             }
             mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
-            report.marked.push(target.to_string_lossy().to_string());
+            report.marked.push(metadata.target.clone());
             continue;
         }
         if metadata.materializer_type == "config_patch" && options.run_dir.is_none() {
@@ -132,42 +208,37 @@ pub fn cleanup_managed_credential_materializations(
             continue;
         }
         if options.dry_run {
-            report
-                .would_remove
-                .push(target.to_string_lossy().to_string());
+            report.would_remove.push(metadata.target.clone());
             continue;
         }
-        if target.is_dir() {
-            report.errors.push(format!(
-                "refusing to remove credential target directory '{}'",
-                target.display()
-            ));
-            continue;
-        }
-        if options.run_dir.is_none() {
-            match managed_target_current_hash(&metadata, &target) {
-                Ok(current_hash) if current_hash == metadata.content_hash => {}
-                Ok(_) => {
-                    report.skipped.push(format!(
-                        "{} (hash mismatch; use --mark-only after review)",
-                        metadata.target
-                    ));
-                    continue;
-                }
-                Err(err) => {
-                    report.errors.push(err);
-                    continue;
-                }
-            }
-        }
-        match fs::remove_file(&target) {
-            Ok(()) => {
+        // Run-scoped cleanup owns everything under the run directory; manual
+        // cleanup removes only the bytes it materialized.
+        let require_managed_content = options.run_dir.is_none().then_some(|captured: &[u8]| {
+            std::str::from_utf8(captured).is_ok_and(|content| {
+                managed_materialization_content_hash(
+                    &metadata.profile,
+                    &metadata.consumer,
+                    &metadata.target,
+                    content,
+                ) == metadata.content_hash
+            })
+        });
+        match target_fs::remove(&removable, require_managed_content.as_ref()) {
+            Ok(Removal::Removed) => {
                 mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
-                report.removed.push(target.to_string_lossy().to_string());
+                report.removed.push(metadata.target.clone());
             }
+            Ok(Removal::Vanished) => {
+                mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
+                report.missing.push(metadata.target.clone());
+            }
+            Ok(Removal::ForeignContent) => report.skipped.push(format!(
+                "{} (hash mismatch; use --mark-only after review)",
+                metadata.target
+            )),
             Err(err) => report.errors.push(format!(
                 "remove credential target '{}': {err}",
-                target.display()
+                metadata.target
             )),
         }
     }
