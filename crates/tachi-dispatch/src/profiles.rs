@@ -553,11 +553,18 @@ pub fn profile_resolved_model(profile: &DispatchProfileDef) -> Option<String> {
         .or_else(|| profile.model.map(str::to_string))
 }
 
+/// Whether the staff seat configuration, and not the profile alone, decides
+/// which model this seat runs: true for OpenCode native seats, the only ones
+/// `staff.json` may configure.
+pub fn seat_model_comes_from_staff_config(profile: &DispatchProfileDef) -> bool {
+    profile.backend == "opencode" && profile.native_session.is_some()
+}
+
 pub fn resolved_profile_model_with_config(
     profile: &DispatchProfileDef,
     staff_config: &crate::StaffConfig,
 ) -> Option<String> {
-    if profile.backend == "opencode" && profile.native_session.is_some() {
+    if seat_model_comes_from_staff_config(profile) {
         staff_config
             .seat_default_model(profile.name)
             .map(str::to_string)
@@ -605,7 +612,35 @@ pub fn profile_matches_agent(profile: &DispatchProfileDef, agent: &str) -> bool 
 pub fn recommendation_identity_receipt(
     profile: &DispatchProfileDef,
 ) -> crate::DispatchIdentityReceipt {
-    let model = profile_resolved_model(profile);
+    planned_recommendation_receipt(
+        profile,
+        profile_resolved_model(profile),
+        STATIC_RECOMMENDATION,
+    )
+}
+
+/// The same receipt for the model that is in effect for the seat. The staff
+/// seat configuration may have replaced the built-in model; the receipt then
+/// describes that model, as `recommended_model` in the same response does.
+pub fn recommendation_identity_receipt_with_model(
+    profile: &DispatchProfileDef,
+    model: Option<String>,
+) -> crate::DispatchIdentityReceipt {
+    let source = if model.as_deref() == profile_resolved_model(profile).as_deref() {
+        STATIC_RECOMMENDATION
+    } else {
+        "recommendation resolved from dispatch profile and staff seat configuration"
+    };
+    planned_recommendation_receipt(profile, model, source)
+}
+
+const STATIC_RECOMMENDATION: &str = "recommendation resolved from static dispatch profile";
+
+fn planned_recommendation_receipt(
+    profile: &DispatchProfileDef,
+    model: Option<String>,
+    source: &str,
+) -> crate::DispatchIdentityReceipt {
     let (concrete_model_release, provider_model, provider_model_version) =
         crate::provider_model_parts(model.as_deref());
     let harness = profile_host_adapter(profile)
@@ -623,7 +658,7 @@ pub fn recommendation_identity_receipt(
             model: model.clone(),
             backend: profile.backend.to_string(),
             harness,
-            model_lineage_id: profile_model_lineage_id(profile),
+            model_lineage_id: crate::model_lineage_id(model.as_deref(), profile.backend),
             concrete_model_release,
             provider_model,
             provider_model_version,
@@ -633,7 +668,7 @@ pub fn recommendation_identity_receipt(
             adapter_version: crate::UNKNOWN_IDENTITY.to_string(),
             carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
         },
-        "recommendation resolved from static dispatch profile".to_string(),
+        source.to_string(),
         profile.allow_cross_lineage_override,
     )
 }
