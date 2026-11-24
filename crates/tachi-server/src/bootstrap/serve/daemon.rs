@@ -116,39 +116,49 @@ pub(super) async fn serve_http_daemon(
         scheduler
     };
 
+    use tokio_util::sync::CancellationToken;
+
+    let ct = CancellationToken::new();
+
     if manifest_background {
         let daily_server = server.clone();
-        tokio::spawn(async move {
-            loop {
-                let next_run = crate::daily_pipeline::next_daily_run_time();
-                tokio::time::sleep_until(next_run).await;
-                let app_home = daily_server.tachi_home_dir();
-                let global_db_path = daily_server.global_db_path_buf();
-                if let Err(e) = crate::status_ops::status_health::refresh_provider_probe_cache(
-                    &app_home,
-                    &global_db_path,
-                )
-                .await
-                {
-                    eprintln!("[daily_pipeline] provider key probe cache refresh skipped: {e}");
-                }
-                match crate::daily_pipeline::run_daily_pipeline(&daily_server).await {
-                    Ok(report) => {
-                        eprintln!("[daily-pipeline] completed: {}", report.summary())
+        spawn_background_loop(
+            "daily_pipeline",
+            ct.clone(),
+            LOOP_RESTART_PAUSE,
+            move || {
+                let daily_server = daily_server.clone();
+                Box::pin(async move {
+                    loop {
+                        let next_run = crate::daily_pipeline::next_daily_run_time();
+                        tokio::time::sleep_until(next_run).await;
+                        let app_home = daily_server.tachi_home_dir();
+                        let global_db_path = daily_server.global_db_path_buf();
+                        if let Err(e) =
+                            crate::status_ops::status_health::refresh_provider_probe_cache(
+                                &app_home,
+                                &global_db_path,
+                            )
+                            .await
+                        {
+                            eprintln!(
+                                "[daily_pipeline] provider key probe cache refresh skipped: {e}"
+                            );
+                        }
+                        match crate::daily_pipeline::run_daily_pipeline(&daily_server).await {
+                            Ok(report) => {
+                                eprintln!("[daily-pipeline] completed: {}", report.summary())
+                            }
+                            Err(e) => eprintln!("[daily-pipeline] failed: {e}"),
+                        }
                     }
-                    Err(e) => eprintln!("[daily-pipeline] failed: {e}"),
-                }
-            }
-        });
+                })
+            },
+        );
         eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
     } else {
         eprintln!("[daemon] daily pipeline disabled for scoped daemon");
     }
-
-    use tokio_util::sync::CancellationToken;
-
-    let ct = CancellationToken::new();
-    let ct_shutdown = ct.clone();
 
     // Discovery pid path + its owner-scoped RAII cleanup guard, computed/armed
     // only after the scoped daemon lock above was acquired, but BEFORE the
@@ -193,22 +203,26 @@ pub(super) async fn serve_http_daemon(
         let clock = server.activity_clock();
         let ct_idle = ct.clone();
         let tick = std::time::Duration::from_secs(idle_timeout.as_secs().clamp(5, 60));
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tick).await;
-                let last = clock.load(std::sync::atomic::Ordering::Relaxed);
-                let idle_ms =
-                    jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) - i128::from(last);
-                if idle_ms >= idle_timeout.as_millis() as i128 {
-                    eprintln!(
+        spawn_background_loop("idle_reaper", ct.clone(), LOOP_RESTART_PAUSE, move || {
+            let ct_idle = ct_idle.clone();
+            let clock = clock.clone();
+            Box::pin(async move {
+                loop {
+                    tokio::time::sleep(tick).await;
+                    let last = clock.load(std::sync::atomic::Ordering::Relaxed);
+                    let idle_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000)
+                        - i128::from(last);
+                    if idle_ms >= idle_timeout.as_millis() as i128 {
+                        eprintln!(
                         "[idle-reaper] daemon idle {}s (limit {}s); shutting down; a supervisor or operator must restart it for native HTTP clients",
                         idle_ms / 1000,
                         idle_timeout.as_secs()
                     );
-                    ct_idle.cancel();
-                    break;
+                        ct_idle.cancel();
+                        break;
+                    }
                 }
-            }
+            })
         });
     }
 
@@ -245,79 +259,89 @@ pub(super) async fn serve_http_daemon(
         let health_url = format!("http://{bind_addr}/health/live");
         let grace = daemon_watchdog_grace();
         let pid_path_watchdog = pid_path.clone();
-        tokio::spawn(async move {
-            // reqwest is built with `rustls-no-provider`; install the crypto
-            // provider before building any client or `.build()` panics (even
-            // for loopback http, the builder resolves the provider eagerly).
-            crate::ensure_tls_provider();
-            let client = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!(
+        spawn_background_loop(
+            "liveness_watchdog",
+            ct.clone(),
+            LOOP_RESTART_PAUSE,
+            move || {
+                let health_url = health_url.clone();
+                let pid_path_watchdog = pid_path_watchdog.clone();
+                let ct_watchdog = ct_watchdog.clone();
+                Box::pin(async move {
+                    // reqwest is built with `rustls-no-provider`; install the crypto
+                    // provider before building any client or `.build()` panics (even
+                    // for loopback http, the builder resolves the provider eagerly).
+                    crate::ensure_tls_provider();
+                    let client = match reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
                         "[watchdog] failed to build probe client: {e}; liveness watchdog disabled"
                     );
-                    return;
-                }
-            };
-            eprintln!(
+                            return;
+                        }
+                    };
+                    eprintln!(
                 "[watchdog] liveness watchdog armed: probing {health_url} every {}s, exit after {watchdog_fails} consecutive failures (grace {}s)",
                 watchdog_interval.as_secs(),
                 grace.as_secs()
             );
-            let mut counter = WatchdogCounter::new(watchdog_fails);
-            let started = std::time::Instant::now();
-            loop {
-                tokio::select! {
-                    _ = ct_watchdog.cancelled() => break,
-                    _ = tokio::time::sleep(watchdog_interval) => {}
-                }
-                let probe = match client.get(&health_url).send().await {
-                    Ok(resp) if resp.status().is_success() => Probe::Healthy,
-                    Ok(resp) => {
-                        // Answered, but non-2xx (e.g. a 503 while the DB is
-                        // degraded). The surface is ALIVE — it accepted the TCP
-                        // connection and produced an HTTP response — so this does
-                        // NOT count toward the liveness exit. Killing an
-                        // alive-but-degraded daemon only makes recovery harder.
-                        eprintln!(
+                    let mut counter = WatchdogCounter::new(watchdog_fails);
+                    let started = std::time::Instant::now();
+                    loop {
+                        tokio::select! {
+                            _ = ct_watchdog.cancelled() => break,
+                            _ = tokio::time::sleep(watchdog_interval) => {}
+                        }
+                        let probe = match client.get(&health_url).send().await {
+                            Ok(resp) if resp.status().is_success() => Probe::Healthy,
+                            Ok(resp) => {
+                                // Answered, but non-2xx (e.g. a 503 while the DB is
+                                // degraded). The surface is ALIVE — it accepted the TCP
+                                // connection and produced an HTTP response — so this does
+                                // NOT count toward the liveness exit. Killing an
+                                // alive-but-degraded daemon only makes recovery harder.
+                                eprintln!(
                             "[watchdog] /health/live answered {} — surface alive but degraded; not counting toward liveness exit",
                             resp.status()
                         );
-                        Probe::Degraded
-                    }
-                    Err(e) => {
-                        // No HTTP response at all: connection refused, timeout, or
-                        // a transport error — the surface is presumed dead.
-                        eprintln!(
+                                Probe::Degraded
+                            }
+                            Err(e) => {
+                                // No HTTP response at all: connection refused, timeout, or
+                                // a transport error — the surface is presumed dead.
+                                eprintln!(
                             "[watchdog] /health/live probe transport failure (no response): {e}"
                         );
-                        Probe::Unreachable
-                    }
-                };
-                let grace_elapsed = started.elapsed() >= grace;
-                match counter.record(probe, grace_elapsed) {
-                    WatchdogVerdict::Continue => {}
-                    WatchdogVerdict::Exit(code) => {
-                        // Re-check cancellation: a shutdown racing an in-flight
-                        // failing probe must not be mistaken for a wedge.
-                        if ct_watchdog.is_cancelled() {
-                            break;
-                        }
-                        eprintln!(
+                                Probe::Unreachable
+                            }
+                        };
+                        let grace_elapsed = started.elapsed() >= grace;
+                        match counter.record(probe, grace_elapsed) {
+                            WatchdogVerdict::Continue => {}
+                            WatchdogVerdict::Exit(code) => {
+                                // Re-check cancellation: a shutdown racing an in-flight
+                                // failing probe must not be mistaken for a wedge.
+                                if ct_watchdog.is_cancelled() {
+                                    break;
+                                }
+                                eprintln!(
                             "[fatal] [watchdog] /health/live unreachable (no HTTP response) {watchdog_fails} consecutive time(s); HTTP surface presumed dead — exiting {code} so launchd (KeepAlive) respawns a serving daemon"
                         );
-                        // Drop the discovery pid file before exiting, same as the
-                        // fail-loud serve path, so a respawning daemon or CLI
-                        // client never forwards a write to this dead pid.
-                        let _ = tokio::fs::remove_file(&pid_path_watchdog).await;
-                        std::process::exit(code);
+                                // Drop the discovery pid file before exiting, same as the
+                                // fail-loud serve path, so a respawning daemon or CLI
+                                // client never forwards a write to this dead pid.
+                                let _ = tokio::fs::remove_file(&pid_path_watchdog).await;
+                                std::process::exit(code);
+                            }
+                        }
                     }
-                }
-            }
-        });
+                })
+            },
+        );
     }
 
     let router = daemon_http_router(server, ct.clone());
@@ -365,18 +389,23 @@ pub(super) async fn serve_http_daemon(
     }
     let pid_path_cleanup = pid_path.clone();
 
-    tokio::select! {
-        result = axum::serve(listener, router)
-            .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await }) => {
+    let signal = async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = sigterm() => "SIGTERM",
+        }
+    };
+    match serve_until_shutdown(listener, router, ct.clone(), SHUTDOWN_DRAIN_TIMEOUT, signal).await {
+        Served::ByItself(result) => {
             // FAIL-LOUD serve contract (#936): the HTTP serve future must only
-            // resolve because we asked it to (SIGINT/SIGTERM/idle-reaper cancels
-            // `ct`, which `ct_shutdown` clones). Any *self-initiated* completion
-            // — accept loop ending on its own (`Ok`) or an `axum::serve` error
-            // (`Err`) — means the MCP/HTTP surface is dead while the process is
-            // otherwise alive. Before this fix both were swallowed and the fn
-            // returned `Ok(())` unconditionally, so the process kept running
-            // deaf and launchd saw `state=running`. Now we exit non-zero so
-            // `KeepAlive` respawns a daemon that can actually serve.
+            // resolve because we asked it to (the idle-reaper cancels `ct`). Any
+            // *self-initiated* completion — accept loop ending on its own (`Ok`)
+            // or an `axum::serve` error (`Err`) — means the MCP/HTTP surface is
+            // dead while the process is otherwise alive. Before this fix both
+            // were swallowed and the fn returned `Ok(())` unconditionally, so
+            // the process kept running deaf and launchd saw `state=running`.
+            // Now we exit non-zero so `KeepAlive` respawns a daemon that can
+            // actually serve.
             match serve_exit_decision(&result, ct.is_cancelled()) {
                 ExitDecision::Clean => {
                     eprintln!("[daemon] HTTP serve future completed after a shutdown signal");
@@ -388,13 +417,15 @@ pub(super) async fn serve_http_daemon(
                 }
             }
         }
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("Received SIGINT, shutting down gracefully...");
-            ct.cancel();
-        }
-        _ = sigterm() => {
-            eprintln!("Received SIGTERM, shutting down gracefully...");
-            ct.cancel();
+        Served::Signalled { signal, drained } => {
+            if drained {
+                eprintln!("Received {signal}; HTTP surface drained");
+            } else {
+                eprintln!(
+                    "Received {signal}; in-flight requests did not finish within {}s, continuing shutdown",
+                    SHUTDOWN_DRAIN_TIMEOUT.as_secs()
+                );
+            }
         }
     }
 
@@ -621,6 +652,120 @@ pub(super) enum ExitDecision {
     Fatal { code: i32, reason: String },
 }
 
+/// How long a shutdown signal waits for in-flight requests to finish. A client
+/// that keeps a stream open must not hold the daemon in shutdown: the rest of
+/// the teardown (WAL drain, lock release) still has to run.
+const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What ended `serve_until_shutdown`.
+#[derive(Debug)]
+enum Served {
+    /// The serve future stopped without a shutdown signal, or failed.
+    ByItself(std::io::Result<()>),
+    /// A shutdown signal arrived. `ct` was cancelled and the serve future was
+    /// then awaited; `drained` says whether every in-flight request finished.
+    Signalled { signal: &'static str, drained: bool },
+}
+
+/// Serves `router` until the surface stops by itself or `shutdown` resolves.
+///
+/// A shutdown signal only cancels `ct`. The serve future is then awaited, so
+/// `with_graceful_shutdown` drains in-flight requests. Selecting the signal and
+/// the serve future against each other dropped the serve future as soon as the
+/// signal won, and nothing was ever drained.
+async fn serve_until_shutdown<S: std::future::Future<Output = &'static str>>(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    ct: tokio_util::sync::CancellationToken,
+    drain_timeout: std::time::Duration,
+    shutdown: S,
+) -> Served {
+    let graceful = ct.clone();
+    // `axum::serve(..)` and `with_graceful_shutdown` build an `IntoFuture`;
+    // polling it by reference in `select!` needs the future itself.
+    let serve = async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move { graceful.cancelled_owned().await })
+            .await
+    };
+    tokio::pin!(serve);
+    tokio::pin!(shutdown);
+    let signal;
+    tokio::select! {
+        result = &mut serve => return Served::ByItself(result),
+        received = &mut shutdown => signal = received,
+    }
+    ct.cancel();
+    Served::Signalled {
+        signal,
+        drained: matches!(
+            tokio::time::timeout(drain_timeout, &mut serve).await,
+            Ok(Ok(()))
+        ),
+    }
+}
+
+/// First pause before a failed background loop is restarted, and its ceiling.
+const LOOP_RESTART_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+const LOOP_RESTART_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+/// A loop that ran this long before ending was healthy; its next restart waits
+/// only the first pause again.
+const LOOP_STEADY_RUN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Keeps one of the daemon's background loops alive and its failures visible.
+///
+/// The loops used to be spawned and forgotten: a panic inside one ended it
+/// silently until the next process restart. Each run is now its own task. When
+/// it ends before the daemon shuts down, the end is logged and the loop starts
+/// again after a pause, so one failing run does not disable it for the life of
+/// the process.
+fn spawn_background_loop(
+    name: &'static str,
+    shutdown: tokio_util::sync::CancellationToken,
+    restart_pause: std::time::Duration,
+    start: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let mut pause = restart_pause;
+        loop {
+            let started = std::time::Instant::now();
+            let outcome = tokio::spawn(start()).await;
+            if shutdown.is_cancelled() {
+                break;
+            }
+            match outcome {
+                Err(error) if error.is_panic() => {
+                    let payload = error.into_panic();
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string panic payload");
+                    tracing::error!(
+                        target: "tachi::daemon",
+                        loop_name = name,
+                        panic = message,
+                        "background loop panicked, restarting"
+                    );
+                }
+                _ => tracing::error!(
+                    target: "tachi::daemon",
+                    loop_name = name,
+                    "background loop ended on its own, restarting"
+                ),
+            }
+            if started.elapsed() >= LOOP_STEADY_RUN {
+                pause = restart_pause;
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(pause) => {}
+            }
+            pause = pause.saturating_mul(2).min(LOOP_RESTART_PAUSE_MAX);
+        }
+    });
+}
+
 /// Fail-loud serve contract. `result` is the output of `axum::serve(..).await`;
 /// `ct_cancelled` is whether the daemon's shutdown token was cancelled (i.e. we
 /// asked the surface to stop). An `Ok` with no shutdown signal means the accept
@@ -785,6 +930,222 @@ impl Drop for DiscoveryPidGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One route whose handler reports that it is running, waits for the daemon
+    /// token to be cancelled and then for `release`: a request that sees the
+    /// shutdown and still finishes its work.
+    fn draining_router(
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> axum::Router {
+        axum::Router::new().route(
+            "/slow",
+            axum::routing::get(move || {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    ct.cancelled().await;
+                    release.notified().await;
+                    "drained"
+                }
+            }),
+        )
+    }
+
+    async fn get(url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        crate::ensure_tls_provider();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+        Ok(client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?)
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_signal_drains_in_flight_requests_instead_of_dropping_them() {
+        let ct = tokio_util::sync::CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let url = format!("http://{}/slow", listener.local_addr().expect("addr"));
+        let (signal, signalled) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(serve_until_shutdown(
+            listener,
+            draining_router(started.clone(), release.clone(), ct.clone()),
+            ct.clone(),
+            std::time::Duration::from_secs(5),
+            async {
+                let _ = signalled.await;
+                "SIGTERM"
+            },
+        ));
+        let response = tokio::spawn(async move { get(&url).await });
+        // The request is being handled before the signal arrives.
+        started.notified().await;
+        signal.send(()).expect("signal the server task");
+        // Shutdown has begun, and the request is still working on purpose.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(ct.is_cancelled(), "the signal cancels the daemon token");
+        assert!(
+            !serving.is_finished(),
+            "shutdown must wait while a request is still in flight"
+        );
+        // The request finishes; only then does shutdown continue.
+        release.notify_one();
+        assert_eq!(
+            response.await.unwrap().unwrap(),
+            "drained",
+            "an in-flight request must finish after the shutdown signal"
+        );
+        assert!(
+            matches!(
+                serving.await.unwrap(),
+                Served::Signalled {
+                    signal: "SIGTERM",
+                    drained: true
+                }
+            ),
+            "the serve future is awaited, not dropped with the signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_ignores_shutdown_cannot_hold_the_daemon_open() {
+        let ct = tokio_util::sync::CancellationToken::new();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let handler_started = started.clone();
+        let router = axum::Router::new().route(
+            "/stuck",
+            axum::routing::get(move || {
+                let started = handler_started.clone();
+                async move {
+                    started.notify_one();
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let url = format!("http://{}/stuck", listener.local_addr().expect("addr"));
+        let (signal, signalled) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(serve_until_shutdown(
+            listener,
+            router,
+            ct.clone(),
+            std::time::Duration::from_millis(200),
+            async {
+                let _ = signalled.await;
+                "SIGINT"
+            },
+        ));
+        let response = tokio::spawn(async move { get(&url).await });
+        started.notified().await;
+        let signalled_at = std::time::Instant::now();
+        signal.send(()).expect("signal the server task");
+        // hyper's graceful shutdown waits for in-flight requests, so this one
+        // never finishes; the process ends it when the daemon exits.
+        let served = tokio::time::timeout(std::time::Duration::from_secs(2), serving)
+            .await
+            .expect("shutdown must not wait for a request that ignores it")
+            .unwrap();
+        assert!(
+            matches!(
+                served,
+                Served::Signalled {
+                    signal: "SIGINT",
+                    drained: false
+                }
+            ),
+            "shutdown continues once the drain bound passes"
+        );
+        assert!(
+            signalled_at.elapsed() >= std::time::Duration::from_millis(200),
+            "the drain bound is honoured before shutdown continues"
+        );
+        response.abort();
+        assert!(ct.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_background_loop_that_panics_is_restarted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        spawn_background_loop(
+            "test_loop",
+            shutdown.clone(),
+            std::time::Duration::from_millis(10),
+            move || {
+                let runs = counted.clone();
+                Box::pin(async move {
+                    if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        panic!("the first run fails");
+                    }
+                    std::future::pending::<()>().await
+                })
+            },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runs.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the loop runs again after a panic");
+    }
+
+    #[tokio::test]
+    async fn a_background_loop_is_not_restarted_after_shutdown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        spawn_background_loop(
+            "test_loop",
+            shutdown.clone(),
+            std::time::Duration::from_millis(10),
+            move || {
+                let runs = counted.clone();
+                // Each run ends at once, so the loop is restarted until the
+                // daemon shuts down.
+                Box::pin(async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runs.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the loop is restarted while the daemon runs");
+        shutdown.cancel();
+        let at_shutdown = runs.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let after = runs.load(Ordering::SeqCst);
+        assert!(
+            after <= at_shutdown + 1,
+            "no restart after shutdown: {at_shutdown} at shutdown, {after} after"
+        );
+        let settled = after;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), settled);
+    }
 
     #[tokio::test]
     async fn voyage_prewarm_disable_flags_do_not_schedule_a_task() {
