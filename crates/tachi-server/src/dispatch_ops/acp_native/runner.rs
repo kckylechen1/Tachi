@@ -1,9 +1,10 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{ChildStderr, Command};
 
 use super::super::dispatch::{DispatchResult, DispatchRunOutcome};
 use super::super::dispatch_v2::append_trajectory_event;
@@ -14,6 +15,66 @@ use super::{
     NativeAcpConnection, NativeAcpDeferredArtifacts, NativeAcpEventTarget, NativeAcpPromptOutcome,
     NativeAcpRunSpec, ACP_STREAM_FILE,
 };
+
+/// Adapter stderr kept for a failure message: only its last bytes are held,
+/// however much the adapter writes.
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
+/// A descendant that inherited the adapter's stderr can hold the pipe open
+/// after the adapter itself exited. The dispatch finishes with what was read
+/// by then; the adapter's auth snapshot must not wait for that descendant.
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+type StderrTail = Arc<Mutex<Vec<u8>>>;
+
+/// Keeps the last [`STDERR_TAIL_BYTES`] of the stream, cut on a character
+/// boundary so a valid UTF-8 stream stays valid after the cut.
+fn append_stderr_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
+    tail.extend_from_slice(chunk);
+    let excess = tail.len().saturating_sub(STDERR_TAIL_BYTES);
+    let continuation_bytes = tail[excess..]
+        .iter()
+        .take_while(|byte| **byte & 0xC0 == 0x80)
+        .count();
+    tail.drain(..excess + continuation_bytes);
+}
+
+/// Drains the adapter's stderr while the session runs, whatever its encoding,
+/// so the adapter never blocks on a full pipe.
+fn spawn_stderr_drain(stderr: ChildStderr) -> (tokio::task::JoinHandle<()>, StderrTail) {
+    let tail: StderrTail = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&tail);
+    let task = tokio::spawn(async move {
+        let mut stderr = stderr;
+        let mut chunk = [0u8; 8192];
+        while let Ok(read) = stderr.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            append_stderr_tail(
+                &mut shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                &chunk[..read],
+            );
+        }
+    });
+    (task, tail)
+}
+
+/// Waits up to `limit` for the drain and returns what was read, lossily
+/// decoded, and whether the pipe was still open when the limit ran out.
+async fn collect_stderr(
+    mut task: tokio::task::JoinHandle<()>,
+    tail: &StderrTail,
+    limit: Duration,
+) -> (String, bool) {
+    let held_open = tokio::time::timeout(limit, &mut task).await.is_err();
+    if held_open {
+        task.abort();
+    }
+    let tail = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    (String::from_utf8_lossy(&tail).into_owned(), held_open)
+}
 
 /// Credential files a native adapter may hold in its private runtime: the
 /// snapshot itself plus opencode v2's import of it into a local credential store.
@@ -754,7 +815,7 @@ async fn run_native_acp_command_inner(
             return DispatchRunOutcome::failure(error, liveness);
         }
     };
-    let mut stderr = match child
+    let stderr = match child
         .stderr
         .take()
         .ok_or_else(|| "Native ACP adapter stderr was not piped".to_string())
@@ -774,11 +835,7 @@ async fn run_native_acp_command_inner(
             return DispatchRunOutcome::failure(error, liveness);
         }
     };
-    let stderr_task = tokio::spawn(async move {
-        let mut captured = String::new();
-        let _ = stderr.read_to_string(&mut captured).await;
-        captured
-    });
+    let (stderr_task, stderr_tail) = spawn_stderr_drain(stderr);
 
     let mut connection = NativeDriver::new(
         stdin,
@@ -920,7 +977,19 @@ async fn run_native_acp_command_inner(
             }
         }
     };
-    let stderr_output = stderr_task.await.unwrap_or_default();
+    let (stderr_output, stderr_held_open) =
+        collect_stderr(stderr_task, &stderr_tail, STDERR_DRAIN_TIMEOUT).await;
+    if stderr_held_open {
+        append_trajectory_event(
+            trajectory_path,
+            json!({
+                "event": "acp_native_stderr_held_open",
+                "dispatch_id": dispatch_id,
+                "agent": agent,
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+            }),
+        );
+    }
 
     if outcome.is_ok() {
         let error = process_exit_error.or_else(|| {
@@ -1481,6 +1550,89 @@ mod inherited_env_tests {
                 .get_envs()
                 .any(|(name, value)| name == "TACHI_DAEMON" && value.is_none()),
             "the daemon marker must be explicitly withheld"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stderr_tests {
+    use super::*;
+
+    async fn child_stderr(script: &str) -> (tokio::process::Child, ChildStderr) {
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stderr fixture");
+        let stderr = child.stderr.take().expect("piped stderr");
+        (child, stderr)
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_bytes_on_a_character_boundary() {
+        let mut stream = Vec::new();
+        for line in 0..5000 {
+            stream.extend_from_slice(format!("line-{line}-é\n").as_bytes());
+        }
+        let mut tail = Vec::new();
+        for chunk in stream.chunks(8192) {
+            append_stderr_tail(&mut tail, chunk);
+        }
+        assert_eq!(tail.len(), STDERR_TAIL_BYTES);
+        let kept = std::str::from_utf8(&tail).expect("cut on a character boundary");
+        assert!(stream.ends_with(kept.as_bytes()), "the exact tail is kept");
+        assert!(kept.ends_with("line-4999-é\n"), "{kept}");
+    }
+
+    // Reading as text stops at the first invalid byte and leaves the pipe
+    // undrained; the adapter then blocks and the useful lines never arrive.
+    #[tokio::test]
+    async fn stderr_is_drained_to_eof_whatever_its_encoding() {
+        let (mut child, stderr) = child_stderr(
+            r#"head -c 200000 /dev/zero | tr '\0' x >&2; printf '\377\376 not utf-8\n' >&2; printf 'useful-after-garbage\n' >&2"#,
+        )
+        .await;
+        let (task, tail) = spawn_stderr_drain(stderr);
+        child.wait().await.expect("fixture exits");
+        let (output, held_open) = collect_stderr(task, &tail, STDERR_DRAIN_TIMEOUT).await;
+
+        assert!(!held_open);
+        // Lossy decoding widens invalid bytes, so the bound is on what is kept, in bytes.
+        assert_eq!(
+            tail.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            STDERR_TAIL_BYTES,
+            "only the tail is kept"
+        );
+        assert!(output.chars().count() <= STDERR_TAIL_BYTES);
+        assert!(
+            output.starts_with("xxxx"),
+            "the flood before the marker is what got trimmed: {output:?}"
+        );
+        assert!(
+            // Each invalid byte decodes to one replacement character.
+            output.ends_with("\u{fffd}\u{fffd} not utf-8\nuseful-after-garbage\n"),
+            "the stream is drained to EOF: {output:?}"
+        );
+    }
+
+    // A pipe still held open once the adapter exited must not stall the
+    // dispatch: the auth snapshot is removed only after this step returns.
+    #[tokio::test]
+    async fn a_pipe_held_open_past_the_adapter_does_not_stall_the_dispatch() {
+        let (_child, stderr) = child_stderr(r#"printf 'last words\n' >&2; sleep 30"#).await;
+        let (task, tail) = spawn_stderr_drain(stderr);
+        let started = std::time::Instant::now();
+        let (output, held_open) = collect_stderr(task, &tail, Duration::from_millis(200)).await;
+
+        assert!(held_open, "sleep still holds the write end");
+        assert_eq!(output, "last words\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must return at its limit"
         );
     }
 }

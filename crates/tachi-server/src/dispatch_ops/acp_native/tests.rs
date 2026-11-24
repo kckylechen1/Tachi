@@ -833,6 +833,126 @@ fn allow_verdict_with_only_reject_kind_options_is_cancelled() {
     assert!(decision.response["outcome"].get("optionId").is_none());
 }
 
+// The automatic path answers with the option ID alone, exactly like the
+// interactive one. An ID that another option also answers to must never be
+// selected: a denial could otherwise be read as the approval sharing its ID.
+#[test]
+fn automatic_permission_never_selects_an_ambiguous_option() {
+    let cancelled = json!({"outcome":{"outcome":"cancelled"}});
+    for options in [
+        json!([
+            {"optionId":"shared","kind":"allow_once"},
+            {"optionId":"shared","kind":"reject_once"}
+        ]),
+        json!([
+            {"optionId":"once","kind":"allow_once"},
+            {"optionId":"shared","kind":"allow_always"},
+            {"optionId":"shared","kind":"reject_once"}
+        ]),
+        json!([
+            {"optionId":"once","kind":"allow_once"},
+            {"optionId":"deny","id":"once","kind":"reject_once"}
+        ]),
+        json!([
+            {"id":"deny","kind":"reject_once"}
+        ]),
+    ] {
+        let denied = json!({"toolCall":{"kind":"edit"},"options":options});
+        let decision = native_permission_decision("approve-reads", &denied);
+        assert!(!decision.allowed);
+        assert_eq!(decision.response, cancelled, "options={options}");
+    }
+    let shared = json!([
+        {"optionId":"shared","kind":"allow_once"},
+        {"optionId":"shared","kind":"reject_once"}
+    ]);
+    let approved = json!({"toolCall":{"kind":"read"},"options":shared});
+    assert_eq!(
+        native_permission_decision("approve-reads", &approved).response,
+        cancelled
+    );
+
+    let valid = json!([
+        {"optionId":"deny","id":"deny","kind":"reject_once"},
+        {"optionId":"allow","kind":"allow_once"}
+    ]);
+    let denied = json!({"toolCall":{"kind":"edit"},"options":valid});
+    assert_eq!(
+        native_permission_decision("approve-reads", &denied).response["outcome"]["optionId"],
+        json!("deny")
+    );
+}
+
+// Garbage bytes on the adapter's stderr must not cost the diagnostic that
+// follows them: the failure message is the only place an operator sees why
+// an adapter died.
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_failure_keeps_stderr_that_follows_invalid_utf8() {
+    use std::collections::{HashMap, HashSet};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("adapter.sh");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '\377\376 not utf-8\n' >&2
+printf 'adapter-exploded: disk full\n' >&2
+exit 1
+"#,
+    )
+    .expect("write ACP adapter fixture");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let error = match super::run_native_acp_dispatch(
+        super::NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
+            approval: None,
+            mcp_servers: Vec::new(),
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+            env_remove: HashSet::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "test-dispatch",
+        "codex",
+        Duration::from_secs(20),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("adapter exited without answering"),
+    };
+
+    assert!(
+        error.contains("adapter-exploded: disk full"),
+        "the stderr line after the garbage bytes must reach the failure: {error}"
+    );
+}
+
 /// #894 S0 round 2: `allow_once` is preferred over `allow_always` when both
 /// are present (least-persistent grant).
 #[test]
