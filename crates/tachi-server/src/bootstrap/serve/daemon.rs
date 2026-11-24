@@ -20,9 +20,8 @@ pub(super) async fn serve_http_daemon(
     port: u16,
     _daemon_lock: &crate::daemon_lock::DaemonLock,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Mark this process so MCP write handlers execute locally instead of
-    // re-forwarding to ourselves over HTTP.
-    std::env::set_var("TACHI_DAEMON", "1");
+    // The process was marked as a daemon (`TACHI_DAEMON`) before this runtime
+    // was built, in `tokio_main`; it is not changed while workers exist.
 
     // HTTP daemon mode.
     // In daemon mode the cwd-derived repo-local project DB is RETAINED

@@ -1105,12 +1105,6 @@ fn build_server_state(
     global_db_path: &Path,
     hygiene: &StartupHygiene,
 ) -> Result<ServerState, Box<dyn std::error::Error>> {
-    if cli.daemon {
-        std::env::set_var("TACHI_DAEMON", "1");
-    } else {
-        std::env::remove_var("TACHI_DAEMON");
-    }
-
     if let Some(project_db_path) = hygiene.project_db_path.as_deref() {
         crate::path_utils::canonical_db_leaf_exists_without_symlink(project_db_path)?;
     }
@@ -1325,26 +1319,16 @@ pub(super) fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if !cli.daemon && matches!(cli.command.as_ref(), None | Some(Commands::Serve)) {
         return Err("Tachi MCP stdio has been retired. Start the resident HTTP server with `tachi --daemon --port 6919 serve`, then configure a native Streamable HTTP client at http://127.0.0.1:6919/mcp. Existing command/args MCP entries must be replaced with an HTTP URL; no stdin proxy or automatic daemon fallback is available.".into());
     }
-    let mut owner = StartupRuntime::new()?;
-    owner.runtime.block_on(tokio_main_inner(
-        cli,
-        &mut owner.daemon_lock,
-        &mut owner.shutdown_checkpoint,
-    ))
-}
-
-async fn tokio_main_inner(
-    cli: Cli,
-    daemon_lock: &mut Option<crate::daemon_lock::DaemonLock>,
-    shutdown_checkpoint: &mut ShutdownWalCheckpointer,
-) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Commands::Mcp {
         action: tachi_bootstrap::cli::McpAction::Task(args),
     }) = cli.command.as_ref()
     {
         // A task request is only a client of an already-running daemon.
-        // Keep it before tracing, store resolution, and startup hygiene.
-        return super::cli_tool::run_mcp_task_command(args).await;
+        // Keep it before tracing, store resolution, and startup hygiene. It
+        // changes no process environment, so it may run on a runtime of its own.
+        return StartupRuntime::new()?
+            .runtime
+            .block_on(super::cli_tool::run_mcp_task_command(args));
     }
     if let Some(Commands::RecallCoverage(args)) = cli.command.as_ref() {
         // Keep this in-process read-only operation before all startup writes.
@@ -1378,7 +1362,39 @@ async fn tokio_main_inner(
         }
     }
 
+    // Everything that changes the process environment runs here, on the
+    // startup thread, before any runtime worker exists: loading the dotenv
+    // files and marking daemon mode call `set_var`, which no other thread's
+    // `getenv` may race with.
     let ctx = initialize_startup_context(&cli)?;
+    if cli.daemon {
+        // MCP write handlers execute locally instead of re-forwarding to
+        // ourselves over HTTP.
+        std::env::set_var("TACHI_DAEMON", "1");
+    } else {
+        std::env::remove_var("TACHI_DAEMON");
+    }
+    if let Some(Commands::Poke { action }) = cli.command.as_ref() {
+        // Poke swaps the process environment for its sandbox, so it is routed
+        // here for the same reason and brings its own runtime.
+        return super::poke_cli::run_poke_command(&ctx.app_home, action);
+    }
+    let mut owner = StartupRuntime::new()?;
+    owner.runtime.block_on(tokio_main_inner(
+        cli,
+        ctx,
+        &mut owner.daemon_lock,
+        &mut owner.shutdown_checkpoint,
+    ))
+}
+
+/// Runs a command whose process environment has already been prepared.
+async fn tokio_main_inner(
+    cli: Cli,
+    ctx: StartupContext,
+    daemon_lock: &mut Option<crate::daemon_lock::DaemonLock>,
+    shutdown_checkpoint: &mut ShutdownWalCheckpointer,
+) -> Result<(), Box<dyn std::error::Error>> {
     let global_db_path = resolve_global_db(&cli, &ctx).await?;
     *daemon_lock = if cli.daemon && matches!(ctx.command, Commands::Serve) {
         Some(daemon::acquire_startup_daemon_lock(
