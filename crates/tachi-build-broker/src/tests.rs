@@ -21,7 +21,7 @@ use super::ticket::{
 };
 use super::{
     abandon_stale_slot, cancel_queued_ticket, execute_ticket, load_receipt, pending_tickets,
-    run_next, slot, ExecutorSeat,
+    run_next, slot, ExecutorSeat, LEFT_QUEUE,
 };
 
 const MAIN_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -393,24 +393,22 @@ fn a_quarantined_resident_target_is_never_reused_without_clearing() {
 
 #[test]
 fn two_tickets_cannot_hold_the_executor_slot_at_once() {
-    let store = store();
+    let mut store = store();
     assert_eq!(
-        slot::acquire_slot(&store, "t-1").unwrap(),
-        slot::SlotOutcome::Acquired
+        slot::claim_for_execution(&mut store, "t-1").unwrap(),
+        slot::Claim::Held
     );
-    match slot::acquire_slot(&store, "t-2").unwrap() {
-        slot::SlotOutcome::Busy { holder } => assert_eq!(holder.ticket_id, "t-1"),
-        slot::SlotOutcome::Acquired => {
-            panic!("two tickets must never both hold the machine's single executor slot")
-        }
+    match slot::claim_for_execution(&mut store, "t-2").unwrap() {
+        slot::Claim::Busy { holder } => assert_eq!(holder.ticket_id, "t-1"),
+        claim => panic!("two tickets must never both hold the executor slot: {claim:?}"),
     }
     // A non-holder cannot release the slot out from under the holder.
     assert!(slot::release_slot(&store, "t-2").is_err());
     assert!(slot::release_slot(&store, "t-1").unwrap());
     // Now it is free again.
     assert_eq!(
-        slot::acquire_slot(&store, "t-2").unwrap(),
-        slot::SlotOutcome::Acquired
+        slot::claim_for_execution(&mut store, "t-2").unwrap(),
+        slot::Claim::Held
     );
 }
 
@@ -595,7 +593,7 @@ fn abandoning_a_stale_slot_quarantines_the_dead_builds_target_before_releasing()
 
     // Simulate a daemon that died mid-build: slot held, target recorded, no
     // receipt, no release.
-    slot::acquire_slot(&store, "t-dead").unwrap();
+    slot::claim_for_execution(&mut store, "t-dead").unwrap();
     slot::record_slot_target(&store, "t-dead", "/seat/target-resident").unwrap();
 
     assert!(abandon_stale_slot(&mut store, "daemon killed").unwrap());
@@ -772,7 +770,7 @@ fn cancel_removes_a_queued_ticket_and_refuses_a_running_or_finished_one() {
     assert_eq!(pending_tickets(&store, Some(REPO)).unwrap().len(), 1);
 
     assert_eq!(
-        cancel_queued_ticket(&store, "t-cancel", "superseded").unwrap(),
+        cancel_queued_ticket(&mut store, "t-cancel", "superseded").unwrap(),
         CancelOutcome::Cancelled
     );
     assert!(
@@ -788,13 +786,13 @@ fn cancel_removes_a_queued_ticket_and_refuses_a_running_or_finished_one() {
     );
     // Idempotent.
     assert_eq!(
-        cancel_queued_ticket(&store, "t-cancel", "again").unwrap(),
+        cancel_queued_ticket(&mut store, "t-cancel", "again").unwrap(),
         CancelOutcome::AlreadyTerminal {
             state: TicketState::Cancelled
         }
     );
     assert_eq!(
-        cancel_queued_ticket(&store, "t-nope", "x").unwrap(),
+        cancel_queued_ticket(&mut store, "t-nope", "x").unwrap(),
         CancelOutcome::NotFound
     );
 
@@ -803,17 +801,60 @@ fn cancel_removes_a_queued_ticket_and_refuses_a_running_or_finished_one() {
     let built = ticket("t-built", MAIN_SHA);
     submit_ticket(&store, &built).unwrap();
     execute_ticket(&mut store, &seat, &built, &runner, &lineage).unwrap();
-    let err = cancel_queued_ticket(&store, "t-built", "too late").unwrap_err();
+    let err = cancel_queued_ticket(&mut store, "t-built", "too late").unwrap_err();
     assert!(err.contains("already has a receipt"), "got: {err}");
 
     // Nor can a ticket whose cargo may be alive right now: that is `build
     // abandon`'s job, and only once the process is dead.
     let running = ticket("t-running", MAIN_SHA);
     submit_ticket(&store, &running).unwrap();
-    slot::acquire_slot(&store, "t-running").unwrap();
-    let err = cancel_queued_ticket(&store, "t-running", "kill it").unwrap_err();
+    slot::claim_for_execution(&mut store, "t-running").unwrap();
+    let err = cancel_queued_ticket(&mut store, "t-running", "kill it").unwrap_err();
     assert!(err.contains("holding the executor slot"), "got: {err}");
     assert!(err.contains("build abandon"), "got: {err}");
+}
+
+// The executor lists the queue, then claims a ticket from that list. An
+// operator's cancel can land in between: the build must then not run, or the
+// cancelled marker ends up on a real build.
+#[test]
+fn a_ticket_cancelled_after_the_queue_was_listed_is_never_built() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, MAIN_SHA)]);
+    let runner = FakeRunner::new(BuildOutcome::Success);
+
+    let queued = ticket("t-late-cancel", MAIN_SHA);
+    submit_ticket(&store, &queued).unwrap();
+    let listed = pending_tickets(&store, Some(REPO)).unwrap().remove(0);
+    assert_eq!(
+        cancel_queued_ticket(&mut store, "t-late-cancel", "superseded").unwrap(),
+        CancelOutcome::Cancelled
+    );
+
+    let err = execute_ticket(&mut store, &seat, &listed, &runner, &lineage).unwrap_err();
+    assert!(err.starts_with(LEFT_QUEUE), "{err}");
+    assert!(
+        runner.ran_on.lock().unwrap().is_empty(),
+        "a cancelled ticket must never reach the runner"
+    );
+    assert!(
+        load_receipt(&store, "t-late-cancel").unwrap().is_none(),
+        "no build ran, so there is no receipt to contradict the cancellation"
+    );
+    assert!(
+        slot::current_holder(&store).unwrap().is_none(),
+        "nothing was claimed, so the slot stays free for the next ticket"
+    );
+
+    // The queue moves on to the ticket behind it.
+    let next = ticket("t-after-cancel", MAIN_SHA);
+    submit_ticket(&store, &next).unwrap();
+    assert!(run_next(&mut store, &seat, REPO, &runner, &lineage)
+        .unwrap()
+        .receipt
+        .is_some());
+    assert_eq!(runner.ran_on.lock().unwrap().len(), 1);
 }
 
 /// ④ (round-2) A seat only drains ITS OWN repo's tickets.
@@ -1042,7 +1083,7 @@ fn a_new_receipt_carries_a_ninety_day_hard_state_ttl() {
 /// write (failed attempt, cancel) must carry a 90-day `hard_state` TTL.
 #[test]
 fn ticket_and_status_writes_carry_a_ninety_day_hard_state_ttl() {
-    let store = store();
+    let mut store = store();
 
     let submitted = ticket("t-ttl-ticket", MAIN_SHA);
     submit_ticket(&store, &submitted).unwrap();
@@ -1057,7 +1098,7 @@ fn ticket_and_status_writes_carry_a_ninety_day_hard_state_ttl() {
 
     let to_cancel = ticket("t-ttl-cancel", MAIN_SHA);
     submit_ticket(&store, &to_cancel).unwrap();
-    cancel_queued_ticket(&store, "t-ttl-cancel", "superseded").unwrap();
+    cancel_queued_ticket(&mut store, "t-ttl-cancel", "superseded").unwrap();
     let cancelled_status = super::ticket::load_status(&store, "t-ttl-cancel")
         .unwrap()
         .expect("status present");

@@ -284,8 +284,8 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
             reason,
             json,
         } => {
-            let store = open_global_store()?;
-            let outcome = build_broker::cancel_queued_ticket(&store, &ticket_id, &reason)?;
+            let mut store = open_global_store()?;
+            let outcome = build_broker::cancel_queued_ticket(&mut store, &ticket_id, &reason)?;
             let (cancelled, message) = match &outcome {
                 CancelOutcome::Cancelled => (
                     true,

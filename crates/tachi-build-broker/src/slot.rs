@@ -6,10 +6,11 @@
 //! per-ticket.
 //!
 //! Acquisition is `insert_state_if_absent` — a single SQLite
-//! `INSERT ... ON CONFLICT DO NOTHING`, so among any number of concurrent
-//! callers (threads, processes, daemons) exactly one observes `Acquired` and
-//! everyone else observes `Busy`. A read-then-write would be a race, and the
-//! race here costs a poisoned target dir.
+//! `INSERT ... ON CONFLICT DO NOTHING` — inside the same write transaction
+//! that reads the ticket's receipt and queue state, so among any number of
+//! concurrent callers (threads, processes, daemons) exactly one observes
+//! [`Claim::Held`] and everyone else observes [`Claim::Busy`]. A read-then-write
+//! would be a race, and the race here costs a poisoned target dir.
 //!
 //! ## Why the slot is not stealable on a timeout
 //!
@@ -20,7 +21,11 @@
 //! quarantine the target the dead holder was writing into, THEN release. That
 //! is fail-safe (a stuck slot blocks builds; a stolen slot corrupts them).
 
+use super::BuildReceipt;
+use crate::ticket::{self, StateReader, TicketState};
+use memcore::store::state::StateTransaction;
 use memcore::MemoryStore;
+use rusqlite::TransactionBehavior;
 use serde::{Deserialize, Serialize};
 
 /// `hard_state` namespace for broker singletons.
@@ -40,15 +45,51 @@ pub struct SlotHolder {
     pub target_path: Option<String>,
 }
 
-/// Result of trying to take the slot.
+/// Whether a ticket may build now, decided together with the state it depends on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SlotOutcome {
-    Acquired,
+pub(crate) enum Claim {
+    /// This process holds the executor slot for the ticket.
+    Held,
+    /// The slot is taken; nothing was attempted for the ticket.
     Busy { holder: SlotHolder },
+    /// The build already ran. Receipts are write-once, so running again would
+    /// produce a result nobody can record.
+    AlreadyBuilt(BuildReceipt),
+    /// The ticket was cancelled or dead-lettered after the caller listed it.
+    LeftQueue(TicketState),
 }
 
-/// Take the machine's executor slot for `ticket_id`, or report who has it.
-pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotOutcome, String> {
+/// Take the executor slot for a ticket that is still allowed to build.
+///
+/// The ticket's receipt, its queue state and the slot are read under the same
+/// write lock as the insert. A cancellation that commits first is seen here
+/// and the ticket is not built; one that comes second sees the slot held and
+/// is refused. Checked separately, a cancel could land between the executor's
+/// queue read and its slot insert, leaving a cancelled marker on a real build.
+pub(crate) fn claim_for_execution(
+    store: &mut MemoryStore,
+    ticket_id: &str,
+) -> Result<Claim, String> {
+    let tx = store
+        .begin_state_transaction(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin executor claim: {e}"))?;
+    let claim = claim_in(&tx, ticket_id)?;
+    if matches!(claim, Claim::Held) {
+        tx.commit()
+            .map_err(|e| format!("commit executor claim: {e}"))?;
+    }
+    Ok(claim)
+}
+
+fn claim_in(tx: &StateTransaction<'_>, ticket_id: &str) -> Result<Claim, String> {
+    if let Some(receipt) = super::load_receipt(tx, ticket_id)? {
+        return Ok(Claim::AlreadyBuilt(receipt));
+    }
+    if let Some(status) = ticket::load_status(tx, ticket_id)? {
+        if status.state.is_terminal() {
+            return Ok(Claim::LeftQueue(status.state));
+        }
+    }
     let holder = SlotHolder {
         ticket_id: ticket_id.to_string(),
         pid: std::process::id(),
@@ -56,26 +97,29 @@ pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotO
         target_path: None,
     };
     let value = serde_json::to_string(&holder).map_err(|e| format!("serialize slot: {e}"))?;
-    let won = store
+    if tx
         .insert_state_if_absent(BROKER_NS, EXECUTOR_SLOT_KEY, &value)
-        .map_err(|e| format!("acquire executor slot: {e}"))?;
-    if won {
-        return Ok(SlotOutcome::Acquired);
+        .map_err(|e| format!("acquire executor slot: {e}"))?
+    {
+        return Ok(Claim::Held);
     }
-    match current_holder(store)? {
-        Some(holder) => Ok(SlotOutcome::Busy { holder }),
-        // Lost the insert race but the row vanished before we read it back (the
-        // winner finished that fast). Report busy rather than pretending we hold
-        // it: the caller retries, and a retry is cheap. Claiming `Acquired` here
-        // would be a second concurrent cargo.
-        None => Ok(SlotOutcome::Busy {
-            holder: SlotHolder {
-                ticket_id: String::new(),
-                pid: 0,
-                acquired_at: jiff::Timestamp::now().to_string(),
-                target_path: None,
-            },
-        }),
+    // The write lock is held, so the row that won the insert cannot vanish
+    // before it is read back.
+    Ok(Claim::Busy {
+        holder: holder_in(tx)?.ok_or("executor slot row vanished inside its claim")?,
+    })
+}
+
+/// Read the current holder, if any, through a state reader.
+pub(crate) fn holder_in(source: &impl StateReader) -> Result<Option<SlotHolder>, String> {
+    let row = source
+        .state(BROKER_NS, EXECUTOR_SLOT_KEY)
+        .map_err(|e| format!("read executor slot: {e}"))?;
+    match row {
+        None => Ok(None),
+        Some((json, _version)) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| format!("decode executor slot: {e}")),
     }
 }
 
