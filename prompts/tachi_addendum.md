@@ -11,7 +11,7 @@
 
 普通连接无需选择 Profile。默认六个工具见下表；Worker 合同保留 `delegate` 限制，少一项 `tachi_agent_eval`，不能递归派工。旧 `standard` 配置继续兼容；`observe`、`coordinate` 与受限记忆写入策略仍保持兼容并保留各自动作限制，旧 `agent` 别名仍映射到该受限写入策略（例如拒绝 `tachi_task(action="handoff")`）。公开的 Ops/admin 选择器已退役，不能通过修改请求头或环境变量获取维护权限。
 
-## 三条铁律
+## 四条铁律
 
 1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")`。命中就引用，未命中再 `tachi_memory(action="save")`。
 2. **结构化保存**。`tachi_memory(action="save")` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
@@ -62,17 +62,16 @@ Hub 文档管理使用 `tachi hub ...`。残留诊断、治理和验证 handler 
 用 `tachi` 子命令不开 MCP 也能巡检万宝楼、管理库、触发维护：
 
 ```bash
-tachi hub list                  # 列全部已注册技能/插件/MCP
-tachi hub list --type skill     # 只看 skill
+tachi hub list                  # 列全部已注册技能/插件
+tachi hub list --cap-type skill # 只看 skill
 tachi hub show skill:code-review
-tachi hub packs                 # 已安装的 pack
 tachi hub stats                 # 总量统计
 tachi doctor                    # 巡检 SQLite 藏库健康
 tachi env plan                  # 查看 .tachi/vault.env 绑定（不解密）
-tachi env --keychain run -- cargo test  # 仅向子进程注入项目声明的 Key
+tachi env run --keychain -- cargo test  # 仅向子进程注入项目声明的 Key
 tachi vault connection run exa-search --keychain -- python search.py
 tachi backfill-vectors --db ~/.tachi/global/tachi-memory.db
-tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry-run）
+tachi clean target --dry-run    # 只打印 target 清理计划；加 --force 才删除
 ```
 
 输出与 Hub MCP 工具一致；CLI 默认走 `~/.tachi/global/tachi-memory.db`。
@@ -101,7 +100,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 |---|---|---|
 | `no such column: retention_policy` | 老库 schema drift | 重启 tachi-server（启动会 migrate），或 `tachi doctor --fix` |
 | `vec0 module not loaded` | sqlite-vec 扩展未装 | brew 安装的二进制自带；裸 `sqlite3` CLI 没有 |
-| `distill produced empty` | bucket 不满 `FOUNDRY_DISTILL_MIN_BATCH=3` | 正常，等够 3 条同 topic/entity 的记忆再触发 |
+| `distill produced empty` | 同一 topic/entity 的 bucket 不满最小批量（3 条） | 正常，等够 3 条同 topic/entity 的记忆再触发 |
 | `tool not found` | 工具已退役或不属于当前受限入口 | 以 `tools/list` 的实际工具和动作选择普通门面；维护使用受支持的 owner CLI。不要切换 Ops/admin 或复制私有授权头。 |
 | `database is locked` | 多实例同时写同一 DB | 确保每个 DB 只有一个 Tachi 进程 |
 
