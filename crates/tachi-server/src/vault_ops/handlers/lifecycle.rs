@@ -5,6 +5,7 @@ pub(crate) async fn handle_vault_unlock(
     params: VaultUnlockParams,
 ) -> Result<String, String> {
     let result = async {
+        let _turn = UNLOCK_ADMISSION.lock().await;
         ensure_vault_unlock_allowed(server)?;
 
         let config = server

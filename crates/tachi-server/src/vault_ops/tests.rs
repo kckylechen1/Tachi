@@ -865,6 +865,61 @@ async fn vault_unlock_derives_the_key_off_the_async_thread() {
     );
 }
 
+/// With one attempt left before a lockout, concurrent wrong passwords get
+/// that one attempt between them. Each of the others meets the lockout
+/// instead of deriving a key the limit no longer allows.
+#[tokio::test]
+async fn concurrent_wrong_unlocks_get_no_more_attempts_than_the_limit_allows() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+    server.vault_write().failed_attempts = (
+        crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS - 1,
+        None,
+    );
+
+    let mut attempts = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let server = server.clone();
+        attempts.spawn(async move {
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: "wrong-password".to_string(),
+                    password_fifo_path: None,
+                    use_keychain: false,
+                },
+            )
+            .await
+            .expect_err("a wrong password is refused")
+        });
+    }
+    let mut derived = 0;
+    let mut locked = 0;
+    while let Some(result) = attempts.join_next().await {
+        // The attempt whose failure reaches the limit is told about the lockout it caused.
+        match result.expect("attempt task") {
+            err if err.starts_with("Too many failed vault unlock attempts") => derived += 1,
+            err if err.starts_with("Vault unlock temporarily locked") => locked += 1,
+            err => panic!("unexpected unlock answer: {err}"),
+        }
+    }
+
+    assert_eq!(derived, 1, "more than one attempt derived a key");
+    assert_eq!(locked, 3);
+    assert_eq!(
+        server.vault_read().failed_attempts.0,
+        crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS,
+        "the recorded failures exceed the limit"
+    );
+}
+
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_fifo_path_together() {
     let db_path = crate::utils::test_fixture_path(format!(

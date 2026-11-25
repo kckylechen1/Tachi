@@ -20,6 +20,7 @@ use super::rotation::normalize_rotation_strategy;
 use super::session::{
     clear_cached_vault_state, ensure_vault_unlock_allowed, is_vault_initialized,
     maybe_auto_lock_vault, read_unlock_password_fifo, record_vault_unlock_failure,
+    UNLOCK_ADMISSION,
 };
 
 mod health;
