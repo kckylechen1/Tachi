@@ -155,24 +155,53 @@ daemon_status_is_running() {
   grep -q '"state": "running"'
 }
 
+# The value of a quoted field of the status JSON, or nothing.
+daemon_status_text() {
+  sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+# The value of a numeric field of the status JSON, or nothing.
+daemon_status_number() {
+  sed -n "s/.*\"$1\": \([0-9][0-9]*\).*/\1/p" | head -n 1
+}
+
 stop_existing_daemon_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
   local status
 
   status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-  if printf '%s\n' "$status" | daemon_status_is_running; then
-    echo ">> Stopping existing Tachi daemon for this DB scope..."
-    TACHI_DISABLE_AUTO_DAEMON=1 \
-      "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
-  fi
+  state=$(printf '%s\n' "$status" | daemon_status_text state)
+  case "$state" in
+    running)
+      echo ">> Stopping existing Tachi daemon for this DB scope..."
+      TACHI_DISABLE_AUTO_DAEMON=1 \
+        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
+      ;;
+    foreign)
+      # After an upgrade the previous version's daemon is reported as
+      # foreign, and `daemon kill` refuses it. It holds the lock and the port
+      # of this scope until it exits, so the upgrade has to stop it the way
+      # launchd does. Any other foreign daemon is left alone and reported.
+      pid=$(printf '%s\n' "$status" | daemon_status_number pid)
+      if [[ "$(printf '%s\n' "$status" | daemon_status_text reason)" == "daemon version "* &&
+        "$pid" =~ ^[0-9]+$ ]]; then
+        echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
+        kill -TERM "$pid" 2>/dev/null || true
+      else
+        echo "❌ a foreign Tachi daemon holds this DB scope and was not stopped"
+        printf '%s\n' "$status"
+        return 1
+      fi
+      ;;
+  esac
 
   for _ in $(seq 1 50); do
     status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    if ! printf '%s\n' "$status" | daemon_status_is_running; then
-      return 0
-    fi
-    sleep 0.2
+    case "$(printf '%s\n' "$status" | daemon_status_text state)" in
+      running|foreign) sleep 0.2 ;;
+      *) return 0 ;;
+    esac
   done
 
   echo "❌ previous daemon for this DB scope did not stop"
@@ -240,7 +269,12 @@ install_daemon_service() {
   echo "   Binary: $tachi_bin"
   echo "   Global DB: $global_db"
 
-  cat >"$plist" <<PLIST
+  # Written beside the target and renamed over it: launchd and the next run
+  # of this script never see a half-written plist, and a failed write leaves
+  # the previous one in place.
+  local plist_tmp
+  plist_tmp=$(mktemp "$launch_agents/$label.plist.XXXXXX")
+  if ! cat >"$plist_tmp" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -281,6 +315,12 @@ $profile_environment
 </dict>
 </plist>
 PLIST
+  then
+    rm -f "$plist_tmp"
+    echo "❌ could not write $plist_tmp"
+    exit 1
+  fi
+  mv -f "$plist_tmp" "$plist"
 
   launchctl_bootout_plist "$plist" "$label"
   stop_existing_daemon_for_scope "$tachi_bin" "$global_db"
