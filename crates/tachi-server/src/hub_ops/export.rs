@@ -11,6 +11,10 @@ use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
 #[path = "export_ownership_tests.rs"]
 mod ownership_tests;
 
+#[cfg(all(test, unix))]
+#[path = "export_file_tests.rs"]
+mod file_tests;
+
 fn claude_cleanup_report(requested: bool) -> serde_json::Value {
     json!({
         "requested": requested,
@@ -223,6 +227,44 @@ fn export_for_claude_to_dirs(
     .map_err(|e| format!("serialize: {e}"))
 }
 
+/// One line for the `.mdc` frontmatter. YAML ends a line at `\r` as well
+/// as `\n`, so a description carrying either could close the frontmatter or
+/// add a key to it. A run of `---` is dropped for the parsers that end the
+/// frontmatter at the first one they meet.
+fn frontmatter_value(value: &str) -> String {
+    let single_line: String = value
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}' => ' ',
+            other => other,
+        })
+        .collect();
+    single_line.replace("---", "\u{2014}")
+}
+
+/// Write an export file without following a link in its place. The export
+/// directories are shared with agents: a link planted where an export goes
+/// must not steer the write onto the file it points to.
+fn write_export_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            // O_NONBLOCK: a FIFO in the place of a file is refused, not waited on.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        file.write_all(content.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)
+    }
+}
+
 /// Export skills for Cursor: generate .mdc rule files in .cursor/rules/.
 fn export_for_cursor(
     skills: &[HubCapability],
@@ -264,13 +306,13 @@ fn export_for_cursor(
         // Cursor .mdc format with frontmatter
         let mdc_content = format!(
             "---\ndescription: {}\nalwaysApply: false\n---\n\n# {}\n\n{}",
-            cap.description.replace('\n', " "),
+            frontmatter_value(&cap.description),
             cap.name,
             content
         );
 
         let file_path = output_dir.join(format!("tachi-{}.mdc", name));
-        if let Err(e) = std::fs::write(&file_path, &mdc_content) {
+        if let Err(e) = write_export_file(&file_path, &mdc_content) {
             errors.push(json!({ "id": cap.id, "error": format!("write: {e}") }));
             continue;
         }
@@ -340,7 +382,7 @@ fn export_for_generic(
         };
 
         let file_path = output_dir.join(format!("{}.md", name));
-        if let Err(e) = std::fs::write(&file_path, &content) {
+        if let Err(e) = write_export_file(&file_path, &content) {
             errors.push(json!({ "id": cap.id, "error": format!("write: {e}") }));
             continue;
         }
