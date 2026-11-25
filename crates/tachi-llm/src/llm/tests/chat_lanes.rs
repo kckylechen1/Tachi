@@ -590,6 +590,7 @@ async fn foundry_request_does_not_cross_bind_siliconflow_key_to_deepseek() {
     use std::sync::{Arc, Mutex};
 
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env_guards = [
         EnvRestore::unset("DISTILL_API_KEY"),
         EnvRestore::unset("REASONING_API_KEY"),
@@ -845,6 +846,7 @@ async fn capture_extract_outbound_body(
 #[tokio::test]
 async fn outbound_extract_request_uses_host_specific_thinking_fields() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let official = capture_extract_outbound_body(
@@ -1036,6 +1038,7 @@ async fn capture_summary_receipt_outbound(
 #[tokio::test]
 async fn outbound_summary_request_recognizes_both_official_flash_names() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     // The canned completion is a stub, not fidelity evidence.
@@ -1106,6 +1109,7 @@ async fn outbound_summary_request_recognizes_both_official_flash_names() {
 #[tokio::test]
 async fn outbound_summary_suppression_stays_host_bound_and_pro_keeps_thinking() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let provider_response = serde_json::json!({
@@ -1162,6 +1166,7 @@ async fn outbound_summary_suppression_stays_host_bound_and_pro_keeps_thinking() 
 #[tokio::test]
 async fn outbound_summary_explicit_env_off_is_honored() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::set("TACHI_DISABLE_THINKING_MODELS", "none");
 
     let provider_response = serde_json::json!({
@@ -1200,6 +1205,7 @@ async fn outbound_summary_explicit_env_off_is_honored() {
 #[tokio::test]
 async fn outbound_summary_dense_history_stays_delimited_from_instructions() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let dense_history = "2026-09-18 dense multi-item note (sanitized, generic identifiers): \
@@ -1271,6 +1277,7 @@ async fn summary_receipt_rejects_nonempty_length_but_legacy_keeps_compat() {
     use axum::{routing::post, Json, Router};
 
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let truncated_response = serde_json::json!({
@@ -1467,6 +1474,7 @@ async fn outbound_distill_request_keeps_legacy_summary_prompt_verbatim() {
 #[tokio::test]
 async fn summary_receipt_accepts_faithful_summaries_of_useful_length() {
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let ok_response = |content: String| {
@@ -1559,6 +1567,7 @@ async fn legacy_summary_accepts_useful_over_100_char_output_verbatim() {
     use axum::{routing::post, Json, Router};
 
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = EnvRestore::unset("TACHI_DISABLE_THINKING_MODELS");
 
     let faithful = "cut off no more: as of 2026-09-20 the service-analog PR 88 passed CI while merge stayed pending owner review and rollout stayed gated on the quota check";
@@ -4508,6 +4517,163 @@ async fn a_chat_response_past_the_byte_cap_is_refused() {
         err.len() < 300,
         "the error must not hold the body: {} bytes",
         err.len()
+    );
+
+    task.abort();
+}
+
+/// A known provider's host over plain http is refused before the request,
+/// also when the key belongs to that provider.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn known_provider_over_plain_http_is_refused_even_for_its_own_key() {
+    // Under the lock: a test that holds the plain-http permit never overlaps.
+    let _guard = crate::test_support::global_test_lock().lock();
+    use axum::{routing::any, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().fallback(any({
+        let requests = Arc::clone(&requests);
+        move || {
+            let requests = Arc::clone(&requests);
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "choices": [{"message": {"content": "answer"}}]
+                }))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind plain-http provider");
+    let addr = listener.local_addr().expect("addr");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("plain-http provider");
+    });
+    let host = crate::llm::auth_probe::auth_probe_descriptor_for_host("api.siliconflow.cn")
+        .expect("SiliconFlow is a known provider")
+        .host;
+
+    let unused = ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        ProviderRuntimeConfig {
+            extract: unused.clone(),
+            summary: unused.clone(),
+            reasoning: ChatLaneConfig {
+                base_url: "http://api.siliconflow.cn/v1/chat/completions".to_string(),
+                model: "siliconflow-model".to_string(),
+                api_key_envs: vec!["__PLAIN_HTTP_KEY"],
+            },
+            distill: unused,
+            rerank: RerankConfig {
+                provider: RerankProviderKind::Voyage,
+                local_endpoint: None,
+            },
+        },
+        LaneFallbackConfig::default(),
+        None,
+    )
+    .expect("client");
+    assert!(client.set_provider_secret("__PLAIN_HTTP_KEY", "siliconflow-test-key"));
+    client.replace_http_client_for_tests(
+        LlmClient::http_client_with_host_resolved_for_tests(host, addr)
+            .expect("resolved SiliconFlow test client"),
+    );
+
+    let error = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("a known provider over plain http must fail closed");
+    assert!(
+        error.contains("https://api.siliconflow.cn")
+            && error.contains("refusing credential-bearing request"),
+        "unexpected fail-closed error: {error}"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "the plain-http endpoint must never receive a request"
+    );
+
+    task.abort();
+}
+
+/// A redirect from a provider is not followed: the bearer key and the body
+/// stay with the endpoint that was configured.
+#[tokio::test]
+async fn a_provider_redirect_is_not_followed() {
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let landings = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|| async { (StatusCode::FOUND, [("location", "/landing")], "moved") }),
+        )
+        .route(
+            "/landing",
+            get({
+                let landings = Arc::clone(&landings);
+                move || {
+                    let landings = Arc::clone(&landings);
+                    async move {
+                        landings.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({
+                            "choices": [{"message": {"content": "answer"}}]
+                        }))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirecting provider");
+    let port = listener.local_addr().expect("addr").port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("redirecting provider");
+    });
+
+    let lane = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "model".to_string(),
+        api_key_envs: vec!["__REDIRECTING_PROVIDER_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(lane),
+        LaneFallbackConfig::default(),
+        None,
+    )
+    .expect("client");
+    assert!(client.set_provider_secret("__REDIRECTING_PROVIDER_KEY", "secret"));
+
+    let error = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("a redirect must fail the call instead of being followed");
+    assert!(error.contains("302"), "{error}");
+    assert_eq!(
+        landings.load(Ordering::SeqCst),
+        0,
+        "the redirect target must not receive the request"
     );
 
     task.abort();
