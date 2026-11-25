@@ -34,7 +34,7 @@ Named after the Tachikomas from *Ghost in the Shell*: agents that evolve through
 
 ## Release status
 
-- **Current release:** `v2.0.0` (store schema 39). See the [2.0.0 notes](CHANGELOG.md#200---2026-09-25).
+- **Current release:** `v2.1.0` (store schema 41). See the [2.1.0 notes](CHANGELOG.md#210---2026-11-08).
 - **On `main`, not yet released:** first-party MCP is HTTP-only, the agent entry is a single default profile, and workspace binding, briefings, and CJK recall have improved. Hub's upstream MCP proxy and automatic advice producers have been retired. The capability descriptions below follow `main`; use the matching tag's documentation for a released binary. See [Unreleased](CHANGELOG.md#unreleased).
 - **Upgrading** from 1.9.x, or from a setup that launched Tachi as a stdio subprocess? Read [docs/UPGRADING.md](docs/UPGRADING.md) first.
 
@@ -48,14 +48,14 @@ Named after the Tachikomas from *Ghost in the Shell*: agents that evolve through
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-Or use the shell installer. The v2.0.0 tag publishes no OpenClaw plugin asset, so pass `--skip-plugin`:
+Or use the shell installer. The release tag publishes no OpenClaw plugin asset, so pass `--skip-plugin`:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 - On macOS the installer also installs and restarts a user LaunchAgent (`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`). Add `--skip-daemon-service` if you only want the binary.
-- The tag pipeline ships one prebuilt archive, `tachi-v2.0.0-aarch64-apple-darwin` (Apple Silicon). Other platforms must build from source (unverified).
+- The tag pipeline ships one prebuilt archive, `tachi-v2.1.0-aarch64-apple-darwin` (Apple Silicon). Other platforms must build from source (unverified).
 
 Verify:
 
@@ -305,7 +305,7 @@ cargo nextest run --workspace
 cargo run -p tachi-server -- --daemon --port 6919 serve
 ```
 
-Requires Rust ≥ 1.75. Coding agents follow the [repository contract](AGENTS.md); [CLAUDE.md](CLAUDE.md) only adapts it for Claude.
+Requires Rust 1.99, the toolchain pinned in `rust-toolchain.toml`. Coding agents follow the [repository contract](AGENTS.md); [CLAUDE.md](CLAUDE.md) only adapts it for Claude.
 
 ---
 

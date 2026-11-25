@@ -2,6 +2,7 @@
 name = "memcore"
 version = "2.1.0"
 edition = "2021"
+rust-version = { workspace = true }
 description = "MemCore — portable memory kernel (store, schema, hybrid search/scorer, graph, events)"
 license = "AGPL-3.0-only"
 

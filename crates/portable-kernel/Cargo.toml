@@ -2,6 +2,7 @@
 name = "portable-kernel"
 version = "1.9.0"
 edition = "2021"
+rust-version = { workspace = true }
 description = "Portable facade over memcore with Tachi admin features disabled"
 license = "AGPL-3.0-only"
 publish = false

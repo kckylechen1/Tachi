@@ -43,6 +43,12 @@ default-members = [
 ]
 resolver = "2"
 
+# The toolchain this repository builds and tests with is pinned in
+# `rust-toolchain.toml`; nothing older is verified. 1.94.1 fails on
+# `AtomicU64::try_update`.
+[workspace.package]
+rust-version = "1.99"
+
 [profile.release]
 lto = true
 strip = true

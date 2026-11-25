@@ -2,6 +2,7 @@
 name = "vault-kit"
 version = "0.1.0"
 edition = "2021"
+rust-version = { workspace = true }
 license = "AGPL-3.0-only"
 description = "Shared Argon2id + AES-256-GCM vault crypto primitives and versioned KDF-parameter format, extracted for cross-product reuse (tachi#1080)."
 publish = false
