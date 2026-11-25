@@ -1,0 +1,112 @@
+"""Regression tests for scripts/package_release_binary.sh.
+
+The packager runs with --skip-build against a stand-in binary and stand-in
+rustc, uname and codesign, so nothing is compiled, signed or executed for real.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/package_release_binary.sh"
+HOST = "aarch64-apple-darwin"
+VERSION = "9.9.9"
+
+
+@unittest.skipUnless(shutil.which("shasum"), "shasum is required by the packager")
+class PackageReleaseBinaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.out = self.root / "out"
+        self.out.mkdir()
+        self.target = self.root / "target"
+        self.fake_bin = self.root / "fake-bin"
+        self.fake_bin.mkdir()
+        self.codesign_log = self.root / "codesign"
+        self.smoke_log = self.root / "smoke"
+        self.write_tool("rustc", f"#!/bin/sh\nprintf 'host: {HOST}\\n'\n")
+        self.write_tool("uname", '#!/bin/sh\necho Darwin\n')
+        self.write_tool(
+            "codesign",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{self.codesign_log}\"\n",
+        )
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def write_tool(self, name: str, body: str) -> None:
+        path = self.fake_bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def stage_binary(self, relative: str, *, runs: bool = True) -> None:
+        path = self.target / relative / "release/tachi-server"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        verdict = "echo 'tachi 9.9.9-test'" if runs else "exit 126"
+        path.write_text(
+            f"#!/bin/sh\nprintf 'ran\\n' >> \"{self.smoke_log}\"\n{verdict}\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def run_packager(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/bash", str(SCRIPT), VERSION, "--skip-build", *args],
+            cwd=ROOT,
+            env=os.environ
+            | {
+                "OUT_DIR": str(self.out),
+                "CARGO_TARGET_DIR": str(self.target),
+                "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def lines(self, path: Path) -> list[str]:
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    def test_a_native_package_is_smoke_tested_signed_and_leaves_only_the_tarball(self) -> None:
+        self.stage_binary("")
+        result = self.run_packager()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        stem = f"tachi-v{VERSION}-{HOST}"
+        tarball = self.out / f"{stem}.tar.gz"
+        self.assertTrue(tarball.is_file())
+        self.assertFalse((self.out / stem).exists(), "the staging directory was left behind")
+        self.assertEqual(self.lines(self.codesign_log), [f"--force -s - {self.out / stem}/tachi"])
+        self.assertEqual(self.lines(self.smoke_log), ["ran"])
+
+        digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+        sums = self.out / f"tachi-v{VERSION}-SHASUMS256.txt"
+        self.assertEqual(sums.read_text(encoding="utf-8"), f"{digest}  {stem}.tar.gz\n")
+        self.assertEqual(
+            sorted(entry.name for entry in self.out.iterdir()),
+            sorted([tarball.name, sums.name]),
+        )
+
+    def test_a_cross_built_package_is_neither_executed_nor_signed(self) -> None:
+        triple = "x86_64-unknown-linux-gnu"
+        self.stage_binary(triple, runs=False)
+        result = self.run_packager("--triple", triple)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.assertIn(f"smoke test skipped: {triple} does not run on {HOST}", result.stdout)
+        self.assertEqual(self.lines(self.codesign_log), [], "a non-Apple triple was signed")
+        self.assertEqual(self.lines(self.smoke_log), [], "a foreign binary was executed")
+        self.assertTrue((self.out / f"tachi-v{VERSION}-{triple}.tar.gz").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()
