@@ -53,8 +53,32 @@ Earlier releases are archived in the [full historical changelog](https://github.
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Added
+
+- A2A: an enrolled mutual TLS admission gateway (#2405), authenticated remote refusal and replay receipts (#2406), and bounded origin submissions with current-claim egress (#2412).
+- memcore: scoped typed record queries and erasure (#2404).
+- Per-call workspace routing for admitted unbound HTTP sessions (#2397).
+- Owner-scoped task SSE notifications that wake ReiClaw (#2408).
+- Live native clarifications are answered with owned revision fencing (#2410).
+- OpenCode models configured through `staff.json`, with an allowlisted override (#2416).
+
+### Fixed
+
+- Verified admission windows are compared with nanosecond timestamps (#2421).
+- On a clean daemon exit the read pools close before the write store and the WAL is drained (#2419).
+- Route attribution and policy rules are scoped by the resolved model (#2417).
+- Acceptance verifies injected MCP calls through the daemon audit log and supports model overrides (#2415).
+- Native action receipts expose the canonical state (#2399).
+- Global and historical result parity is retained for MCP (#2409).
+- Legacy opencode `auth.json` credentials are filtered to the pinned provider (#2414).
+- Explicit closure is separated from review evidence (#2400).
+- Aged `identity_admissions` are pruned, the WAL vacuum is hardened and freelist bloat is surfaced (Refs #2297).
+- Quoted credentials are redacted in the shared secret scanner (#2381).
+- `url` is bumped to 2.5.9 for RUSTSEC-2026-0592 (#2411).
+
 ### Removed
 
+- The OpenClaw skill export target; an unsupported empty target is refused (#2392).
 - `tachi skill-surface` (`status`, `sources`, `sync-plan`, `link`, `unlink`, `links`) and the retired `scripts/tachi-skill.sh` stub. Host skill projections are no longer managed through Tachi (#871 closed as not planned). The `tachi_skill` MCP facade and builtin skills are unchanged. Links previously created with `tachi skill-surface link` stay in place; remove them manually, since `unlink` no longer exists.
 - Dead recall tooling: `scripts/check-bootstrap-test-split.py` (uninvoked #1714 guard), `tools/zvec-shadow/` (#683 sidecar experiment, closed), and `tools/recall-eval/` (July personal-corpus toolchain that depended on the sidecar; recall-quality evaluation now runs outside this repo, see #2113). The in-repo synthetic golden-corpus regression test is unchanged.
 
