@@ -583,21 +583,22 @@ impl NativeAcpConnection {
                     "native adapter does not offer requested {category}={requested}; no fallback"
                 ));
             }
-            if option["currentValue"] != requested {
-                let response = self
-                    .request(
-                        "session/set_config_option",
-                        json!({
-                            "sessionId": session, "configId": id, "value": requested,
-                        }),
-                    )
-                    .await?;
-                self.config_options = response
-                    .get("configOptions")
-                    .cloned()
-                    .ok_or("native config selection returned no observed options")?;
-                self.observed_model = self.current_option("model").map(str::to_owned);
-            }
+            // Always send session/set_config_option even when currentValue already
+            // matches: adapters such as OpenCode report an unpinned session/new default
+            // that later async catalog refreshes overwrite unless explicitly pinned.
+            let response = self
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": session, "configId": id, "value": requested,
+                    }),
+                )
+                .await?;
+            self.config_options = response
+                .get("configOptions")
+                .cloned()
+                .ok_or("native config selection returned no observed options")?;
+            self.observed_model = self.current_option("model").map(str::to_owned);
             if self.current_option(category) != Some(requested) {
                 return Err(format!(
                     "native adapter did not acknowledge {category}={requested}; no prompt sent"

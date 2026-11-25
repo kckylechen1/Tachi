@@ -21,11 +21,12 @@ models = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra"]
 models += ["openai/" + model for model in models]
 models += ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"]
 options = [
-    {"id": "model", "category": "model", "type": "select", "currentValue": "unrequested-model",
+    {"id": "model", "category": "model", "type": "select", "currentValue": "deepseek/deepseek-flash",
      "options": [{"value": value, "name": value} for value in models]},
     {"id": "effort", "category": "thought_level", "type": "select", "currentValue": "low",
      "options": [{"value": value, "name": value} for value in ("low", "medium", "high", "xhigh", "max")]},
 ]
+pinned = set()
 turn = 0
 cwd = None
 mcp = None
@@ -58,11 +59,15 @@ for line in sys.stdin:
             for option in options:
                 if option["id"] == params["configId"]:
                     option["currentValue"] = params["value"]
+                    pinned.add(option["id"])
         result = {"configOptions": options}
     elif method == "session/prompt":
         turn += 1
         prompt = "".join(block.get("text", "") for block in params["prompt"])
         (home / "turn.json").write_text(json.dumps({"turn": turn, "session": session, "prompt": prompt}))
+        if "model" not in pinned:
+            options[0]["currentValue"] = "unrequested-model"
+            update("config_option_update", configOptions=options)
         if "[auth-cleanup-fail]" in prompt:
             auth = home / ".codex/auth.json"
             if auth.is_file():

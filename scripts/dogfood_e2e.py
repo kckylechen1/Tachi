@@ -1969,6 +1969,12 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
             ctx.check("opencode_review picks up staff.json default_model without daemon restart",
                       find_key(seat_default_status, "native_session")["observed"]["model"] == "deepseek/deepseek-flash"
                       and '"opencode_auth": ["deepseek"]' in seat_default_report, seat_default_status)
+            ctx.check("ACP negotiation explicitly pins model even when session/new default matches",
+                      any(row.get("direction") == "client"
+                          and row.get("message", {}).get("method") == "session/set_config_option"
+                          and row.get("message", {}).get("params", {}).get("value") == "deepseek/deepseek-flash"
+                          for row in events(seat_default)),
+                      events(seat_default))
             finish(owner, seat_default, seat_default_status)
 
             seat_override = start(owner, "Review using explicit model override.",
