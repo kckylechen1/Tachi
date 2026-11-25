@@ -11,6 +11,7 @@ on:
 jobs:
   resolve-version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -58,6 +59,7 @@ jobs:
             platform: sonoma
 
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     name: Bottle - ${{ matrix.platform }}
 
     steps:
@@ -130,6 +132,7 @@ jobs:
   publish-bottles:
     needs: [resolve-version, build-bottle]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
 

@@ -10,6 +10,7 @@ permissions:
 jobs:
   close-external-pr:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Only run for PRs not opened by the repository owner.
     if: github.event.pull_request.user.login != 'kckylechen1'
     steps:
