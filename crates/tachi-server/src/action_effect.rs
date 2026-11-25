@@ -116,6 +116,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_register",
     "hub_quick_add",
     "hub_review",
+    "hub_set_enabled",
     "hub_export_skills",
     "capture_session",
     "archive_memory",
@@ -692,6 +693,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Enabling or disabling a Hub capability changes what every cached Hub
+    /// read reports. The call drops the tool cache through the real request
+    /// path, like the other Hub writes.
+    #[tokio::test]
+    async fn enabling_a_hub_capability_drops_cached_tool_results() {
+        let arguments = serde_json::from_value::<serde_json::Map<String, Value>>(
+            serde_json::json!({"id": "no-such-capability", "enabled": false}),
+        )
+        .expect("arguments");
+        for (tool, drops_cache) in [("hub_set_enabled", true), ("hub_discover", false)] {
+            let server = crate::tests::make_server();
+            server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+            server.tool_cache_lock().insert(
+                "hub_stats {}".to_string(),
+                crate::server_state::CachedResult {
+                    result: rmcp::model::CallToolResult::success(Vec::new()),
+                    created_at: std::time::Instant::now(),
+                },
+            );
+
+            // The capability need not exist: the cache is dropped before the
+            // tool runs.
+            let _ =
+                crate::tests::call_tool_on_server(server.clone(), tool, Some(arguments.clone()))
+                    .await;
+
+            assert_eq!(
+                server.tool_cache_lock().is_empty(),
+                drops_cache,
+                "'{tool}' must {} the tool cache",
+                if drops_cache { "drop" } else { "keep" }
+            );
         }
     }
 
