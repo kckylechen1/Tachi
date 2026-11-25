@@ -26,14 +26,14 @@
 //! account handle and left it in `endpoint_ref` — proof that partial
 //! redaction is the shape that fails.
 //!
-//! # Why the parsing is by hand
+//! # Why the parsing is `url::Url`
 //!
-//! memcore is a storage leaf and resolves no URL crate; adding one for a
-//! substring scan would be a dependency for a parser we can state in twenty
-//! lines. The scan is deliberately narrow — the authority for userinfo, the
-//! query string for credential-shaped keys — and it percent-decodes keys
-//! before comparing, because `?%61pi_key=` is the same key spelled to slip
-//! past a literal match.
+//! The request path parses with this crate (reqwest builds on it), so the
+//! gate sees the URL the provider receives. A hand scan drifted from it in
+//! the direction that matters: the parser removes tabs and newlines before it
+//! reads a URL, so `?api_<TAB>key=` reached a provider as `api_key` and
+//! passed the gate. A string that is not an absolute URL is still scanned by
+//! hand: nothing sends it, but the catalog may store it.
 
 /// Query keys whose presence means "a credential is being smuggled in the
 /// query string", matched case-insensitively and against the **whole** key
@@ -86,18 +86,36 @@ impl std::fmt::Display for EndpointCredentialLeak {
 /// `None` is the ordinary case, including a URL with a perfectly normal query
 /// string: this is a credential-key rule, not a ban on query strings.
 pub fn endpoint_credential_leak(endpoint: &str) -> Option<EndpointCredentialLeak> {
+    match url::Url::parse(endpoint) {
+        Ok(url) => {
+            if !url.username().is_empty() || url.password().is_some() {
+                return Some(EndpointCredentialLeak::Userinfo);
+            }
+            url.query_pairs()
+                .find_map(|(key, _)| credential_shaped_key(key.as_ref()))
+        }
+        Err(_) => scan_by_hand(endpoint),
+    }
+}
+
+fn credential_shaped_key(key: &str) -> Option<EndpointCredentialLeak> {
+    CREDENTIAL_SHAPED_QUERY_KEYS
+        .iter()
+        .any(|needle| key.eq_ignore_ascii_case(needle))
+        .then(|| EndpointCredentialLeak::QueryKey {
+            key: key.to_string(),
+        })
+}
+
+/// The same rule for a string `url` refuses: not an absolute URL, or not a
+/// URL at all.
+fn scan_by_hand(endpoint: &str) -> Option<EndpointCredentialLeak> {
     if endpoint_authority(endpoint).contains('@') {
         return Some(EndpointCredentialLeak::Userinfo);
     }
-    for key in query_keys(endpoint) {
-        if CREDENTIAL_SHAPED_QUERY_KEYS
-            .iter()
-            .any(|needle| key.eq_ignore_ascii_case(needle))
-        {
-            return Some(EndpointCredentialLeak::QueryKey { key });
-        }
-    }
-    None
+    query_keys(endpoint)
+        .iter()
+        .find_map(|key| credential_shaped_key(key))
 }
 
 /// The authority substring: scheme off, and the first `/`, `?` or `#` ends it.
@@ -235,6 +253,46 @@ mod tests {
         ] {
             assert_eq!(endpoint_credential_leak(endpoint), None, "{endpoint}");
         }
+    }
+
+    #[test]
+    fn a_tab_or_newline_inside_a_key_does_not_slip_past_the_gate() {
+        // The parser the request uses removes tabs and newlines before it
+        // reads the URL, so both of these reach the provider as `api_key`.
+        for separator in ["\t", "\n", "\r"] {
+            let endpoint =
+                format!("https://api.example.invalid/v1?api_{separator}key=sk-live-secret");
+            assert_eq!(
+                endpoint_credential_leak(&endpoint),
+                Some(EndpointCredentialLeak::QueryKey {
+                    key: "api_key".to_string()
+                }),
+                "{endpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_ends_the_authority_the_way_the_request_path_reads_it() {
+        // Host `api.example.invalid`, path `/@x/v1`: there is no userinfo.
+        assert_eq!(
+            endpoint_credential_leak("https://api.example.invalid\\@x/v1"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_string_that_is_not_an_absolute_url_is_still_scanned_by_hand() {
+        assert_eq!(
+            endpoint_credential_leak("api.example.invalid/v1?api_key=sk-live-secret"),
+            Some(EndpointCredentialLeak::QueryKey {
+                key: "api_key".to_string()
+            })
+        );
+        assert_eq!(
+            endpoint_credential_leak("https://user:pass@api.example.invalid:notaport/v1"),
+            Some(EndpointCredentialLeak::Userinfo)
+        );
     }
 
     #[test]
