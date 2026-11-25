@@ -7,9 +7,13 @@
 
 use rusqlite::{
     backup::{Backup, StepResult},
-    Connection, OpenFlags,
+    hooks::{AuthAction, AuthContext, Authorization},
+    params, Connection, OpenFlags,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// The caller owns a fresh private directory for one immutable test run and
 /// removes it after all test children exit. Without it, keep fresh initialization.
@@ -18,6 +22,91 @@ pub(crate) fn memory_connection() -> Connection {
         Some(root) => template_connection(Path::new(&root), || {}),
         None => fresh_memory_connection(),
     }
+}
+
+/// The moment at which [`with_racing_write`] lets a second connection try to
+/// commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RacePoint {
+    /// When the work prepares its first transaction statement.
+    Transaction,
+    /// When the work prepares its first write.
+    FirstWrite,
+}
+
+/// A private file-backed connection with the current schema, in WAL mode, so a
+/// second connection can reach the same database.
+pub(crate) fn file_backed_connection(path: &Path) -> Connection {
+    register_extensions();
+    let conn = Connection::open(path).expect("open file-backed test database");
+    crate::db::init_schema(&conn).expect("initialize schema");
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .expect("enable WAL");
+    conn
+}
+
+/// Commit one audit row; the racing write most tests need.
+pub(crate) fn commit_one_audit_row(other: &Connection) -> bool {
+    other
+        .execute(
+            "INSERT INTO audit_log (timestamp, server_id, tool_name, args_hash, success,
+                duration_ms, error_kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                jiff::Timestamp::now().to_string(),
+                "mcp:racing-writer",
+                "racing_write",
+                "",
+                1,
+                1,
+                Option::<String>::None,
+                jiff::Timestamp::now().to_string()
+            ],
+        )
+        .is_ok()
+}
+
+/// Run `work` on `conn` while `racing` gets a second connection to the same
+/// database the moment `work` reaches `point`. Returns what `work` returned
+/// and what `racing` reported.
+///
+/// A transaction that reads before it takes the write lock loses its snapshot
+/// to a row committed in between and then fails with `database is locked`; one
+/// that takes the lock first leaves the other write no way in.
+pub(crate) fn with_racing_write<T>(
+    conn: &mut Connection,
+    path: &Path,
+    point: RacePoint,
+    racing: impl FnOnce(&Connection) -> bool + Send + 'static,
+    work: impl FnOnce(&mut Connection) -> T,
+) -> (T, bool) {
+    let mut racing = Some(racing);
+    let attempted = AtomicBool::new(false);
+    let landed = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&landed);
+    let path = path.to_path_buf();
+    conn.authorizer(Some(move |context: AuthContext<'_>| {
+        let reached = match point {
+            RacePoint::Transaction => matches!(context.action, AuthAction::Transaction { .. }),
+            RacePoint::FirstWrite => matches!(
+                context.action,
+                AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. }
+            ),
+        };
+        if reached && !attempted.swap(true, Ordering::SeqCst) {
+            let other = Connection::open(&path).expect("open the second connection");
+            let _ = other.busy_timeout(Duration::ZERO);
+            if let Some(racing) = racing.take() {
+                observed.store(racing(&other), Ordering::SeqCst);
+            }
+        }
+        Authorization::Allow
+    }))
+    .expect("install the authorizer");
+    let outcome = work(&mut *conn);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("remove the authorizer");
+    (outcome, landed.load(Ordering::SeqCst))
 }
 
 fn register_extensions() {

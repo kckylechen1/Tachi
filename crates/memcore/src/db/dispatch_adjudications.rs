@@ -1,6 +1,6 @@
 //! Append-only leader adjudication events for dispatch outcomes (#1035).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::error::MemoryError;
 
@@ -138,8 +138,10 @@ fn append_event(
     // then permanently entrenched — the next replay returned the orphan. An
     // unchecked_transaction on &Connection auto-rolls-back on drop (any `?`
     // propagation), so a mid-append failure atomically disappears the entire
-    // event, parent row included.
-    let tx = conn.unchecked_transaction()?;
+    // event, parent row included. IMMEDIATE takes the write lock before the
+    // reads below: a DEFERRED transaction that read first could not upgrade
+    // once another writer committed, and failed with `database is locked`.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     // FIX-1 (#1035 round 4): outcome existence check runs BEFORE the
     // event_key short-circuit. Previously the short-circuit came first, so
@@ -443,6 +445,30 @@ mod tests {
             signatures: Vec::new(),
             adjudication_receipt: None,
         }
+    }
+
+    // A writer that committed between this append's existence reads and its
+    // inserts used to leave it failing with `database is locked`.
+    #[test]
+    fn append_holds_the_write_lock_before_it_reads() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("adjudications.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        seed_outcome(&conn, "outcome-1");
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::FirstWrite,
+            crate::test_fixtures::commit_one_audit_row,
+            |conn| append_dispatch_adjudication(conn, &event("event-race")),
+        );
+
+        outcome.unwrap();
+        assert!(
+            !landed,
+            "the other write must find the lock this append already holds"
+        );
     }
 
     #[test]

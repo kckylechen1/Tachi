@@ -853,7 +853,7 @@ pub fn reclaim_exec_env(
     selector: &ExecEnvSelector,
     reason: Option<&str>,
 ) -> Result<ReclaimOutcome, MemoryError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Resolve existence before holder evidence: a missing ledger row is not
     // unverifiable holder evidence, it is a caller-visible missing target.
     let existing: Option<(String, String)> = match selector {
@@ -1059,6 +1059,42 @@ mod tests {
         assert_eq!(
             get_exec_env(&conn, "env-held").unwrap().unwrap().state,
             ExecEnvState::Active
+        );
+    }
+
+    // A writer that committed between this function's read and its write
+    // used to leave it failing with `database is locked`: a DEFERRED
+    // transaction cannot upgrade a snapshot another connection has moved past.
+    #[test]
+    fn reclaim_exec_env_holds_the_write_lock_before_it_reads() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("exec-envs.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        insert_exec_env(&conn, &new_lease("env-race", "/wt/race")).unwrap();
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::FirstWrite,
+            crate::test_fixtures::commit_one_audit_row,
+            |conn| {
+                reclaim_exec_env(
+                    conn,
+                    &ExecEnvSelector::EnvId("env-race".to_string()),
+                    Some("cleanup"),
+                )
+            },
+        );
+
+        assert_eq!(
+            outcome.unwrap(),
+            ReclaimOutcome::Reclaimed {
+                env_id: "env-race".to_string()
+            }
+        );
+        assert!(
+            !landed,
+            "the other write must find the lock this function already holds"
         );
     }
 

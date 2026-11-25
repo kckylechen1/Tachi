@@ -246,6 +246,37 @@ mod tests {
         );
     }
 
+    // A writer that committed between this sweep's candidate read and its
+    // first UPDATE used to leave it failing with `database is locked`.
+    #[test]
+    fn requeue_retryable_foundry_jobs_holds_the_write_lock_before_it_reads() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("foundry-requeue.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        insert_minimal_job(&conn, "f-race", "failed");
+        backdate_updated_at(&conn, "f-race", 3600);
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::FirstWrite,
+            crate::test_fixtures::commit_one_audit_row,
+            |conn| {
+                requeue_retryable_foundry_jobs(
+                    conn,
+                    &FoundryRetryPolicy::default(),
+                    jiff::Timestamp::now(),
+                )
+            },
+        );
+
+        assert_eq!(outcome.unwrap().requeued, 1);
+        assert!(
+            !landed,
+            "the other write must find the lock this sweep already holds"
+        );
+    }
+
     #[test]
     fn requeue_recovers_failed_job_after_backoff_and_increments_attempts() {
         let conn = open_test_db();

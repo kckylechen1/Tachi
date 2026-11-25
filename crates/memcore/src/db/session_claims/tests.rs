@@ -1321,3 +1321,77 @@ fn handoff_refuses_an_empty_serialized_scope() {
         Err(MemoryError::InvalidArg(_))
     ));
 }
+
+// A writer that committed between this function's read and its write used to
+// leave it failing with `database is locked`: a DEFERRED transaction cannot
+// upgrade a snapshot another connection has moved past.
+#[test]
+fn release_claim_holds_the_write_lock_before_it_reads() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let path = temp_dir.path().join("claims.sqlite");
+    let mut conn = crate::test_fixtures::file_backed_connection(&path);
+    insert_claim(&conn, &new_claim("claim-release-race", "org/repo#race")).unwrap();
+
+    let (outcome, landed) = crate::test_fixtures::with_racing_write(
+        &mut conn,
+        &path,
+        crate::test_fixtures::RacePoint::FirstWrite,
+        crate::test_fixtures::commit_one_audit_row,
+        |conn| {
+            release_claim(
+                conn,
+                &ClaimSelector::ClaimId("claim-release-race".to_string()),
+                Some("done"),
+            )
+        },
+    );
+
+    assert_eq!(
+        outcome.unwrap(),
+        ReleaseOutcome::Released {
+            claim_id: "claim-release-race".to_string()
+        }
+    );
+    assert!(
+        !landed,
+        "the other write must find the lock this function already holds"
+    );
+}
+
+#[test]
+fn bind_work_claim_exec_env_holds_the_write_lock_before_it_reads() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let path = temp_dir.path().join("claims-bind.sqlite");
+    let mut conn = crate::test_fixtures::file_backed_connection(&path);
+    identity(&conn, "agent-bind-race");
+    insert_work_claim(&conn, &work_claim("claim-bind-race", "agent-bind-race")).unwrap();
+    crate::db::exec_env::insert_exec_env(
+        &conn,
+        &crate::db::exec_env::NewExecEnvLease {
+            env_id: "env-bind-race".into(),
+            kind: "worktree".into(),
+            path: "/wt/bind-race".into(),
+            repo_root: "/repo".into(),
+            branch: "lane/bind-race".into(),
+            base_sha: "3c09b425".into(),
+            dispatch_id: None,
+            env_class: crate::db::exec_env::EnvClass::EditOnly,
+            created_at: String::new(),
+        },
+    )
+    .unwrap();
+
+    let (outcome, landed) = crate::test_fixtures::with_racing_write(
+        &mut conn,
+        &path,
+        crate::test_fixtures::RacePoint::FirstWrite,
+        crate::test_fixtures::commit_one_audit_row,
+        |conn| bind_work_claim_exec_env(conn, "claim-bind-race", "env-bind-race", 0),
+    );
+
+    assert_eq!(outcome.unwrap(), 1);
+    assert!(
+        !landed,
+        "the other write must find the lock this function already holds"
+    );
+}

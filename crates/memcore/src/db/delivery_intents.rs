@@ -72,7 +72,7 @@
 //! `event_id`; replays collide with `UNIQUE (delivery_id, event_id)` and are
 //! suppressed as idempotent receipts, never re-applied.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -448,8 +448,15 @@ pub fn mint_delivery_intent(
     }
 
     // Row + ledger events land atomically: a mint is never observable as a
-    // bare row without its receipts.
-    let tx = conn.unchecked_transaction()?;
+    // bare row without its receipts. The lookup is repeated under the write
+    // lock that covers the insert: two mints of one idempotency key otherwise
+    // both saw no intent, and the loser failed on the unique key instead of
+    // reconciling with the winner.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if let Some(existing) = find_intent_by_key(&tx, &new.idempotency_key)? {
+        drop(tx);
+        return reconcile_mint(conn, existing, new, &now);
+    }
     tx.execute(
         "INSERT INTO delivery_intents (
             delivery_id, idempotency_key, execution_source, execution_ref,
@@ -1686,6 +1693,38 @@ mod tests {
             expires_at: None,
             correction: false,
         }
+    }
+
+    // Two mints of one idempotency key: the lookup that decides whether the
+    // row exists shares the write lock with the insert. Looked up outside it,
+    // the loser of the race saw no intent and then failed on the unique key
+    // instead of reconciling with the winner.
+    #[test]
+    fn a_mint_that_races_another_mint_of_its_key_reconciles_with_the_winner() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("delivery-intents.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        let winner = mint_new("shared-race-key");
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::Transaction,
+            move |other| mint_delivery_intent(other, &winner).is_ok(),
+            |conn| mint_delivery_intent(conn, &mint_new("shared-race-key")),
+        );
+
+        assert!(landed, "the other mint commits before this one begins");
+        let minted = outcome.expect("the racing mint reconciles with the winner");
+        assert_eq!(minted.idempotency_key, "shared-race-key");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_intents WHERE idempotency_key = ?1",
+                params!["shared-race-key"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "one idempotency key, one intent");
     }
 
     /// Execution/adjudication fixture rows that must stay byte-identical

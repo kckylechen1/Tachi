@@ -33,7 +33,7 @@
 //! GC ever runs (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts
 //! on — see that function's doc comment).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::str::FromStr;
 
 use crate::error::{MemoryError, WorkClaimTransitionReason};
@@ -1070,7 +1070,7 @@ pub fn bind_work_claim_exec_env(
     env_id: &str,
     expected_version: i64,
 ) -> Result<i64, MemoryError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let claim: Option<(Option<String>, String, i64, Option<String>)> = tx.query_row("SELECT agent_identity_id,state,transition_version,exec_env_id FROM session_claims WHERE claim_id=?1", params![claim_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let Some((Some(identity), state, version, existing_env)) = claim else {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
@@ -1393,7 +1393,7 @@ pub fn release_claim(
     selector: &ClaimSelector,
     reason: Option<&str>,
 ) -> Result<ReleaseOutcome, MemoryError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let existing: Option<(String, String, Option<String>, Option<String>)> = match selector {
         ClaimSelector::ClaimId(claim_id) => tx
             .query_row(
