@@ -811,6 +811,60 @@ fn bootstrap_auto_unlock_owns_one_provider_refresh() {
     );
 }
 
+/// Argon2id takes long enough to be seen. While it runs for an unlock, the
+/// rest of the runtime must keep making progress.
+#[tokio::test(flavor = "current_thread")]
+async fn vault_unlock_derives_the_key_off_the_async_thread() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-off-thread-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+    });
+    // Let the ticker start before the unlock begins.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let before = ticks.load(Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: "correct-password".to_string(),
+            password_fifo_path: None,
+            use_keychain: false,
+        },
+    )
+    .await
+    .expect("the right password unlocks the vault");
+    let elapsed_ms = started.elapsed().as_millis() as usize;
+    ticker.abort();
+    let during = ticks.load(Ordering::SeqCst) - before;
+    assert!(
+        elapsed_ms >= 50,
+        "the KDF took {elapsed_ms} ms: too short for this test to tell where it ran"
+    );
+    assert!(
+        during >= 5,
+        "the ticker advanced {during} times while the unlock took {elapsed_ms} ms: the KDF ran on the async thread"
+    );
+}
+
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_fifo_path_together() {
     let db_path = crate::utils::test_fixture_path(format!(
