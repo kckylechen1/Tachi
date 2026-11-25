@@ -8,6 +8,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use super::catalog_import::DeploymentAttribution;
+use super::helpers::{read_upstream_body, redact_provider_response};
 
 /// Config env: `TACHI_RERANK_PROVIDER=voyage|local` (default: voyage).
 pub const RERANK_PROVIDER_ENV: &str = "TACHI_RERANK_PROVIDER";
@@ -303,7 +304,7 @@ impl super::LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            let text = response.text().await.map_err(|e| {
+            let text = read_upstream_body(response).await.map_err(|e| {
                 // Headers-then-stall (#926 review): the body read carries its
                 // own share of the request's `.timeout()` budget and can time
                 // out even though `send()` already returned Ok. Record it as
@@ -328,7 +329,11 @@ impl super::LlmClient {
                     retry_after,
                     DeploymentAttribution::Unattributed,
                 );
-                last_err = format!("Voyage rerank API error: {} - {}", status, text);
+                last_err = format!(
+                    "Voyage rerank API error: {} - {}",
+                    status,
+                    redact_provider_response(&text)
+                );
                 if attempt < max_attempts {
                     continue;
                 }
@@ -340,10 +345,18 @@ impl super::LlmClient {
                     Some(&format!("Voyage rerank auth failure {status}")),
                     DeploymentAttribution::Unattributed,
                 );
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
+                return Err(format!(
+                    "Voyage rerank API error: {} - {}",
+                    status,
+                    redact_provider_response(&text)
+                ));
             }
             if !status.is_success() {
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
+                return Err(format!(
+                    "Voyage rerank API error: {} - {}",
+                    status,
+                    redact_provider_response(&text)
+                ));
             }
             json = Some(
                 serde_json::from_str(&text)
@@ -430,13 +443,17 @@ impl super::LlmClient {
             };
 
             let status = response.status();
-            let text = response.text().await.map_err(|e| {
+            let text = read_upstream_body(response).await.map_err(|e| {
                 self.note_recall_provider_outcome(e.is_timeout());
                 format!("Local rerank response body read failed: {e}")
             })?;
             self.note_recall_provider_outcome(false);
             if status.as_u16() == 429 {
-                last_err = format!("Local rerank API error: {} - {}", status, text);
+                last_err = format!(
+                    "Local rerank API error: {} - {}",
+                    status,
+                    redact_provider_response(&text)
+                );
                 if attempt < max_attempts {
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
                     continue;
@@ -444,7 +461,11 @@ impl super::LlmClient {
                 return Err(last_err);
             }
             if !status.is_success() {
-                return Err(format!("Local rerank API error: {} - {}", status, text));
+                return Err(format!(
+                    "Local rerank API error: {} - {}",
+                    status,
+                    redact_provider_response(&text)
+                ));
             }
             json = Some(
                 serde_json::from_str(&text)

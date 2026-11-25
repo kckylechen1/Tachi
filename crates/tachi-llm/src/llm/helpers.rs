@@ -1,7 +1,8 @@
 // helpers.rs — pure utility methods on LlmClient (no field access)
 //
 // Retry/backoff math and LLM response parsing. These read no `self` state, so
-// they are grouped here independent of the rest of the client. They stay
+// they are grouped here independent of the rest of the client, together
+// with the boundary every upstream response body passes through. They stay
 // associated functions on `LlmClient` so call-sites (`Self::retry_delay`,
 // `LlmClient::strip_code_fence`) are unchanged across the split.
 
@@ -92,4 +93,70 @@ impl super::LlmClient {
 
         Err(format!("Incomplete JSON payload in response: {text}"))
     }
+}
+
+/// Upper bound on one upstream response body. Providers answer these requests
+/// with JSON documents of at most a few MiB, so a larger body is treated as
+/// one that never finished arriving.
+pub(super) const MAX_UPSTREAM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Why an upstream response body could not be used.
+pub(super) enum ResponseBodyError {
+    /// The transport failed before the body was complete.
+    Transport(reqwest::Error),
+    /// The body grew past [`MAX_UPSTREAM_RESPONSE_BYTES`].
+    TooLarge,
+}
+
+impl From<reqwest::Error> for ResponseBodyError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl std::fmt::Display for ResponseBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(f, "{error}"),
+            Self::TooLarge => {
+                write!(
+                    f,
+                    "response body exceeded {MAX_UPSTREAM_RESPONSE_BYTES} bytes"
+                )
+            }
+        }
+    }
+}
+
+impl ResponseBodyError {
+    /// Whether the request's own time budget ran out. A body cut off at the
+    /// byte cap is not that: the connection was delivering.
+    pub(super) fn is_timeout(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_timeout())
+    }
+}
+
+/// First boundary for an untrusted provider response body. Callers may inspect
+/// the body in memory to classify a retry, but errors, health state, outage
+/// aggregation, and tracing receive only this bounded marker.
+pub(super) fn redact_provider_response(resp_text: &str) -> String {
+    format!("provider response redacted ({} bytes)", resp_text.len())
+}
+
+/// `Response::text` with an upper bound: at most
+/// [`MAX_UPSTREAM_RESPONSE_BYTES`] are read, then the body is decoded as
+/// UTF-8. A body that declares another charset is not re-encoded; every
+/// supported provider answers UTF-8 JSON.
+pub(super) async fn read_upstream_body(
+    mut response: reqwest::Response,
+) -> Result<String, ResponseBodyError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_UPSTREAM_RESPONSE_BYTES {
+            return Err(ResponseBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let text = String::from_utf8_lossy(&body);
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
 }

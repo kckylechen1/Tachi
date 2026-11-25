@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::super::auth_probe_descriptor_for_host;
 use super::super::catalog_import::DeploymentAttribution;
+use super::super::helpers::{read_upstream_body, redact_provider_response};
 use super::super::provider_health::{
     bind_lane_config_to_selected_key, ChatLane, ChatLaneConfig, CompletionStatusV1, Generated,
     LaneAuthority, ModelInvocationLaneV1, ProviderAuthProbeFamily, ProviderInvocationFailure,
@@ -649,7 +650,7 @@ impl super::super::LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            let resp_text = match resp.text().await {
+            let resp_text = match read_upstream_body(resp).await {
                 Ok(text) => text,
                 Err(e) => {
                     let is_auth_status = status.as_u16() == 401 || status.as_u16() == 403;
@@ -1123,13 +1124,6 @@ fn failure_class_for_status(status: u16, resp_text: &str) -> ProviderInvocationF
         500..=599 => ProviderInvocationFailureClass::Transient,
         _ => ProviderInvocationFailureClass::LaneOutage,
     }
-}
-
-/// First boundary for an untrusted provider response body. Callers may inspect
-/// the body in memory to classify a retry, but errors, health state, outage
-/// aggregation, and tracing receive only this bounded marker.
-fn redact_provider_response(resp_text: &str) -> String {
-    format!("provider response redacted ({} bytes)", resp_text.len())
 }
 
 /// One usage row per call, never coalesced. The insert reuses the client's

@@ -431,3 +431,227 @@ async fn default_path_dispatches_to_voyage_arm() {
         "default must not hit local arm"
     );
 }
+
+// ---- Upstream response boundary --------------------------------------------
+
+/// A provider answer that names the caller's key. It may steer a retry in
+/// memory; it must not leave the client in an error.
+const LEAKY_PROVIDER_ANSWER: &str =
+    r#"{"error":"key test-voyage-key is not entitled to this model"}"#;
+
+/// A one-route mock that answers every POST with `status` and `body`.
+async fn fixed_response_mock(
+    path: &'static str,
+    status: axum::http::StatusCode,
+    body: String,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{extract::State, routing::post, Router};
+    let app = Router::new()
+        .route(
+            path,
+            post(move |State(body): State<String>| async move { (status, body) }),
+        )
+        .with_state(body);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fixed-response mock");
+    let port = listener.local_addr().expect("addr").port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock serve");
+    });
+    (format!("http://127.0.0.1:{port}"), task)
+}
+
+fn unused_lane() -> ChatLaneConfig {
+    ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec!["UNUSED_API_KEY"],
+    }
+}
+
+fn recall_client(rerank: RerankConfig) -> LlmClient {
+    LlmClient::new_with_config(
+        ProviderRuntimeConfig {
+            extract: unused_lane(),
+            summary: unused_lane(),
+            reasoning: unused_lane(),
+            distill: unused_lane(),
+            rerank,
+        },
+        None,
+    )
+    .expect("client")
+}
+
+fn voyage_rerank() -> RerankConfig {
+    RerankConfig {
+        provider: RerankProviderKind::Voyage,
+        local_endpoint: None,
+    }
+}
+
+/// Points Voyage at `base` and names the key a refused answer would leak.
+fn voyage_env(base: &str) -> (EnvRestore, EnvRestore, EnvRestore, EnvRestore, EnvRestore) {
+    (
+        EnvRestore::set(RERANK_VOYAGE_ENDPOINT_ENV, format!("{base}/v1/rerank")),
+        EnvRestore::set("VOYAGE_BASE_URL", base),
+        EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key"),
+        EnvRestore::unset("VOYAGE_RERANK_API_KEY"),
+        EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV),
+    )
+}
+
+async fn rerank_error(client: &LlmClient) -> String {
+    match client.rerank("which doc?", &["doc".to_string()], 1).await {
+        Ok(_) => panic!("a refused provider answer must fail the rerank"),
+        Err(err) => err,
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_rerank_error_does_not_carry_the_upstream_body() {
+    let (base, server) = fixed_response_mock(
+        "/v1/rerank",
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        LEAKY_PROVIDER_ANSWER.to_string(),
+    )
+    .await;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = voyage_env(&base);
+    let err = rerank_error(&recall_client(voyage_rerank())).await;
+    assert_eq!(
+        err,
+        format!(
+            "Voyage rerank API error: 500 Internal Server Error - provider response redacted ({} bytes)",
+            LEAKY_PROVIDER_ANSWER.len()
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_rerank_auth_error_does_not_carry_the_upstream_body() {
+    let (base, server) = fixed_response_mock(
+        "/v1/rerank",
+        axum::http::StatusCode::FORBIDDEN,
+        LEAKY_PROVIDER_ANSWER.to_string(),
+    )
+    .await;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = voyage_env(&base);
+    let err = rerank_error(&recall_client(voyage_rerank())).await;
+    assert_eq!(
+        err,
+        format!(
+            "Voyage rerank API error: 403 Forbidden - provider response redacted ({} bytes)",
+            LEAKY_PROVIDER_ANSWER.len()
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn local_rerank_error_does_not_carry_the_upstream_body() {
+    let (base, server) = fixed_response_mock(
+        "/rerank",
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        LEAKY_PROVIDER_ANSWER.to_string(),
+    )
+    .await;
+    let client = recall_client(RerankConfig {
+        provider: RerankProviderKind::Local,
+        local_endpoint: Some(format!("{base}/rerank")),
+    });
+    let err = rerank_error(&client).await;
+    assert_eq!(
+        err,
+        format!(
+            "Local rerank API error: 500 Internal Server Error - provider response redacted ({} bytes)",
+            LEAKY_PROVIDER_ANSWER.len()
+        )
+    );
+    server.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_batch_embedding_error_does_not_carry_the_upstream_body() {
+    let (base, server) = fixed_response_mock(
+        "/v1/embeddings",
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        LEAKY_PROVIDER_ANSWER.to_string(),
+    )
+    .await;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = voyage_env(&base);
+    let _model = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_MODEL_ENV);
+    let _voyage_model = EnvRestore::unset(crate::llm::embedding_config::VOYAGE_EMBED_MODEL_ENV);
+    let _dim = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_DIMENSION_ENV);
+    let err = match recall_client(voyage_rerank())
+        .embed_voyage_batch(&["probe document".to_string()], "document")
+        .await
+    {
+        Ok(_) => panic!("a refused provider answer must fail the batch"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err,
+        format!(
+            "Voyage batch API error: 500 Internal Server Error - provider response redacted ({} bytes)",
+            LEAKY_PROVIDER_ANSWER.len()
+        )
+    );
+    server.abort();
+}
+
+/// A provider that answers with more than the daemon is willing to hold for
+/// one response is refused at the cap instead of being buffered whole.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_voyage_response_past_the_byte_cap_is_refused() {
+    let (base, server) = fixed_response_mock(
+        "/v1/rerank",
+        axum::http::StatusCode::OK,
+        "x".repeat(16 * 1024 * 1024 + 1),
+    )
+    .await;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = voyage_env(&base);
+    let err = rerank_error(&recall_client(voyage_rerank())).await;
+    assert_eq!(
+        err,
+        "Voyage rerank response body read failed: response body exceeded 16777216 bytes"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_voyage_embedding_response_past_the_byte_cap_is_refused() {
+    let (base, server) = fixed_response_mock(
+        "/v1/embeddings",
+        axum::http::StatusCode::OK,
+        "x".repeat(16 * 1024 * 1024 + 1),
+    )
+    .await;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _env = voyage_env(&base);
+    let _model = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_MODEL_ENV);
+    let _voyage_model = EnvRestore::unset(crate::llm::embedding_config::VOYAGE_EMBED_MODEL_ENV);
+    let _dim = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_DIMENSION_ENV);
+    let err = match recall_client(voyage_rerank())
+        .embed_voyage_batch(&["probe document".to_string()], "document")
+        .await
+    {
+        Ok(_) => panic!("an oversized answer must fail the batch"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err,
+        "Voyage batch response body read failed: response body exceeded 16777216 bytes"
+    );
+    server.abort();
+}

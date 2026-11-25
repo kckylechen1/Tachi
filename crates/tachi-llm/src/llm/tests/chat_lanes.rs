@@ -4459,3 +4459,56 @@ fn lane_fallback_config_from_env_is_none_when_no_fallback_key_configured() {
     assert!(fallbacks.distill.is_none());
     assert!(fallbacks.reasoning.is_none());
 }
+
+/// A provider that answers with more than the daemon is willing to hold for
+/// one response is refused at the cap instead of being buffered whole.
+#[tokio::test]
+async fn a_chat_response_past_the_byte_cap_is_refused() {
+    use axum::{http::StatusCode, routing::post, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async move { (StatusCode::OK, "x".repeat(16 * 1024 * 1024 + 1)) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind oversized provider");
+    let port = listener
+        .local_addr()
+        .expect("oversized provider addr")
+        .port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("oversized provider");
+    });
+
+    let lane = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "model".to_string(),
+        api_key_envs: vec!["__OVERSIZED_ANSWER_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(lane),
+        LaneFallbackConfig::default(),
+        None,
+    )
+    .expect("client");
+    assert!(client.set_provider_secret("__OVERSIZED_ANSWER_KEY", "secret"));
+
+    let err = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("an oversized answer must fail the call");
+    assert!(
+        err.contains("Chat response body read failed after HTTP 200 OK: response body exceeded 16777216 bytes"),
+        "{err}"
+    );
+    assert!(
+        err.len() < 300,
+        "the error must not hold the body: {} bytes",
+        err.len()
+    );
+
+    task.abort();
+}
