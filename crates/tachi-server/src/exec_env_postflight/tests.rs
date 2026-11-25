@@ -644,7 +644,10 @@ fn required_gate_execution_error_has_an_error_receipt() {
 }
 
 #[cfg(unix)]
-#[ignore = "issue #1261: spawn() returning != child process group immediately schedulable; on containerized CI runners kill(-pgid,0) can transiently return ESRCH in the scheduling window before the child's pgid is live. Run with --ignored"]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "containerized Linux CI runners can answer ESRCH for a process group that was just created; run there with --ignored"
+)]
 #[test]
 fn process_group_liveness_sees_a_live_child_then_nothing_after_reap() {
     use std::os::unix::process::CommandExt;
