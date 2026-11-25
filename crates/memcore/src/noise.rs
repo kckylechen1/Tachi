@@ -227,6 +227,147 @@ pub fn scrub_think_tags(text: &str) -> String {
     re.replace_all(text, "").trim().to_string()
 }
 
+/// Position of `needle` in `text` at or after `from`, ASCII
+/// case-insensitive.
+fn find_ascii_ci(text: &str, needle: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let last = bytes.len().checked_sub(needle.len())?;
+    (from..=last).find(|&at| bytes[at..at + needle.len()].eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Byte ranges of the `<think>` blocks in `text`. A block that never closes
+/// runs to the end: it was cut off mid-thought, and nothing after it is an
+/// answer.
+fn reasoning_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(open) = find_ascii_ci(text, "<think", from) {
+        let after_name = open + "<think".len();
+        from = after_name;
+        let is_tag = text[after_name..].starts_with('>')
+            || text[after_name..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace);
+        if !is_tag {
+            continue;
+        }
+        let close = find_ascii_ci(text, "</think>", after_name).map(|at| at + "</think>".len());
+        let end = close.unwrap_or(text.len());
+        ranges.push((open, end));
+        if close.is_none() {
+            break;
+        }
+        from = end;
+    }
+    ranges
+}
+
+/// Remove ```json markdown code fences from a response
+pub fn strip_code_fence(text: &str) -> &str {
+    let text = text.trim();
+    let inner = if let Some(stripped) = text.strip_prefix("```json") {
+        stripped.trim()
+    } else if let Some(stripped) = text.strip_prefix("```") {
+        stripped
+    } else {
+        return text;
+    };
+
+    if let Some(idx) = inner.rfind("```") {
+        inner[..idx].trim()
+    } else {
+        inner
+    }
+}
+
+/// Whether `rest` could be the inside of a JSON value: the bracket before it
+/// may be an answer. "[核心]" and "{name}" are prose.
+fn starts_a_json_value(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    match rest.as_bytes().first() {
+        Some(b'{' | b'[' | b'"' | b']' | b'}' | b'-') => true,
+        Some(b'0'..=b'9') => true,
+        Some(_) => ["true", "false", "null"]
+            .iter()
+            .any(|word| rest.starts_with(word)),
+        None => false,
+    }
+}
+
+/// Index just past the bracket that closes the one at `start_idx`.
+fn balanced_end(text: &str, start_idx: usize, open: char) -> Result<usize, String> {
+    let close = if open == '{' { '}' } else { ']' };
+    let mut stack = vec![close];
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (rel_idx, ch) in text[start_idx..].char_indices().skip(1) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop() != Some(ch) {
+                    return Err(format!("Mismatched JSON delimiter in response: {text}"));
+                }
+                if stack.is_empty() {
+                    return Ok(start_idx + rel_idx + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err(format!("Incomplete JSON payload in response: {text}"))
+}
+
+/// Extract the first complete JSON object/array from an LLM response.
+///
+/// Some reasoning models prepend hidden-thought text or other prose before
+/// the JSON even when the prompt asks for JSON-only. Keep strict JSON
+/// parsing, but feed the parser the first balanced JSON payload instead of
+/// the whole response. The reasoning is passed over, and so is a bracket
+/// that is prose (a `[1]` citation, a `[核心]` marker).
+pub fn extract_json_payload(text: &str) -> Result<&str, String> {
+    let shown = strip_code_fence(text);
+    let offset = shown.as_ptr() as usize - text.as_ptr() as usize;
+    let reasoning = reasoning_ranges(text);
+    let mut passed_over: Option<&str> = None;
+    for (idx, open) in shown
+        .char_indices()
+        .filter(|(_, ch)| matches!(ch, '{' | '['))
+    {
+        let at = idx + offset;
+        let in_reasoning = reasoning.iter().any(|&(from, to)| from <= at && at < to);
+        if in_reasoning || !starts_a_json_value(&shown[idx + open.len_utf8()..]) {
+            continue;
+        }
+        let payload = &shown[idx..balanced_end(shown, idx, open)?];
+        // A lone number in brackets is a citation while an answer follows.
+        if payload[1..payload.len() - 1]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            passed_over.get_or_insert(payload);
+            continue;
+        }
+        return Ok(payload);
+    }
+    passed_over.ok_or_else(|| format!("No JSON object or array found in response: {shown}"))
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -234,6 +375,65 @@ mod tests {
     use super::*;
 
     // ── is_noise_text ────────────────────────────────────────────────────
+
+    // ── extract_json_payload ────────────────────────────────────────────
+
+    #[test]
+    fn extract_json_payload_takes_the_answer_after_the_reasoning() {
+        let raw = "<think>draft: {\"ok\": false}</think>\n{\"ok\": true}";
+        assert_eq!(
+            extract_json_payload(raw).expect("payload"),
+            "{\"ok\": true}"
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_passes_over_prose_markers() {
+        let raw = "See [1] and [核心] for context:\n{\"ok\": true}";
+        assert_eq!(
+            extract_json_payload(raw).expect("payload"),
+            "{\"ok\": true}"
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_keeps_a_lone_number_array_that_is_the_answer() {
+        assert_eq!(extract_json_payload("[7]").expect("payload"), "[7]");
+        assert_eq!(extract_json_payload("ids: [7]").expect("payload"), "[7]");
+    }
+
+    #[test]
+    fn extract_json_payload_reads_a_fenced_answer_after_prose() {
+        let raw = "Here it is:\n```json\n{\"ok\": true}\n```";
+        assert_eq!(
+            extract_json_payload(raw).expect("payload"),
+            "{\"ok\": true}"
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_reports_a_truncated_payload_whole() {
+        let inner = "{\"b\": 1}";
+        for raw in [format!("{{\"a\": {inner}"), "{\"a\": [1}".to_string()] {
+            let err = match extract_json_payload(&raw) {
+                Ok(payload) => panic!("a truncated payload yielded {payload}"),
+                Err(err) => err,
+            };
+            assert!(
+                err.starts_with("Incomplete JSON payload") || err.starts_with("Mismatched JSON"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_json_payload_finds_no_answer_in_cut_off_reasoning() {
+        let err = match extract_json_payload("<think>still planning {\"step\": 1}") {
+            Ok(payload) => panic!("the reasoning yielded {payload}"),
+            Err(err) => err,
+        };
+        assert!(err.starts_with("No JSON object or array found"), "{err}");
+    }
 
     #[test]
     fn noise_too_short() {

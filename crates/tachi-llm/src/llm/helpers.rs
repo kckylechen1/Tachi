@@ -26,72 +26,15 @@ impl super::LlmClient {
         Duration::from_millis(base_ms + (mixed % (jitter_ms + 1)))
     }
 
-    /// Remove ```json markdown code fences from response
+    /// Remove ```json markdown code fences from a response
     pub fn strip_code_fence(text: &str) -> &str {
-        let text = text.trim();
-        let inner = if let Some(stripped) = text.strip_prefix("```json") {
-            stripped.trim()
-        } else if let Some(stripped) = text.strip_prefix("```") {
-            stripped
-        } else {
-            return text;
-        };
-
-        if let Some(idx) = inner.rfind("```") {
-            inner[..idx].trim()
-        } else {
-            inner
-        }
+        memcore::noise::strip_code_fence(text)
     }
 
-    /// Extract the first complete JSON object/array from an LLM response.
-    ///
-    /// Some reasoning models prepend hidden-thought text or other prose before
-    /// the JSON even when the prompt asks for JSON-only. Keep strict JSON
-    /// parsing, but feed the parser the first balanced JSON payload instead of
-    /// the whole response.
+    /// Extract the first complete JSON object/array from an LLM response,
+    /// after its reasoning and any prose markers.
     pub fn extract_json_payload(text: &str) -> Result<&str, String> {
-        let text = Self::strip_code_fence(text).trim();
-        let start = text
-            .char_indices()
-            .find_map(|(idx, ch)| matches!(ch, '{' | '[').then_some((idx, ch)))
-            .ok_or_else(|| format!("No JSON object or array found in response: {text}"))?;
-        let (start_idx, open) = start;
-        let close = if open == '{' { '}' } else { ']' };
-        let mut stack = vec![close];
-        let mut in_string = false;
-        let mut escaped = false;
-
-        for (rel_idx, ch) in text[start_idx..].char_indices().skip(1) {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    in_string = false;
-                }
-                continue;
-            }
-
-            match ch {
-                '"' => in_string = true,
-                '{' => stack.push('}'),
-                '[' => stack.push(']'),
-                '}' | ']' => {
-                    if stack.pop() != Some(ch) {
-                        return Err(format!("Mismatched JSON delimiter in response: {text}"));
-                    }
-                    if stack.is_empty() {
-                        let end_idx = start_idx + rel_idx + ch.len_utf8();
-                        return Ok(&text[start_idx..end_idx]);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Err(format!("Incomplete JSON payload in response: {text}"))
+        memcore::noise::extract_json_payload(text)
     }
 }
 

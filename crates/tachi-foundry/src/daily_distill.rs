@@ -346,7 +346,7 @@ fn check_input_budget(input_bytes: usize) -> Result<(), String> {
 }
 
 pub fn parse_distill_response(raw: &str) -> Result<HashMap<String, GroupPayload>, String> {
-    let json_text = extract_json_payload(raw)?;
+    let json_text = memcore::noise::extract_json_payload(raw)?;
     let arr: Value = serde_json::from_str(json_text)
         .or_else(|_| serde_json::from_str(&escape_control_chars_in_json_strings(json_text)))
         .map_err(|e| {
@@ -402,67 +402,6 @@ pub fn parse_distill_response(raw: &str) -> Result<HashMap<String, GroupPayload>
         );
     }
     Ok(out)
-}
-
-fn strip_code_fence(text: &str) -> &str {
-    let text = text.trim();
-    let inner = if let Some(stripped) = text.strip_prefix("```json") {
-        stripped.trim()
-    } else if let Some(stripped) = text.strip_prefix("```") {
-        stripped
-    } else {
-        return text;
-    };
-
-    if let Some(idx) = inner.rfind("```") {
-        inner[..idx].trim()
-    } else {
-        inner
-    }
-}
-
-fn extract_json_payload(text: &str) -> Result<&str, String> {
-    let text = strip_code_fence(text).trim();
-    let start = text
-        .char_indices()
-        .find_map(|(idx, ch)| matches!(ch, '{' | '[').then_some((idx, ch)))
-        .ok_or_else(|| format!("No JSON object or array found in response: {text}"))?;
-    let (start_idx, open) = start;
-    let close = if open == '{' { '}' } else { ']' };
-    let mut stack = vec![close];
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (rel_idx, ch) in text[start_idx..].char_indices().skip(1) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.pop() != Some(ch) {
-                    return Err(format!("Mismatched JSON delimiter in response: {text}"));
-                }
-                if stack.is_empty() {
-                    let end_idx = start_idx + rel_idx + ch.len_utf8();
-                    return Ok(&text[start_idx..end_idx]);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Err(format!("Incomplete JSON payload in response: {text}"))
 }
 
 fn escape_control_chars_in_json_strings(text: &str) -> String {
@@ -542,6 +481,19 @@ mod tests {
         let parsed = parse_distill_response(raw).expect("parse distill response");
 
         assert_eq!(parsed.get("g1").expect("g1 payload").text, "body");
+    }
+
+    #[test]
+    fn parse_distill_response_passes_over_a_citation_and_the_reasoning() {
+        let draft = r#"{"group_id":"draft","summary":"d","text":"t"}"#;
+        let raw = format!(
+            "<think>maybe [{draft}]</think>see [1] for context\n[{{\"group_id\":\"g1\",\"summary\":\"s\",\"text\":\"body\"}}]"
+        );
+        let parsed = parse_distill_response(&raw).expect("the answer parses");
+        assert_eq!(
+            parsed.keys().cloned().collect::<Vec<_>>(),
+            vec!["g1".to_string()]
+        );
     }
 
     #[test]
