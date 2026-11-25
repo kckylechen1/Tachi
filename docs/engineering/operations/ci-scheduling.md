@@ -47,6 +47,12 @@ outcomes appear in the acceptance receipt as `observational_*_excluded`, but
 they do not block the aggregate. `.github/acceptance-plan.json` records this
 per job. Windows releases remain prohibited until #1963 is fixed.
 
+The Linux `rust-linux` job is observational as well. It runs the
+workspace tests and doc tests on `ubuntu-24.04` under the same owner
+admission and applicability as `rust`; the macOS `rust` job remains the
+gate, and the Linux outcome appears in the receipt in the same
+`observational_*_excluded` form.
+
 ## CI applicability
 
 The required job inventory remains closed. `.github/acceptance-plan.json`
