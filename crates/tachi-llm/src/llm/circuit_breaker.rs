@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,9 @@ struct Inner {
     state: RwLock<BreakerState>,
     failure_count: AtomicU32,
     half_open_probe_claimed: AtomicBool,
+    /// Advanced by every claim of the half-open probe, so an admission
+    /// releases only the claim it still owns.
+    probe_generation: AtomicU64,
     opened_at: RwLock<Option<Instant>>,
 }
 
@@ -26,6 +29,7 @@ impl Inner {
             state: RwLock::new(BreakerState::Closed),
             failure_count: AtomicU32::new(0),
             half_open_probe_claimed: AtomicBool::new(false),
+            probe_generation: AtomicU64::new(0),
             opened_at: RwLock::new(None),
         }
     }
@@ -36,6 +40,27 @@ pub(crate) struct CircuitBreaker {
     inner: Arc<Inner>,
 }
 
+enum Entry {
+    Open,
+    Probe(u64),
+    Refused,
+}
+
+/// Admission through a breaker. Dropping it releases a claimed half-open
+/// probe unless a verdict has already ended it.
+pub(crate) struct BreakerAdmission {
+    breaker: CircuitBreaker,
+    probe: Option<u64>,
+}
+
+impl Drop for BreakerAdmission {
+    fn drop(&mut self) {
+        if let Some(generation) = self.probe.take() {
+            self.breaker.release_probe(generation);
+        }
+    }
+}
+
 impl CircuitBreaker {
     fn new() -> Self {
         Self {
@@ -43,11 +68,14 @@ impl CircuitBreaker {
         }
     }
 
-    fn allow_request(&self) -> bool {
+    fn enter(&self) -> Entry {
         let state = *self.inner.state.read().unwrap_or_else(|e| e.into_inner());
         match state {
-            BreakerState::Closed => true,
-            BreakerState::HalfOpen => self.claim_half_open_probe(),
+            BreakerState::Closed => Entry::Open,
+            BreakerState::HalfOpen => match self.claim_half_open_probe() {
+                Some(generation) => Entry::Probe(generation),
+                None => Entry::Refused,
+            },
             BreakerState::Open => {
                 let opened_at = self
                     .inner
@@ -64,19 +92,54 @@ impl CircuitBreaker {
                                 .half_open_probe_claimed
                                 .store(false, Ordering::Release);
                         }
-                        return self.claim_half_open_probe();
+                        return match self.claim_half_open_probe() {
+                            Some(generation) => Entry::Probe(generation),
+                            None => Entry::Refused,
+                        };
                     }
                 }
-                false
+                Entry::Refused
             }
         }
     }
 
-    fn claim_half_open_probe(&self) -> bool {
+    /// Admission through the breaker. A half-open probe stays claimed for as
+    /// long as its admission lives; one that ends without a verdict releases
+    /// the claim, so a call that returns early or is cancelled cannot hold
+    /// the only probe slot for good.
+    fn admit(&self) -> Option<BreakerAdmission> {
+        match self.enter() {
+            Entry::Open => Some(BreakerAdmission {
+                breaker: self.clone(),
+                probe: None,
+            }),
+            Entry::Probe(generation) => Some(BreakerAdmission {
+                breaker: self.clone(),
+                probe: Some(generation),
+            }),
+            Entry::Refused => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn allow_request(&self) -> bool {
+        !matches!(self.enter(), Entry::Refused)
+    }
+
+    fn claim_half_open_probe(&self) -> Option<u64> {
         self.inner
             .half_open_probe_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .ok()?;
+        Some(self.inner.probe_generation.fetch_add(1, Ordering::AcqRel) + 1)
+    }
+
+    fn release_probe(&self, generation: u64) {
+        if self.inner.probe_generation.load(Ordering::Acquire) == generation {
+            self.inner
+                .half_open_probe_claimed
+                .store(false, Ordering::Release);
+        }
     }
 
     fn record_success(&self) {
@@ -149,8 +212,25 @@ impl CircuitBreakerRegistry {
             .clone()
     }
 
+    pub(crate) fn admit(&self, key: &str) -> Option<BreakerAdmission> {
+        self.get_or_create(key).admit()
+    }
+
+    #[cfg(test)]
     pub(crate) fn allow(&self, key: &str) -> bool {
         self.get_or_create(key).allow_request()
+    }
+
+    /// Put an open breaker past its open window, so the next entry becomes
+    /// the half-open probe.
+    #[cfg(test)]
+    pub(crate) fn expire_open_window(&self, key: &str) {
+        let breaker = self.get_or_create(key);
+        *breaker
+            .inner
+            .opened_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() - OPEN_DURATION);
     }
 
     pub(crate) fn record_success(&self, key: &str) {
@@ -317,6 +397,47 @@ mod tests {
             !registry.allow("test"),
             "second half-open request is fast-rejected until probe resolves"
         );
+    }
+
+    /// A call that ends without a verdict (an early return, a cancelled
+    /// future) used to hold the only probe slot for good: the breaker stayed
+    /// half-open and refused every later request.
+    #[test]
+    fn half_open_probe_is_released_when_the_call_ends_without_a_verdict() {
+        let registry = CircuitBreakerRegistry::new();
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("probe");
+        }
+        registry.expire_open_window("probe");
+
+        drop(
+            registry
+                .admit("probe")
+                .expect("the first half-open probe is admitted"),
+        );
+        assert!(
+            registry.admit("probe").is_some(),
+            "the next request may probe again"
+        );
+    }
+
+    #[test]
+    fn half_open_probe_stays_claimed_while_its_call_is_in_flight() {
+        let registry = CircuitBreakerRegistry::new();
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("probe");
+        }
+        registry.expire_open_window("probe");
+
+        let in_flight = registry
+            .admit("probe")
+            .expect("the first probe is admitted");
+        assert!(
+            registry.admit("probe").is_none(),
+            "a second request is refused while the probe is in flight"
+        );
+        drop(in_flight);
+        assert!(registry.admit("probe").is_some());
     }
 
     #[test]

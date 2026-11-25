@@ -316,13 +316,13 @@ impl super::super::LlmClient {
         let (cfg, authority) = self.lane_and_authority(lane);
 
         let breaker_key = format!("chat:{}", lane.as_str());
-        if !self.circuit_breakers.allow(&breaker_key) {
+        let Some(_admission) = self.circuit_breakers.admit(&breaker_key) else {
             return Err(ProviderInvocationFailure {
                 class: ProviderInvocationFailureClass::LaneOutage,
                 provider_attempts: 0,
                 latency_ms: 0,
             });
-        }
+        };
         match self
             .call_provider_tier(
                 lane,
@@ -444,14 +444,14 @@ impl super::super::LlmClient {
         for (tier_index, (cfg, authority, live_primary, breaker_key)) in
             tiers.into_iter().enumerate()
         {
-            if !self.circuit_breakers.allow(&breaker_key) {
+            let Some(_admission) = self.circuit_breakers.admit(&breaker_key) else {
                 last_err = format!(
                     "Circuit breaker open for {} (lane {}, tier {tier_index}/{tier_count}) — provider is failing, fast-rejecting. Retry in ~30s.",
                     breaker_key,
                     lane.as_str()
                 );
                 continue;
-            }
+            };
 
             match self
                 .call_provider_tier(

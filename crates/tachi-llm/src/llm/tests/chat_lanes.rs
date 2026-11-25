@@ -4151,6 +4151,76 @@ async fn extract_lane_escalates_to_fallback_when_primary_breaker_is_open() {
     fallback_task.abort();
 }
 
+/// A provider tier can end without telling the breaker (here a plain 400).
+/// The half-open probe that call claimed used to stay claimed for good, so
+/// the lane answered "Circuit breaker open" to every later request until the
+/// process restarted.
+#[tokio::test]
+async fn half_open_probe_ends_when_the_provider_tier_returns_without_a_verdict() {
+    use axum::{http::StatusCode, routing::post, Router};
+
+    let hits = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let app = Router::new().route(
+        "/chat/completions",
+        post({
+            let hits = std::sync::Arc::clone(&hits);
+            move || async move {
+                *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                StatusCode::BAD_REQUEST
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind refusing provider");
+    let port = listener
+        .local_addr()
+        .expect("refusing provider addr")
+        .port();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("refusing provider");
+    });
+
+    let lane = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "model".to_string(),
+        api_key_envs: vec!["__PROBE_WITHOUT_VERDICT_KEY"],
+    };
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(lane),
+        LaneFallbackConfig::default(),
+        None,
+    )
+    .expect("client");
+    assert!(client.set_provider_secret("__PROBE_WITHOUT_VERDICT_KEY", "secret"));
+    for _ in 0..5 {
+        client.circuit_breakers.record_failure("chat:extract");
+    }
+    client.circuit_breakers.expire_open_window("chat:extract");
+
+    let first = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("the provider refuses the request");
+    assert!(first.contains("400"), "{first}");
+
+    let second = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("the provider still refuses the request");
+    assert!(
+        !second.contains("Circuit breaker open"),
+        "the lane must reach its provider again: {second}"
+    );
+    assert_eq!(
+        *hits.lock().unwrap_or_else(|e| e.into_inner()),
+        2,
+        "both calls reached the provider"
+    );
+
+    task.abort();
+}
+
 /// A fallback that matched an earlier primary snapshot must stay in the
 /// chain. Vault may change the live primary before selection, so eager
 /// equality-based deduplication can otherwise erase the only usable tier.
