@@ -2875,6 +2875,7 @@ dependencies = [
  "axum",
  "blake2",
  "jiff",
+ "libc",
  "memcore",
  "reqwest",
  "rusqlite",

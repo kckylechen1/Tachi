@@ -1,5 +1,34 @@
 use std::time::{Duration, Instant};
 
+/// Bound on one Claude CLI call, the prompt write included.
+const CLAUDE_CLI_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The CLI's process group. A call that ends early (its deadline passes, its
+/// future is cancelled) drops this armed and takes the whole group down:
+/// `kill_on_drop` reaches the CLI's own process and leaves its helpers.
+#[cfg(unix)]
+struct ArmedProcessGroup(Option<u32>);
+
+#[cfg(unix)]
+impl ArmedProcessGroup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ArmedProcessGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            // SAFETY: `process_group(0)` made the CLI the leader of the group
+            // with this id, so the signal reaches that group and nothing else.
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+}
+
 use super::super::provider_health::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, CLAUDE_CLI_FAILURE_COOLDOWN,
@@ -154,12 +183,23 @@ impl super::super::LlmClient {
     }
 
     async fn call_claude_cli(system: &str, user: &str) -> Result<String, String> {
+        Self::call_claude_cli_within(system, user, CLAUDE_CLI_TIMEOUT).await
+    }
+
+    /// `limit` bounds the whole call. A CLI that stops reading its stdin
+    /// must not hold the reasoning lane.
+    pub(in crate::llm) async fn call_claude_cli_within(
+        system: &str,
+        user: &str,
+        limit: Duration,
+    ) -> Result<String, String> {
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
         let prompt = format!("<system>\n{system}\n</system>\n\n{user}");
-        let mut child = Command::new("claude")
+        let mut command = Command::new("claude");
+        command
             .arg("-p")
             .arg("--output-format")
             .arg("text")
@@ -168,24 +208,42 @@ impl super::super::LlmClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        // The CLI starts helpers of its own; a group of its own is what lets
+        // a call that ends early take them with it. Only Unix has groups.
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
             .spawn()
             .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+        #[cfg(unix)]
+        let mut group = ArmedProcessGroup(child.id());
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "claude cli stdin unavailable".to_string())?;
 
-        if let Some(mut stdin) = child.stdin.take() {
+        // The prompt is written while the output is drained. Written on its
+        // own, a prompt longer than the pipe buffer blocked for good against a
+        // CLI that talks before it listens.
+        let feed = async move {
             stdin
                 .write_all(prompt.as_bytes())
                 .await
-                .map_err(|e| format!("claude cli stdin write failed: {e}"))?;
-        } else {
-            return Err("claude cli stdin unavailable".to_string());
-        }
-
-        // Add timeout protection (5 minutes) to prevent indefinite blocking
-        let output = tokio::time::timeout(Duration::from_secs(300), child.wait_with_output())
-            .await
-            .map_err(|_| "claude cli timeout after 5 minutes".to_string())?
-            .map_err(|e| format!("claude cli failed: {e}"))?;
+                .map_err(|e| format!("claude cli stdin write failed: {e}"))
+        };
+        let run = async {
+            let (fed, output) = tokio::join!(feed, child.wait_with_output());
+            fed?;
+            output.map_err(|e| format!("claude cli failed: {e}"))
+        };
+        let output = match tokio::time::timeout(limit, run).await {
+            Ok(output) => output,
+            Err(_) => return Err("claude cli timeout after 5 minutes".to_string()),
+        };
+        #[cfg(unix)]
+        group.disarm();
+        let output = output?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
