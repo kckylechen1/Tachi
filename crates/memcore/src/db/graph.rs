@@ -1105,7 +1105,8 @@ pub fn graph_expand_limited(
 
 /// The shared BFS core; `as_of_utc` selects between the historical
 /// now-anchored edge predicate (None) and the instant-anchored one.
-/// `cap_nodes` stops accepting edges once the node ceiling is reached.
+/// `cap_nodes` stops accepting edges once the node ceiling is reached;
+/// without it only `edge_limit` and `max_hops` bound the walk.
 #[allow(clippy::too_many_arguments)]
 fn graph_expand_limited_with_as_of(
     conn: &Connection,
@@ -1134,20 +1135,26 @@ fn graph_expand_limited_with_as_of(
     }
 
     const MAX_NODES: usize = 50;
+    let seed_count = visited.len();
+    // The ceiling counts the nodes found beyond the seeds, so a large seed
+    // set still expands. A single-seed traversal keeps its one reserved slot
+    // and its 49 discovered nodes as before.
+    let node_ceiling_reached =
+        |visited: &HashSet<String>| cap_nodes && visited.len() - seed_count >= MAX_NODES - 1;
 
     while !queue.is_empty() {
         let mut frontier: Vec<String> = Vec::new();
         let mut current_depth = 0u32;
 
         while let Some((id, depth)) = queue.front() {
-            if *depth >= max_hops || visited.len() >= MAX_NODES {
+            if *depth >= max_hops || node_ceiling_reached(&visited) {
                 queue.pop_front();
                 continue;
             }
             current_depth = *depth;
             frontier.push(id.clone());
             queue.pop_front();
-            if visited.len() >= MAX_NODES {
+            if node_ceiling_reached(&visited) {
                 break;
             }
         }
@@ -1168,7 +1175,7 @@ fn graph_expand_limited_with_as_of(
         let edges_batch =
             get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
-            if all_edges.len() >= edge_limit || (cap_nodes && visited.len() >= MAX_NODES) {
+            if all_edges.len() >= edge_limit || node_ceiling_reached(&visited) {
                 break;
             }
             let edge_key = (
@@ -1210,7 +1217,7 @@ fn graph_expand_limited_with_as_of(
             all_edges.push(edge);
         }
 
-        if visited.len() >= MAX_NODES {
+        if node_ceiling_reached(&visited) {
             break;
         }
     }
