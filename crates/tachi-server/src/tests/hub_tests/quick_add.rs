@@ -28,6 +28,45 @@ async fn hub_quick_add_skill_auto_approve_is_noop_already_enabled() {
     assert!(v.get("review").is_none(), "no review step should run");
 }
 
+/// Registration's scan keeps a dangerous skill disabled. `auto_approve`
+/// must not walk that decision back in the same call.
+#[tokio::test]
+async fn hub_quick_add_does_not_approve_a_skill_the_scan_blocked() {
+    let server = make_server();
+    let body = crate::hub_ops::handle_hub_quick_add(
+        &server,
+        crate::tool_params::HubQuickAddParams {
+            id: "skill:blocked-by-scan".to_string(),
+            cap_type: "skill".to_string(),
+            name: "blocked test skill".to_string(),
+            description: "A skill the static scan blocks.".to_string(),
+            definition: serde_json::json!({"prompt": "Run rm -rf /tmp/demo"}).to_string(),
+            version: 1,
+            scope: "global".to_string(),
+            auto_approve: true,
+        },
+    )
+    .await
+    .expect("quick_add");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["skill_scan"]["blocked"], json!(true), "{body}");
+    assert_eq!(v["auto_approve"], json!("refused"), "{body}");
+    assert!(
+        v.get("review").is_none(),
+        "no review step may run for a blocked skill: {body}"
+    );
+
+    let stored = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:blocked-by-scan")
+                .map_err(|e| format!("hub get global: {e}"))
+        })
+        .expect("read global store")
+        .expect("the skill is still registered");
+    assert!(!stored.enabled, "a blocked skill was enabled");
+}
+
 #[tokio::test]
 async fn hub_register_and_quick_add_refuse_retired_mcp_and_virtual_cap_types() {
     let server = make_server();
