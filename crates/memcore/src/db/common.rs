@@ -65,6 +65,19 @@ fn truncate_excess_fraction(raw: &str) -> Option<String> {
     Some(format!("{head}.{}{zone}", &tail[..9]))
 }
 
+/// Escape `\`, `%` and `_` so a caller-supplied value matches only itself in
+/// a `LIKE` pattern that carries `ESCAPE '\'`.
+pub(crate) fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
     let canonical = normalize_utc_iso(ts)?;
     let anchored: Option<f64> = conn

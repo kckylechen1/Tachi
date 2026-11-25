@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use crate::{
     db::{
-        fetch_by_ids_with_vector_table, search_symbolic_candidates_with_relevance, search_vec,
-        wiki_corpus_store_sql_splice, RecallTables,
+        escape_like_pattern, fetch_by_ids_with_vector_table,
+        search_symbolic_candidates_with_relevance, search_vec, wiki_corpus_store_sql_splice,
+        RecallTables,
     },
     error::MemoryError,
     namespace::surface_sql_splice,
@@ -497,7 +498,10 @@ fn typo_prefilter_ids(
         .map(|trigram| format!("\"{trigram}\""))
         .collect::<Vec<_>>()
         .join(" OR ");
-    let path_like = opts.path_prefix.as_ref().map(|prefix| format!("{prefix}%"));
+    let path_like = opts
+        .path_prefix
+        .as_ref()
+        .map(|prefix| format!("{}%", escape_like_pattern(prefix)));
     let surface_clause = surface_sql_splice(opts.surface, true);
     // tachi#1569: the typo prefilter is a fourth candidate source with its own
     // SQL, and it has never carried the Wiki internal-row clause. Store
@@ -512,7 +516,7 @@ fn typo_prefilter_ids(
            JOIN memories m ON m.id = memories_symbolic_fts.id
           WHERE (?1 = 1 OR m.archived = 0)
             AND (?2 = 1 OR m.superseded_by IS NULL)
-            AND (?3 IS NULL OR m.path LIKE ?3)
+            AND (?3 IS NULL OR m.path LIKE ?3 ESCAPE '\\')
             AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
             AND m.id NOT LIKE 'anchor:%'
             AND memories_symbolic_fts MATCH ?5{surface_clause}{wiki_clause}

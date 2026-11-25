@@ -761,3 +761,36 @@ fn as_of_search_returns_a_legacy_bare_shape_row_when_well_separated_from_the_que
          through the post-#1432 canonical renderer: {results:?}"
     );
 }
+
+/// A `path_prefix` is a literal string. Read as a LIKE pattern, its `_` and
+/// `%` widened the candidate pool to sibling paths.
+#[test]
+fn search_path_prefix_treats_like_wildcards_as_literal_characters() {
+    let mut conn = make_conn();
+    let mut wanted = make_entry("search-wildcard-wanted", "zebra habitat");
+    wanted.path = "/tool_s/one".to_string();
+    let mut sibling = make_entry("search-wildcard-sibling", "zebra crossing");
+    sibling.path = "/toolxs/two".to_string();
+    upsert(&mut conn, &wanted, false).unwrap();
+    upsert(&mut conn, &sibling, false).unwrap();
+
+    let hits = search_symbolic_candidates(
+        &conn,
+        "zebra",
+        10,
+        false,
+        false,
+        Some("/tool_s"),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        hits.iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["search-wildcard-wanted"]
+    );
+}

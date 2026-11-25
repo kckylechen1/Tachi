@@ -5,8 +5,8 @@ use crate::error::MemoryError;
 use crate::types::MemoryEntry;
 
 use super::{
-    row_to_entry, IN_BATCH_SIZE, MEMORY_EMBEDDING_COLUMN_INDEX, MEMORY_SELECT_COLUMNS,
-    MEMORY_SELECT_COLUMNS_QUALIFIED,
+    escape_like_pattern, row_to_entry, IN_BATCH_SIZE, MEMORY_EMBEDDING_COLUMN_INDEX,
+    MEMORY_SELECT_COLUMNS, MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
 /// Read one current resource candidate from a single materialized row.
@@ -364,7 +364,7 @@ pub fn list_by_path(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\'){wiki_clause}
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
         )
@@ -372,7 +372,7 @@ pub fn list_by_path(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') AND archived = 0{wiki_clause}
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
         )
@@ -404,7 +404,7 @@ pub fn list_by_path_active_unsuperseded(
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2)
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\')
            AND archived = 0
            AND superseded_by IS NULL{wiki_clause}
          ORDER BY path ASC, timestamp DESC
@@ -439,7 +439,7 @@ pub fn list_user_facing_wiki_entries(
     let sql = format!(
         "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2)
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\')
            {lifecycle}
            AND ({wiki_predicate})
          ORDER BY path ASC, timestamp DESC
@@ -525,7 +525,7 @@ fn list_by_path_recent_with_policy(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}{test_clause}
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\'){wiki_clause}{test_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )
@@ -533,7 +533,7 @@ fn list_by_path_recent_with_policy(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}{test_clause}
+         WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\') AND archived = 0{wiki_clause}{test_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )
@@ -562,7 +562,7 @@ fn normalize_path_prefix(path_prefix: &str) -> (String, String) {
     let like_prefix = if normalized == "/" {
         "/%".to_string()
     } else {
-        format!("{normalized}/%")
+        format!("{}/%", escape_like_pattern(&normalized))
     };
     (normalized, like_prefix)
 }
@@ -586,7 +586,10 @@ pub fn list_wiki_duplicate_candidates(
     parent_path: &str,
     limit: Option<usize>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
+    let parent_like = format!(
+        "{}/%",
+        escape_like_pattern(parent_path.trim_end_matches('/'))
+    );
     let guide_corpus = path == "/guide" || path.starts_with("/guide/");
     let corpus_root = if guide_corpus { "/guide" } else { "/wiki" };
     let corpus_like = format!("{corpus_root}/%");
@@ -597,7 +600,7 @@ pub fn list_wiki_duplicate_candidates(
          WHERE archived = 0
            AND superseded_by IS NULL
            AND id NOT LIKE 'wiki-rem:%'
-           AND (path = ?6 OR path LIKE ?7)
+           AND (path = ?6 OR path LIKE ?7 ESCAPE '\\')
            AND ({wiki_predicate})
            AND (
                (?8 = 1
@@ -606,7 +609,7 @@ pub fn list_wiki_duplicate_candidates(
                OR ((?1 != '/wiki/drafts' AND ?1 NOT LIKE '/wiki/drafts/%')
                    AND path != '/wiki/drafts' AND path NOT LIKE '/wiki/drafts/%'))
            )
-           AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
+           AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4 ESCAPE '\\')
          ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
                   path ASC,
                   timestamp DESC

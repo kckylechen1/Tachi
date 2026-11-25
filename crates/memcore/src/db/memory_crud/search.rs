@@ -10,8 +10,8 @@ use crate::scorer::SymbolicQuery;
 use crate::types::MemoryEntry;
 
 use super::{
-    normalize_sqlite_as_of, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
-    MEMORY_SELECT_COLUMNS_QUALIFIED,
+    escape_like_pattern, normalize_sqlite_as_of, row_to_entry, serialize_f32, simple_query_input,
+    MEMORY_SELECT_COLUMNS, MEMORY_SELECT_COLUMNS_QUALIFIED,
 };
 
 /// The internal-row exclusion spliced into a retrieval query, or the empty
@@ -166,7 +166,7 @@ pub fn search_vec(
         .transpose()?;
     let blob = serialize_f32(query_vec);
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
-    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let path_like = path_prefix.map(|prefix| format!("{}%", escape_like_pattern(prefix)));
 
     let mut k_fetch = top_k.min(SQLITE_VEC_KNN_MAX_K);
     let mut rows = run_search_vec_query(
@@ -267,7 +267,7 @@ fn run_search_vec_query(
                AND lower(trim(m.path)) <> '/sticky'
                AND lower(trim(m.path)) NOT LIKE '/sticky/%'
                AND (?4 = 1 OR m.superseded_by IS NULL)
-               AND (?5 IS NULL OR m.path LIKE ?5)
+               AND (?5 IS NULL OR m.path LIKE ?5 ESCAPE '\')
                AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
                AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
              ORDER BY v.distance"#,
@@ -406,7 +406,7 @@ fn search_fts_match(
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let path_like = path_prefix.map(|prefix| format!("{}%", escape_like_pattern(prefix)));
     let match_operand = if use_simple_query {
         "simple_query(?1)"
     } else {
@@ -432,7 +432,7 @@ fn search_fts_match(
               AND lower(trim(m.path)) <> '/sticky'
               AND lower(trim(m.path)) NOT LIKE '/sticky/%'
               AND (?4 = 1 OR m.superseded_by IS NULL)
-              AND (?5 IS NULL OR m.path LIKE ?5)
+              AND (?5 IS NULL OR m.path LIKE ?5 ESCAPE '\')
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
               AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
              ORDER BY bm25(memories_fts)
@@ -613,7 +613,7 @@ fn search_symbolic_candidate_rows<T>(
     ensure_symbolic_score_function(conn)?;
 
     let wiki_gate = WikiCorpusGate::resolve(wiki_corpus_store, path_prefix);
-    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let path_like = path_prefix.map(|prefix| format!("{}%", escape_like_pattern(prefix)));
 
     // Prefer the trigram index when every term is trigram-eligible (#1331).
     // SQLite's FTS5 trigram tokenizer requires ≥3 Unicode characters per
@@ -723,7 +723,7 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
            AND lower(trim(m.path)) <> '/sticky'
            AND lower(trim(m.path)) NOT LIKE '/sticky/%'
            AND (?2 = 1 OR m.superseded_by IS NULL)
-           AND (?3 IS NULL OR m.path LIKE ?3)
+           AND (?3 IS NULL OR m.path LIKE ?3 ESCAPE '\\')
            AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
            AND m.id NOT LIKE 'anchor:%'
            AND memories_symbolic_fts MATCH ?5{surface_clause}{wiki_clause}
@@ -843,7 +843,7 @@ fn search_symbolic_via_table_scan<T>(
            AND lower(trim(path)) <> '/sticky'
            AND lower(trim(path)) NOT LIKE '/sticky/%'
            AND (?2 = 1 OR superseded_by IS NULL)
-           AND (?3 IS NULL OR path LIKE ?3)
+           AND (?3 IS NULL OR path LIKE ?3 ESCAPE '\\')
            AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
            AND id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}"
     );
@@ -1050,17 +1050,6 @@ fn symbolic_term_match_clause_on_alias(alias: &str, parameter_index: usize) -> S
           OR {prefix}entities LIKE ?{parameter_index} ESCAPE '\\'
           OR {prefix}topic LIKE ?{parameter_index} ESCAPE '\\')"
     )
-}
-
-fn escape_like_pattern(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
 }
 
 #[cfg(test)]
