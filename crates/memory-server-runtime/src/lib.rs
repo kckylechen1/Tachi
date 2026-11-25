@@ -1133,8 +1133,23 @@ impl DbRuntime {
                 entry.state.clone()
             });
         if let Some(state) = cached {
+            Self::validate_cache_hit(&state, db_path, label)?;
             let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
-            return state.read_pool.with_store(label.text(), f);
+            let attached_path = state.db_path.clone();
+            // The pooled handle serves the data, so it is the one verified
+            // after checkout, before the callback runs.
+            return state.read_pool.with_store(label.text(), |store| {
+                store
+                    .verify_opened_physical_db_identity(&attached_path)
+                    .map_err(|error| {
+                        format!(
+                            "attached project read refused: physical identity changed under the \
+                             attached pool: {}: {error}",
+                            attached_path.display()
+                        )
+                    })?;
+                f(store)
+            });
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
@@ -1278,12 +1293,14 @@ impl DbRuntime {
             return Ok(bound);
         }
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
+            Self::validate_cache_hit(&state, db_path, conferral)?;
             return Ok(state);
         }
 
         let _init_gate =
             lock_or_recover(&self.project_attach_init_gate, "project_attach_init_gate");
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
+            Self::validate_cache_hit(&state, db_path, conferral)?;
             return Ok(state);
         }
 
@@ -1394,6 +1411,22 @@ impl DbRuntime {
         Ok(BoundReadRoute::RequireDirectRead)
     }
 
+    /// A cache hit answers with the store that was opened at attach time. Its
+    /// stamp is held against the caller's declared role exactly as a fresh
+    /// open holds it, and the file at the path must still be the one that
+    /// store was opened for: a replaced file would otherwise be read from, or
+    /// written to, through a handle that no longer addresses it.
+    fn validate_cache_hit(
+        state: &ProjectDbState,
+        db_path: &Path,
+        conferral: StoreLabel<'_>,
+    ) -> Result<(), String> {
+        Self::validate_declared_role_vs_stamp(state, db_path, conferral)?;
+        lock_or_recover(&state.store, "attached_project_store")
+            .verify_opened_physical_db_identity(&state.db_path)
+            .map_err(|error| error.to_string())
+    }
+
     fn bound_project_alias_of(
         &self,
         key: &Path,
@@ -1407,7 +1440,7 @@ impl DbRuntime {
         if bound_state.canonical_key.as_path() != key {
             return Ok(None);
         }
-        Self::validate_declared_role_vs_bound_stamp(bound_state, db_path, conferral)?;
+        Self::validate_declared_role_vs_stamp(bound_state, db_path, conferral)?;
         Ok(Some(bound_state.clone()))
     }
 
@@ -1441,8 +1474,8 @@ impl DbRuntime {
     /// acquired only for this field read and released immediately; no other
     /// lock is held at this point, so there is no lock-order interaction with
     /// in-flight writers.
-    fn validate_declared_role_vs_bound_stamp(
-        bound_state: &ProjectDbState,
+    fn validate_declared_role_vs_stamp(
+        state: &ProjectDbState,
         db_path: &Path,
         conferral: StoreLabel<'_>,
     ) -> Result<(), String> {
@@ -1450,7 +1483,7 @@ impl DbRuntime {
         if claimed == memcore::path_router::UNKNOWN_DB_LABEL {
             return Ok(());
         }
-        let bound_store = lock_or_recover(&bound_state.store, "bound_project_store");
+        let bound_store = lock_or_recover(&state.store, "project_store_role");
         let bound_label = bound_store.db_label().to_string();
         drop(bound_store);
         memcore::db::store_identity::validate_declared_role_against_resolved_label(
@@ -3467,6 +3500,87 @@ mod tests {
             0,
             "read-only first use must not create cached writer state"
         );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// An attached store answers with the role it was opened for. A caller
+    /// that declares a different role is refused on a cache hit, exactly as
+    /// the open that first attached the store refuses it.
+    #[test]
+    fn attached_cache_hit_refuses_a_declared_role_that_contradicts_the_stamp() {
+        let temp = unique_temp_dir("path-store-cache-role");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "project-a");
+        let runtime = test_runtime(global_db);
+        runtime
+            .with_path_store_with_label(&project_db, "project-a", |_| Ok(()))
+            .expect("the matching declared role attaches the store");
+        runtime
+            .with_path_store_read_with_label(&project_db, "project-a", |_| Ok(()))
+            .expect("the matching declared role reads the attached store");
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "both doors below must hit the cache, not open a fresh store"
+        );
+
+        let written = runtime.with_path_store_with_label(&project_db, "project-b", |_| Ok(()));
+        let error = written.expect_err("the write door must refuse the contradicting role");
+        assert!(error.contains("store role conflict"), "{error}");
+
+        let read = runtime.with_path_store_read_with_label(&project_db, "project-b", |_| Ok(()));
+        let error = read.expect_err("the read door must refuse the contradicting role");
+        assert!(error.contains("store role conflict"), "{error}");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// The pooled handles were opened for the file that sat at the path when
+    /// it was attached. Once that file is replaced, a cache hit must refuse
+    /// instead of serving the detached copy.
+    #[test]
+    fn attached_cache_hit_refuses_to_serve_a_replaced_project_file() {
+        let temp = unique_temp_dir("path-store-cache-identity");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        let replacement = temp.join("replacement/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "project-a");
+        seed_project_db(&replacement, "project-a");
+        let runtime = test_runtime(global_db);
+        let entry = test_memory_entry("detached-after-replacement");
+        runtime
+            .with_path_store_with_label(&project_db, "project-a", |store| {
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .expect("attach and write");
+        let visible = runtime
+            .with_path_store_read_with_label(&project_db, "project-a", |store| {
+                store.get(&entry.id).map_err(|e| e.to_string())
+            })
+            .expect("read the attached store");
+        assert!(
+            visible.is_some(),
+            "the row is visible while the file is in place"
+        );
+
+        std::fs::rename(&replacement, &project_db).expect("replace the project file");
+
+        let read = runtime.with_path_store_read_with_label(&project_db, "project-a", |_| Ok(()));
+        let error = read.expect_err("a replaced file must not be read through the attached pool");
+        assert!(error.contains("identity changed"), "{error}");
+
+        let written = runtime.with_path_store_with_label(&project_db, "project-a", |_| Ok(()));
+        let error =
+            written.expect_err("a replaced file must not be written through the attached store");
+        assert!(error.contains("identity changed"), "{error}");
 
         let _ = std::fs::remove_dir_all(temp);
     }
