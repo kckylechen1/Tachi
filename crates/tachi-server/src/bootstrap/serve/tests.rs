@@ -1901,4 +1901,11 @@ fn load_env_files_filters_execution_environment_variables_from_project_files() {
     }
 }
 
+#[test]
+fn load_env_files_skips_directory_at_project_dotenv_path_without_hanging() {
+    let fixture = HostProfileEnvFixture::new();
+    std::fs::create_dir_all(fixture.repo.path().join(".env")).expect("create .env directory");
+    fixture.load();
+}
+
 mod legacy_copy;

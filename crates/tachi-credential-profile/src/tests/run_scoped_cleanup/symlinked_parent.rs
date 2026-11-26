@@ -137,3 +137,62 @@ fn credential_run_scoped_cleanup_handles_non_canonical_run_dir_alias() {
     assert!(report.errors.is_empty(), "{report:?}");
     assert!(!real_run_dir.join("credentials").join("auth.json").exists());
 }
+
+#[test]
+fn credential_run_scoped_cleanup_does_not_redirect_when_run_dir_alias_points_elsewhere() {
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
+        "credential-cleanup-retargeted-alias-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let root = std::fs::canonicalize(tempfile::tempdir().expect("temp root").path())
+        .expect("canonical root");
+    let dir_a = root.join("run-a");
+    let dir_b = root.join("run-b");
+    std::fs::create_dir_all(dir_a.join("credentials")).expect("dir_a credentials");
+    std::fs::create_dir_all(dir_b.join("credentials")).expect("dir_b credentials");
+    std::fs::write(dir_b.join("credentials/auth.json"), "keep-dir-b-file").expect("seed dir_b");
+
+    let alias_run_dir = root.join("run-alias");
+    std::os::unix::fs::symlink(&dir_b, &alias_run_dir).expect("alias -> dir_b");
+
+    let profile = legacy_auth_file_profile(&dir_a.join("credentials/auth.json"));
+    seed_legacy_auth_file(&store, &profile);
+
+    let report =
+        crate::cleanup_ephemeral_credential_materializations(&store, &alias_run_dir, false)
+            .expect("cleanup with retargeted alias");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(
+        report.removed.is_empty(),
+        "retargeted alias must not remove dir_a or dir_b files: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir_b.join("credentials/auth.json"))
+            .ok()
+            .as_deref(),
+        Some("keep-dir-b-file"),
+        "cleanup must never delete a file in the swapped alias target"
+    );
+    assert!(
+        dir_a.join("credentials/auth.json").exists(),
+        "cleanup scoped to alias_run_dir skips dir_a rather than deleting dir_b"
+    );
+    match crate::cleanup::inspect_target_file(
+        &dir_a.join("credentials/auth.json"),
+        Some(&alias_run_dir),
+        1024,
+    ) {
+        crate::cleanup::TargetInspection::RegularFile { bytes, .. } => {
+            assert_ne!(
+                bytes, b"keep-dir-b-file",
+                "locate_path must read dir_a directly instead of redirecting through alias_run_dir into dir_b"
+            );
+        }
+        _ => panic!("expected regular file at dir_a"),
+    }
+}

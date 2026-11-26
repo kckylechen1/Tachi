@@ -98,12 +98,18 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
 }
 
 fn load_project_env_file(path: &Path, override_existing: bool) {
+    // Directories (e.g. `.env/`) can be opened read-only on Unix and repeatedly
+    // yield EISDIR from dotenvy's iterator; require a regular file and abort on
+    // iterator errors to match `dotenvy::from_path`.
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return;
+    }
     let Ok(iter) = dotenvy::from_path_iter(path) else {
         return;
     };
     for item in iter {
         let Ok((key, value)) = item else {
-            continue;
+            break;
         };
         if crate::utils::is_execution_environment_name(&key) {
             tracing::warn!(

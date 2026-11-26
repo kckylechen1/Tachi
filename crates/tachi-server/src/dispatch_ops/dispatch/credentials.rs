@@ -47,7 +47,10 @@ pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
 
     if let Some(cwd) = cwd {
-        for ancestor in cwd.ancestors() {
+        // Canonicalize an existing cwd so an unmanaged symlink/alias pointing
+        // inside a nested checkout cannot walk lexically past the nested `.git`.
+        let resolved_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        for ancestor in resolved_cwd.ancestors() {
             let dir = ancestor.join(default_credentials_dir());
             let key = dir.to_string_lossy().to_string();
             if seen.insert(key) {
@@ -260,10 +263,16 @@ mod tests {
         std::fs::create_dir_all(&nested_src).expect("nested src");
         std::fs::create_dir_all(nested.join(".git")).expect("nested .git");
 
+        let canonical_nested = std::fs::canonicalize(&nested).expect("canonical nested");
+        let canonical_outer = std::fs::canonicalize(&outer).expect("canonical outer");
         let dirs = credential_search_dirs(Some(&nested_src));
-        assert!(dirs.contains(&nested.join(default_credentials_dir())));
         assert!(
-            !dirs.contains(&outer.join(default_credentials_dir())),
+            dirs.contains(&canonical_nested.join(default_credentials_dir())),
+            "canonical nested credentials dir missing: {dirs:?}"
+        );
+        assert!(
+            !dirs.contains(&outer.join(default_credentials_dir()))
+                && !dirs.contains(&canonical_outer.join(default_credentials_dir())),
             "credential search must not cross out of the nested checkout: {dirs:?}"
         );
 
@@ -273,8 +282,26 @@ mod tests {
             .expect("linked .git file");
         let linked_dirs = credential_search_dirs(Some(&linked.join("pkg")));
         assert!(
-            !linked_dirs.contains(&outer.join(default_credentials_dir())),
+            !linked_dirs.contains(&outer.join(default_credentials_dir()))
+                && !linked_dirs.contains(&canonical_outer.join(default_credentials_dir())),
             "linked worktree .git file must also stop credential search: {linked_dirs:?}"
         );
+
+        let alias = outer.join("alias-to-nested-src");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested_src, &alias).expect("symlink alias");
+        #[cfg(unix)]
+        {
+            let alias_dirs = credential_search_dirs(Some(&alias));
+            assert!(
+                alias_dirs.contains(&canonical_nested.join(default_credentials_dir())),
+                "canonical nested credentials dir missing: {alias_dirs:?}"
+            );
+            assert!(
+                !alias_dirs.contains(&outer.join(default_credentials_dir()))
+                    && !alias_dirs.contains(&canonical_outer.join(default_credentials_dir())),
+                "cwd alias must not escape nested checkout boundary: {alias_dirs:?}"
+            );
+        }
     }
 }

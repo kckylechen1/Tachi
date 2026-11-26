@@ -37,36 +37,42 @@ fn locate_path(target: &Path, run_dir: Option<&Path>) -> TargetLocation {
                 }
             }
         };
-        if let Some(rel) = relative_under_run_dir(&resolved_target, run_dir) {
-            return locate_in_run_dir(run_dir, &rel);
+        // Canonicalize `run_dir` once and keep that exact path for both the
+        // prefix match and the anchored open, so an alias target swap between
+        // match and open cannot redirect cleanup into another directory.
+        let canonical_run_dir = match std::fs::canonicalize(run_dir) {
+            Ok(path) => Some(path),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return TargetLocation::Unremovable(format!(
+                    "resolve run_dir '{}': {err}",
+                    run_dir.display()
+                ))
+            }
+        };
+        if let Some(canonical_run_dir) = canonical_run_dir {
+            if let Some(rel) = relative_under_run_dir(&resolved_target, run_dir, &canonical_run_dir)
+            {
+                return locate_in_run_dir(canonical_run_dir, &rel);
+            }
         }
         return locate_recorded(&resolved_target);
     }
     locate_for_operator(target)
 }
 
-fn relative_under_run_dir(target: &Path, run_dir: &Path) -> Option<PathBuf> {
-    if let Ok(rel) = target.strip_prefix(run_dir) {
+fn relative_under_run_dir(
+    target: &Path,
+    run_dir: &Path,
+    canonical_run_dir: &Path,
+) -> Option<PathBuf> {
+    if let Ok(rel) = target.strip_prefix(canonical_run_dir) {
         return Some(rel.to_path_buf());
     }
-    let canonical_run_dir = std::fs::canonicalize(run_dir).ok()?;
-    target
-        .strip_prefix(&canonical_run_dir)
-        .ok()
-        .map(Path::to_path_buf)
+    target.strip_prefix(run_dir).ok().map(Path::to_path_buf)
 }
 
-fn locate_in_run_dir(run_dir: &Path, rel: &Path) -> TargetLocation {
-    let canonical_run_dir = match std::fs::canonicalize(run_dir) {
-        Ok(path) => path,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return TargetLocation::Missing,
-        Err(err) => {
-            return TargetLocation::Unremovable(format!(
-                "resolve run_dir '{}': {err}",
-                run_dir.display()
-            ))
-        }
-    };
+fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
     let mut components = rel
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
