@@ -839,6 +839,84 @@ mod tests {
         );
     }
 
+    /// Services a confined child must not reach. None is one a native adapter
+    /// was measured to need, and a denylist leaves each of them open.
+    const UNREACHABLE_SERVICES: [&str; 4] = [
+        "com.apple.tccd.system",
+        "com.apple.system.notification_center",
+        "com.apple.windowserver.active",
+        "com.apple.dock.server",
+    ];
+    const SERVICE_PROBE: &str = "TACHI_NATIVE_SANDBOX_SERVICE_PROBE";
+
+    /// Two roles. Started by the test below with `SERVICE_PROBE` set, this is
+    /// a confined child that asks the kernel which host services it may reach
+    /// and prints one `<service>=<decision>` line per service. Started on its
+    /// own, it does nothing.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn host_service_decisions() {
+        use std::io::Write;
+        if std::env::var_os(SERVICE_PROBE).is_none() {
+            return;
+        }
+        extern "C" {
+            // Variadic: the kernel's own declaration, and on this ABI the
+            // fourth argument only arrives through the variadic call.
+            fn sandbox_check(
+                pid: libc::pid_t,
+                operation: *const libc::c_char,
+                filter: libc::c_int,
+                ...
+            ) -> libc::c_int;
+        }
+        let operation = c"mach-lookup";
+        for service in UNREACHABLE_SERVICES {
+            let name = std::ffi::CString::new(service).expect("a service name");
+            // 2 is the kernel's name filter: the decision for that one service.
+            let decision =
+                unsafe { sandbox_check(libc::getpid(), operation.as_ptr(), 2, name.as_ptr()) };
+            writeln!(std::io::stdout(), "{service}={decision}").expect("report");
+        }
+    }
+
+    /// The profile rests on its default refusal: a service is reachable only
+    /// when it is named. The child asks the kernel, so no desktop service has
+    /// to be running for the answer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_reaches_no_host_service_that_is_not_named() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let executable = std::env::current_exe().expect("the test binary");
+        let args = [
+            "--exact".into(),
+            "native_sandbox::tests::host_service_decisions".into(),
+            "--nocapture".into(),
+        ];
+        let wrapper =
+            native_sandbox_command(executable.as_os_str(), &args, &f.cwd, &f.runtime, true)
+                .unwrap();
+        let output = Command::new(wrapper.program)
+            .args(wrapper.args)
+            .envs(wrapper.env)
+            .env(SERVICE_PROBE, "1")
+            .current_dir(&f.cwd)
+            .output()
+            .expect("start the probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        for service in UNREACHABLE_SERVICES {
+            let refused = format!("{service}=1");
+            assert!(
+                stdout.lines().any(|line| line == refused),
+                "the kernel lets a confined child reach {service}: {stdout}"
+            );
+        }
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn confined_child_cannot_access_host_pasteboard() {
