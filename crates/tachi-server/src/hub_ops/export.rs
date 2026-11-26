@@ -258,7 +258,7 @@ mod export_dir_unix {
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Component, PathBuf};
 
     fn c_component(component: &OsStr) -> io::Result<CString> {
         if component.is_empty()
@@ -275,50 +275,39 @@ mod export_dir_unix {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
     }
 
-    fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        // SAFETY: `c_path` is NUL-terminated; O_NOFOLLOW rejects a symlinked target.
+    fn open_existing_child_dir(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+        let c_name = c_component(name)?;
+        // SAFETY: `parent` is a live directory descriptor and `c_name` is a single component.
         let fd = unsafe {
-            libc::open(
-                c_path.as_ptr(),
+            libc::openat(
+                parent.as_raw_fd(),
+                c_name.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
             Err(io::Error::last_os_error())
         } else {
-            // SAFETY: `fd` is newly opened and owned by the caller.
+            // SAFETY: `fd` is freshly opened.
             Ok(unsafe { OwnedFd::from_raw_fd(fd) })
         }
     }
 
     fn open_or_create_child_dir(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
-        let c_name = c_component(name)?;
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-        // SAFETY: `parent` is a live directory descriptor and `c_name` is a single component.
-        let fd = unsafe { libc::openat(parent.as_raw_fd(), c_name.as_ptr(), flags) };
-        if fd >= 0 {
-            // SAFETY: `fd` is freshly opened.
-            return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::NotFound {
-            return Err(err);
-        }
-        // SAFETY: create missing component without following symlinks on the child name.
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o755) } != 0 {
-            let mkdir_err = io::Error::last_os_error();
-            if mkdir_err.kind() != io::ErrorKind::AlreadyExists {
-                return Err(mkdir_err);
+        match open_existing_child_dir(parent, name) {
+            Ok(fd) => Ok(fd),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                let c_name = c_component(name)?;
+                // SAFETY: create missing component without following symlinks on the child name.
+                if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o755) } != 0 {
+                    let mkdir_err = io::Error::last_os_error();
+                    if mkdir_err.kind() != io::ErrorKind::AlreadyExists {
+                        return Err(mkdir_err);
+                    }
+                }
+                open_existing_child_dir(parent, name)
             }
-        }
-        // SAFETY: reopen the created/raced child with O_NOFOLLOW + O_DIRECTORY.
-        let fd = unsafe { libc::openat(parent.as_raw_fd(), c_name.as_ptr(), flags) };
-        if fd < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+            Err(err) => Err(err),
         }
     }
 
@@ -352,34 +341,50 @@ mod export_dir_unix {
                 }
                 current
             } else {
-                let mut missing = Vec::new();
-                let mut probe = path.as_path();
-                loop {
-                    match std::fs::symlink_metadata(probe) {
-                        Ok(_) => break,
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                            let name = probe.file_name().ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidInput,
-                                    format!("invalid export directory: {}", path.display()),
-                                )
-                            })?;
-                            missing.push(name.to_os_string());
-                            probe = probe.parent().ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidInput,
-                                    format!("invalid export directory: {}", path.display()),
-                                )
-                            })?;
-                        }
-                        Err(e) => return Err(e),
-                    }
+                // SAFETY: `"/"` is valid NUL-terminated static C string.
+                let root = unsafe {
+                    libc::open(
+                        c"/".as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                if root < 0 {
+                    return Err(io::Error::last_os_error());
                 }
-                // `open_dir_nofollow` fails with `ELOOP` when the deepest existing
-                // ancestor (including `path` itself when already present) is a symlink.
-                let mut current = open_dir_nofollow(probe)?;
-                for part in missing.into_iter().rev() {
-                    current = open_or_create_child_dir(&current, &part)?;
+                // SAFETY: `root` is freshly opened.
+                let mut current = unsafe { OwnedFd::from_raw_fd(root) };
+                let mut depth = 0usize;
+                for component in path.components() {
+                    if let Component::Normal(part) = component {
+                        // On macOS, `/var`, `/tmp`, and `/etc` are top-level OS
+                        // symlinks to `/private/*`. Step through `/private` with
+                        // `O_NOFOLLOW` only at depth 0; every deeper component
+                        // rejects symlinks without exception.
+                        #[cfg(target_os = "macos")]
+                        if depth == 0
+                            && (part == OsStr::new("var")
+                                || part == OsStr::new("tmp")
+                                || part == OsStr::new("etc"))
+                        {
+                            match open_existing_child_dir(&current, part) {
+                                Ok(dir) => {
+                                    current = dir;
+                                    depth += 1;
+                                    continue;
+                                }
+                                Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+                                    let private =
+                                        open_existing_child_dir(&current, OsStr::new("private"))?;
+                                    current = open_existing_child_dir(&private, part)?;
+                                    depth += 1;
+                                    continue;
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        current = open_or_create_child_dir(&current, part)?;
+                        depth += 1;
+                    }
                 }
                 current
             };

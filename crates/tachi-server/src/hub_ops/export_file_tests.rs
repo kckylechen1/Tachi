@@ -113,6 +113,44 @@ fn cursor_and_generic_exports_refuse_symlinked_output_dir() {
 }
 
 #[test]
+fn cursor_and_generic_exports_refuse_intermediate_symlink_in_existing_tree() {
+    for (agent, existing_leaf, exporter) in [
+        ("cursor", "tachi-linked.mdc", export_for_cursor as Exporter),
+        ("generic", "linked.md", export_for_generic),
+    ] {
+        let temp = scratch();
+        let victim_nested = temp.path().join("victim-root/nested");
+        std::fs::create_dir_all(&victim_nested).unwrap();
+        let victim_file = victim_nested.join(existing_leaf);
+        let stale_file = victim_nested.join("tachi-stale.mdc");
+        std::fs::write(&victim_file, "preserve victim").unwrap();
+        std::fs::write(&stale_file, "preserve stale").unwrap();
+
+        let link_parent = temp.path().join("linked-parent");
+        std::os::unix::fs::symlink(temp.path().join("victim-root"), &link_parent).unwrap();
+
+        let mut p = params(agent, &link_parent.join("nested"));
+        p.clean = true;
+        let err = exporter(&[skill("skill:linked", "fixture")], &p)
+            .expect_err("intermediate symlink in output_dir must be refused");
+        assert!(
+            err.contains("create"),
+            "{agent}: unexpected error for intermediate symlink: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim_file).unwrap(),
+            "preserve victim",
+            "{agent}: overwrote file behind intermediate symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stale_file).unwrap(),
+            "preserve stale",
+            "{agent}: removed stale file behind intermediate symlink"
+        );
+    }
+}
+
+#[test]
 fn cursor_frontmatter_quotes_yaml_colon_and_flow_characters() {
     let temp = scratch();
     let description = "a: b [one, two] # comment";

@@ -1362,10 +1362,11 @@ pub(in crate::llm) fn refuse_plain_http_known_host(
         return Ok(());
     }
     if let Ok(url) = reqwest::Url::parse(endpoint) {
-        if url
-            .host_str()
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(host))
-        {
+        if url.host_str().is_some_and(|candidate| {
+            candidate
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(host.trim_end_matches('.'))
+        }) {
             let scheme = url.scheme().to_ascii_lowercase();
             if scheme != "https" {
                 return Err(format!(
