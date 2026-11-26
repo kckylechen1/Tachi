@@ -372,7 +372,15 @@ mod export_dir_unix {
                                     depth += 1;
                                     continue;
                                 }
-                                Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+                                Err(err)
+                                    if matches!(
+                                        err.raw_os_error(),
+                                        Some(libc::ELOOP | libc::ENOTDIR)
+                                    ) && std::fs::read_link(Path::new("/").join(part))
+                                        .is_ok_and(|target| {
+                                            target == Path::new("private").join(part)
+                                        }) =>
+                                {
                                     let private =
                                         open_existing_child_dir(&current, OsStr::new("private"))?;
                                     current = open_existing_child_dir(&private, part)?;

@@ -171,3 +171,41 @@ fn cursor_frontmatter_quotes_yaml_colon_and_flow_characters() {
         "description: \"a: b [one, two] # comment\"\nalwaysApply: false"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cursor_and_generic_exports_accept_macos_top_level_system_aliases() {
+    for (real_root, alias_root) in [("/private/var", "/var"), ("/private/tmp", "/tmp")] {
+        let dir = if real_root == "/private/tmp" {
+            tempfile::tempdir_in(real_root).expect("tempdir in /private/tmp")
+        } else {
+            tempfile::tempdir().expect("tempdir")
+        };
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+        let Ok(rel) = canonical.strip_prefix(real_root) else {
+            continue;
+        };
+        let alias_base = std::path::Path::new(alias_root).join(rel);
+        for (agent, file_name, exporter) in [
+            (
+                "cursor",
+                "tachi-macos-alias.mdc",
+                export_for_cursor as Exporter,
+            ),
+            ("generic", "macos-alias.md", export_for_generic),
+        ] {
+            let out_dir = alias_base.join(format!("{agent}/nested"));
+            exporter(
+                &[skill("skill:macos-alias", "desc")],
+                &params(agent, &out_dir),
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{agent} export via alias {} failed: {err}",
+                    out_dir.display()
+                )
+            });
+            assert!(out_dir.join(file_name).is_file());
+        }
+    }
+}
