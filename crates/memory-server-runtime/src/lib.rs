@@ -744,6 +744,10 @@ pub struct DbRuntime {
     /// acquisition is the very next step (#1588 R6/T7-det).
     #[cfg(test)]
     activation_at_gate_observer: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
+    /// Test-only: one-shot probe fired in `with_path_store_labelled` right
+    /// after `attached_project_state` succeeds and before acquiring `rw_gate`.
+    #[cfg(test)]
+    attached_write_before_gate_observer: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
     /// #1119: migration authority for *dynamic* project DB opens (activate /
     /// attach). Fail-closed [`MigrationAuthority::Deny`] by default; the
     /// deploy-time daemon threads `Allow` from its `--allow-schema-migration`
@@ -867,6 +871,14 @@ impl DbRuntime {
         *lock_or_recover(
             &self.activation_at_gate_observer,
             "activation_at_gate_observer",
+        ) = Some(tx);
+    }
+
+    #[cfg(test)]
+    fn set_attached_write_before_gate_observer_for_test(&self, tx: std::sync::mpsc::Sender<()>) {
+        *lock_or_recover(
+            &self.attached_write_before_gate_observer,
+            "attached_write_before_gate_observer",
         ) = Some(tx);
     }
 
@@ -1182,6 +1194,17 @@ impl DbRuntime {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let state = self.attached_project_state(db_path, label)?;
+        #[cfg(test)]
+        {
+            if let Some(tx) = lock_or_recover(
+                &self.attached_write_before_gate_observer,
+                "attached_write_before_gate_observer",
+            )
+            .take()
+            {
+                let _ = tx.send(());
+            }
+        }
         // issue #1588 FIX-B (R3): the hold-warn guard is declared BEFORE the
         // gate/store guards so it drops LAST (after both are released) and
         // fires on the success path AND on a panicking closure's unwind. `arm`
@@ -2699,6 +2722,7 @@ mod tests {
             project_attach_init_gate: Arc::new(StdMutex::new(())),
             attach_pause_hook: Arc::new(StdMutex::new(None)),
             activation_at_gate_observer: Arc::new(StdMutex::new(None)),
+            attached_write_before_gate_observer: Arc::new(StdMutex::new(None)),
             schema_migration: MigrationAuthority::Deny,
             // Runtime unit tests assert routing/locking, not tuning: the pure
             // default is the honest stand-in for a host that injected nothing.
@@ -3630,16 +3654,17 @@ mod tests {
         let rw_gate = write_or_recover(&cached_state.rw_gate, "test_hold_rw_gate");
 
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        runtime.set_attached_write_before_gate_observer_for_test(entered_tx);
         let runtime_clone = runtime.clone();
         let db_clone = project_db.clone();
         let writer = std::thread::spawn(move || {
-            let _ = entered_tx.send(());
             runtime_clone.with_path_store_with_label::<()>(&db_clone, "project-a", |_| {
                 panic!("write closure must not run after underlying file is replaced");
             })
         });
-        entered_rx.recv().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        entered_rx
+            .recv()
+            .expect("writer reached pre-gate sync point after initial attach check");
         std::fs::rename(&replacement, &project_db).expect("replace project file while waiting");
         drop(rw_gate);
 
