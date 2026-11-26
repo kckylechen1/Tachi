@@ -5,7 +5,6 @@ pub(crate) async fn handle_vault_unlock(
     params: VaultUnlockParams,
 ) -> Result<String, String> {
     let result = async {
-        let _turn = UNLOCK_ADMISSION.lock().await;
         ensure_vault_unlock_allowed(server)?;
 
         let config = server
@@ -92,6 +91,11 @@ pub(crate) async fn handle_vault_unlock(
         // other variant (algorithm mismatch, kdf_params format, invalid
         // salt, corrupt verifier) returns before it, exactly as the seam's
         // own doc comment and discrimination tests require.
+        // Only serialize the CPU-heavy KDF and lockout-state update after any
+        // interactive FIFO or Keychain password read completes.
+        let _turn = UNLOCK_ADMISSION.lock().await;
+        ensure_vault_unlock_allowed(server)?;
+
         // The KDF is deliberately slow. It runs off the async worker threads;
         // the password travels with it and is zeroed there.
         let key = match tokio::task::spawn_blocking(move || {

@@ -19,7 +19,7 @@ impl ArmedProcessGroup {
 #[cfg(unix)]
 impl Drop for ArmedProcessGroup {
     fn drop(&mut self) {
-        if let Some(pgid) = self.0 {
+        if let Some(pgid) = self.0.filter(|&id| id > 0) {
             // SAFETY: `process_group(0)` made the CLI the leader of the group
             // with this id, so the signal reaches that group and nothing else.
             unsafe {
@@ -205,6 +205,9 @@ impl super::super::LlmClient {
             .arg("text")
             .arg("--max-turns")
             .arg("1")
+            .arg("--tools")
+            .arg("")
+            .arg("--strict-mcp-config")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -234,8 +237,13 @@ impl super::super::LlmClient {
         };
         let run = async {
             let (fed, output) = tokio::join!(feed, child.wait_with_output());
-            fed?;
-            output.map_err(|e| format!("claude cli failed: {e}"))
+            let output = output.map_err(|e| format!("claude cli failed: {e}"))?;
+            // If the CLI exited non-zero early (leaving a large stdin unread),
+            // report its exit status and stderr rather than masking it with BrokenPipe.
+            if output.status.success() {
+                fed?;
+            }
+            Ok::<_, String>(output)
         };
         let output = match tokio::time::timeout(limit, run).await {
             Ok(output) => output,

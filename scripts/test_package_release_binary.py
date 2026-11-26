@@ -107,6 +107,26 @@ class PackageReleaseBinaryTests(unittest.TestCase):
         self.assertEqual(self.lines(self.smoke_log), [], "a foreign binary was executed")
         self.assertTrue((self.out / f"tachi-v{VERSION}-{triple}.tar.gz").is_file())
 
+    def test_shasums_rewrite_preserves_signature_entry_and_skips_arm64_smoke_on_x86_host(self) -> None:
+        self.write_tool("rustc", "#!/bin/sh\nprintf 'host: x86_64-apple-darwin\\n'\n")
+        triple = "aarch64-apple-darwin"
+        self.stage_binary(triple, runs=False)
+        sums = self.out / f"tachi-v{VERSION}-SHASUMS256.txt"
+        sig_line = f"{'0' * 64}  tachi-v{VERSION}-{triple}.tar.gz.sig\n"
+        old_line = f"{'1' * 64}  tachi-v{VERSION}-{triple}.tar.gz\n"
+        sums.write_text(sig_line + old_line, encoding="utf-8")
+
+        result = self.run_packager("--triple", triple)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"smoke test skipped: {triple} does not run on x86_64-apple-darwin", result.stdout)
+        self.assertEqual(self.lines(self.smoke_log), [], "arm64 binary was executed on x86_64 host")
+
+        digest = hashlib.sha256((self.out / f"tachi-v{VERSION}-{triple}.tar.gz").read_bytes()).hexdigest()
+        self.assertEqual(
+            sums.read_text(encoding="utf-8"),
+            f"{sig_line}{digest}  tachi-v{VERSION}-{triple}.tar.gz\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

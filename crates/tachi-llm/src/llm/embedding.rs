@@ -346,6 +346,12 @@ impl super::LlmClient {
                 {
                     return Err(format!("Voyage embedding endpoint refused: {leak}"));
                 }
+                super::provider_health::refuse_plain_http_known_host(
+                    &endpoint,
+                    "api.voyageai.com",
+                    "voyage",
+                    "embedding",
+                )?;
                 // The embedding lane has a catalog row of its own
                 // (`env:embedding`, #1681 D7 PR-B), so its outcomes are
                 // attributable the same way a chat lane's are.

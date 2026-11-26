@@ -254,6 +254,12 @@ impl super::LlmClient {
         if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&url) {
             return Err(format!("Voyage rerank endpoint refused: {leak}"));
         }
+        super::provider_health::refuse_plain_http_known_host(
+            &url,
+            "api.voyageai.com",
+            "voyage",
+            "rerank",
+        )?;
 
         let mut json: Option<Value> = None;
         let mut last_err = String::new();

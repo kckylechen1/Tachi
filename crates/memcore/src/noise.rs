@@ -282,16 +282,18 @@ pub fn strip_code_fence(text: &str) -> &str {
 }
 
 /// Whether `rest` could be the inside of a JSON value: the bracket before it
-/// may be an answer. "[核心]" and "{name}" are prose.
-fn starts_a_json_value(rest: &str) -> bool {
+/// may be an answer. "[核心]" and "{name}" or "{1}" are prose.
+fn starts_a_json_value(open: char, rest: &str) -> bool {
     let rest = rest.trim_start();
-    match rest.as_bytes().first() {
-        Some(b'{' | b'[' | b'"' | b']' | b'}' | b'-') => true,
-        Some(b'0'..=b'9') => true,
-        Some(_) => ["true", "false", "null"]
+    match (open, rest.as_bytes().first()) {
+        // A JSON object only begins with a quoted key or an immediate `}`.
+        ('{', Some(b'"' | b'}')) => true,
+        ('{', _) => false,
+        ('[', Some(b'{' | b'[' | b'"' | b']' | b'-' | b'0'..=b'9')) => true,
+        ('[', Some(_)) => ["true", "false", "null"]
             .iter()
             .any(|word| rest.starts_with(word)),
-        None => false,
+        (_, None) | (_, Some(_)) => false,
     }
 }
 
@@ -351,15 +353,14 @@ pub fn extract_json_payload(text: &str) -> Result<&str, String> {
     {
         let at = idx + offset;
         let in_reasoning = reasoning.iter().any(|&(from, to)| from <= at && at < to);
-        if in_reasoning || !starts_a_json_value(&shown[idx + open.len_utf8()..]) {
+        if in_reasoning || !starts_a_json_value(open, &shown[idx + open.len_utf8()..]) {
             continue;
         }
         let payload = &shown[idx..balanced_end(shown, idx, open)?];
-        // A lone number in brackets is a citation while an answer follows.
-        if payload[1..payload.len() - 1]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
-        {
+        // A lone number in brackets (`[1]`) is a citation while an answer follows;
+        // empty `[]` or `{}` is already a valid empty JSON container.
+        let inner = &payload[1..payload.len() - 1];
+        if open == '[' && !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit()) {
             passed_over.get_or_insert(payload);
             continue;
         }
@@ -433,6 +434,28 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.starts_with("No JSON object or array found"), "{err}");
+    }
+
+    #[test]
+    fn extract_json_payload_accepts_empty_array_or_object_after_citation() {
+        assert_eq!(extract_json_payload("See [1]\n[]").unwrap(), "[]");
+        assert_eq!(extract_json_payload("See [1]\n{}").unwrap(), "{}");
+    }
+
+    #[test]
+    fn extract_json_payload_keeps_empty_array_ahead_of_later_object() {
+        assert_eq!(
+            extract_json_payload("[]\nNote: {\"example\": 1}").unwrap(),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn extract_json_payload_skips_numeric_braced_prose_before_object() {
+        assert_eq!(
+            extract_json_payload("{1}\n{\"ok\": true}").unwrap(),
+            "{\"ok\": true}"
+        );
     }
 
     #[test]

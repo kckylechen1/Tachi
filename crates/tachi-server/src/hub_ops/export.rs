@@ -227,10 +227,9 @@ fn export_for_claude_to_dirs(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-/// One line for the `.mdc` frontmatter. YAML ends a line at `\r` as well
-/// as `\n`, so a description carrying either could close the frontmatter or
-/// add a key to it. A run of `---` is dropped for the parsers that end the
-/// frontmatter at the first one they meet.
+/// One line for the `.mdc` frontmatter, serialized as a YAML double-quoted
+/// scalar so embedded `: `, `#`, flow brackets, line terminators, or `---`
+/// cannot split or inject mapping keys.
 fn frontmatter_value(value: &str) -> String {
     let single_line: String = value
         .chars()
@@ -239,29 +238,236 @@ fn frontmatter_value(value: &str) -> String {
             other => other,
         })
         .collect();
-    single_line.replace("---", "\u{2014}")
+    let sanitized = single_line.replace("---", "\u{2014}");
+    serde_json::to_string(&sanitized).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-/// Write an export file without following a link in its place. The export
-/// directories are shared with agents: a link planted where an export goes
-/// must not steer the write onto the file it points to.
-fn write_export_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+/// Directory handle for skill exports that refuses symlinked targets and
+/// post-open directory swaps on Unix via `O_NOFOLLOW` + `openat`.
+struct ExportDir {
+    path: PathBuf,
     #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            // O_NONBLOCK: a FIFO in the place of a file is refused, not waited on.
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)?;
-        file.write_all(content.as_bytes())
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+mod export_dir_unix {
+    use super::ExportDir;
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io::{self, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
+
+    fn c_component(component: &OsStr) -> io::Result<CString> {
+        if component.is_empty()
+            || component == OsStr::new(".")
+            || component == OsStr::new("..")
+            || component.as_bytes().contains(&b'/')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export path component must be an ordinary path segment",
+            ));
+        }
+        CString::new(component.as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)
+
+    fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: `c_path` is NUL-terminated; O_NOFOLLOW rejects a symlinked target.
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: `fd` is newly opened and owned by the caller.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    fn open_or_create_child_dir(parent: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
+        let c_name = c_component(name)?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `parent` is a live directory descriptor and `c_name` is a single component.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), c_name.as_ptr(), flags) };
+        if fd >= 0 {
+            // SAFETY: `fd` is freshly opened.
+            return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::NotFound {
+            return Err(err);
+        }
+        // SAFETY: create missing component without following symlinks on the child name.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o755) } != 0 {
+            let mkdir_err = io::Error::last_os_error();
+            if mkdir_err.kind() != io::ErrorKind::AlreadyExists {
+                return Err(mkdir_err);
+            }
+        }
+        // SAFETY: reopen the created/raced child with O_NOFOLLOW + O_DIRECTORY.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), c_name.as_ptr(), flags) };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    impl ExportDir {
+        pub(super) fn open_or_create(path: PathBuf) -> io::Result<Self> {
+            if path.as_os_str().is_empty()
+                || path.components().any(|c| matches!(c, Component::ParentDir))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid export directory: {}", path.display()),
+                ));
+            }
+            let fd = if path.is_relative() {
+                // SAFETY: `"."` is valid NUL-terminated static C string.
+                let dot = unsafe {
+                    libc::open(
+                        c".".as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                if dot < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `dot` is freshly opened.
+                let mut current = unsafe { OwnedFd::from_raw_fd(dot) };
+                for component in path.components() {
+                    if let Component::Normal(part) = component {
+                        current = open_or_create_child_dir(&current, part)?;
+                    }
+                }
+                current
+            } else {
+                let mut missing = Vec::new();
+                let mut probe = path.as_path();
+                loop {
+                    match std::fs::symlink_metadata(probe) {
+                        Ok(_) => break,
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                            let name = probe.file_name().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    format!("invalid export directory: {}", path.display()),
+                                )
+                            })?;
+                            missing.push(name.to_os_string());
+                            probe = probe.parent().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    format!("invalid export directory: {}", path.display()),
+                                )
+                            })?;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // `open_dir_nofollow` fails with `ELOOP` when the deepest existing
+                // ancestor (including `path` itself when already present) is a symlink.
+                let mut current = open_dir_nofollow(probe)?;
+                for part in missing.into_iter().rev() {
+                    current = open_or_create_child_dir(&current, &part)?;
+                }
+                current
+            };
+            Ok(Self { path, fd })
+        }
+
+        pub(super) fn write_file(&self, file_name: &str, content: &str) -> io::Result<()> {
+            let c_name = c_component(OsStr::new(file_name))?;
+            // SAFETY: `self.fd` is an open directory fd; O_NOFOLLOW | O_NONBLOCK
+            // refuses symlinks and FIFOs without blocking.
+            let fd = unsafe {
+                libc::openat(
+                    self.fd.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_TRUNC
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_CLOEXEC,
+                    0o644 as libc::c_uint,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `fd` is freshly opened and exclusively owned.
+            let mut file = unsafe { File::from_raw_fd(fd) };
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing to write non-regular file: {file_name}"),
+                ));
+            }
+            file.write_all(content.as_bytes())
+        }
+
+        pub(super) fn remove_regular_file(&self, file_name: &OsStr) -> io::Result<()> {
+            let c_name = c_component(file_name)?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: `self.fd` is live, `c_name` is one component, AT_SYMLINK_NOFOLLOW
+            // inspects the link itself rather than its target.
+            if unsafe {
+                libc::fstatat(
+                    self.fd.as_raw_fd(),
+                    c_name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstatat succeeded and initialized `stat`.
+            let stat = unsafe { stat.assume_init() };
+            if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+                return Ok(());
+            }
+            // SAFETY: `unlinkat` without AT_REMOVEDIR never removes directories or follows symlinks.
+            if unsafe { libc::unlinkat(self.fd.as_raw_fd(), c_name.as_ptr(), 0) } != 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl ExportDir {
+    fn open_or_create(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    fn write_file(&self, file_name: &str, content: &str) -> std::io::Result<()> {
+        std::fs::write(self.path.join(file_name), content)
+    }
+
+    fn remove_regular_file(&self, file_name: &std::ffi::OsStr) -> std::io::Result<()> {
+        let target = self.path.join(file_name);
+        if target
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_file())
+        {
+            std::fs::remove_file(target)?;
+        }
+        Ok(())
     }
 }
 
@@ -276,7 +482,8 @@ fn export_for_cursor(
         PathBuf::from(".cursor").join("rules")
     };
 
-    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
+    let dir = ExportDir::open_or_create(output_dir.clone())
+        .map_err(|e| format!("create {:?}: {e}", output_dir))?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();
@@ -311,8 +518,9 @@ fn export_for_cursor(
             content
         );
 
-        let file_path = output_dir.join(format!("tachi-{}.mdc", name));
-        if let Err(e) = write_export_file(&file_path, &mdc_content) {
+        let file_name = format!("tachi-{}.mdc", name);
+        let file_path = dir.path.join(&file_name);
+        if let Err(e) = dir.write_file(&file_name, &mdc_content) {
             errors.push(json!({ "id": cap.id, "error": format!("write: {e}") }));
             continue;
         }
@@ -328,7 +536,7 @@ fn export_for_cursor(
     if params.clean {
         let exported_names: HashSet<String> =
             skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
-        if let Ok(entries) = std::fs::read_dir(&output_dir) {
+        if let Ok(entries) = std::fs::read_dir(&dir.path) {
             for entry in entries.flatten() {
                 let fname = entry.file_name();
                 let name_str = fname.to_string_lossy();
@@ -338,7 +546,7 @@ fn export_for_cursor(
                         .and_then(|s| s.strip_suffix(".mdc"))
                         .unwrap_or("");
                     if !exported_names.contains(skill_name) {
-                        let _ = std::fs::remove_file(entry.path());
+                        let _ = dir.remove_regular_file(&fname);
                     }
                 }
             }
@@ -348,7 +556,7 @@ fn export_for_cursor(
     serde_json::to_string(&json!({
         "agent": "cursor",
         "exported": exported.len(),
-        "output_dir": output_dir.display().to_string(),
+        "output_dir": dir.path.display().to_string(),
         "skills": exported,
         "errors": errors
     }))
@@ -366,7 +574,8 @@ fn export_for_generic(
         PathBuf::from("exported-skills")
     };
 
-    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
+    let dir = ExportDir::open_or_create(output_dir.clone())
+        .map_err(|e| format!("create {:?}: {e}", output_dir))?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();
@@ -381,8 +590,9 @@ fn export_for_generic(
             }
         };
 
-        let file_path = output_dir.join(format!("{}.md", name));
-        if let Err(e) = write_export_file(&file_path, &content) {
+        let file_name = format!("{}.md", name);
+        let file_path = dir.path.join(&file_name);
+        if let Err(e) = dir.write_file(&file_name, &content) {
             errors.push(json!({ "id": cap.id, "error": format!("write: {e}") }));
             continue;
         }
@@ -397,7 +607,7 @@ fn export_for_generic(
     serde_json::to_string(&json!({
         "agent": "generic",
         "exported": exported.len(),
-        "output_dir": output_dir.display().to_string(),
+        "output_dir": dir.path.display().to_string(),
         "skills": exported,
         "errors": errors
     }))

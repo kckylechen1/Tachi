@@ -655,3 +655,44 @@ async fn a_voyage_embedding_response_past_the_byte_cap_is_refused() {
     );
     server.abort();
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_rerank_refuses_plain_http_to_known_host() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _endpoint = EnvRestore::set(
+        RERANK_VOYAGE_ENDPOINT_ENV,
+        "http://api.voyageai.com/v1/rerank",
+    );
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", "http://api.voyageai.com");
+    let _key = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _rerank_key = EnvRestore::unset("VOYAGE_RERANK_API_KEY");
+    let _model = EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV);
+    let err = rerank_error(&recall_client(voyage_rerank())).await;
+    assert!(
+        err.contains("requires https://api.voyageai.com"),
+        "expected HTTPS refusal, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_batch_embedding_refuses_plain_http_to_known_host() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", "http://api.voyageai.com");
+    let _key = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _model = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_MODEL_ENV);
+    let _voyage_model = EnvRestore::unset(crate::llm::embedding_config::VOYAGE_EMBED_MODEL_ENV);
+    let _dim = EnvRestore::unset(crate::llm::embedding_config::EMBEDDING_DIMENSION_ENV);
+    let err = match recall_client(voyage_rerank())
+        .embed_voyage_batch(&["probe document".to_string()], "document")
+        .await
+    {
+        Ok(_) => panic!("plain http to api.voyageai.com must be refused"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("requires https://api.voyageai.com"),
+        "expected HTTPS refusal, got: {err}"
+    );
+}

@@ -872,9 +872,17 @@ jobs:
       - name: Verify nextest retry acceptance
         if: ${{ !cancelled() && steps.nextest_bind.outcome == 'success' }}
         run: python3 .github/scripts/verify_nextest_retry_policy.py
+      - name: Install Linux sandbox primitive (bubblewrap)
+        id: bwrap_setup
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          /usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true
       - name: Run workspace tests
         id: workspace_tests
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' && steps.bwrap_setup.outcome == 'success' }}
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}

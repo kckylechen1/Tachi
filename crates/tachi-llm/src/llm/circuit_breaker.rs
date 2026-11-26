@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -16,10 +16,10 @@ enum BreakerState {
 struct Inner {
     state: RwLock<BreakerState>,
     failure_count: AtomicU32,
-    half_open_probe_claimed: AtomicBool,
-    /// Advanced by every claim of the half-open probe, so an admission
-    /// releases only the claim it still owns.
-    probe_generation: AtomicU64,
+    /// `0` while unclaimed; otherwise the unique generation token of the
+    /// in-flight half-open probe, so an admission releases only itself.
+    half_open_probe: AtomicU64,
+    next_probe_generation: AtomicU64,
     opened_at: RwLock<Option<Instant>>,
 }
 
@@ -28,8 +28,8 @@ impl Inner {
         Self {
             state: RwLock::new(BreakerState::Closed),
             failure_count: AtomicU32::new(0),
-            half_open_probe_claimed: AtomicBool::new(false),
-            probe_generation: AtomicU64::new(0),
+            half_open_probe: AtomicU64::new(0),
+            next_probe_generation: AtomicU64::new(1),
             opened_at: RwLock::new(None),
         }
     }
@@ -88,9 +88,7 @@ impl CircuitBreaker {
                         let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
                         if *state == BreakerState::Open {
                             *state = BreakerState::HalfOpen;
-                            self.inner
-                                .half_open_probe_claimed
-                                .store(false, Ordering::Release);
+                            self.inner.half_open_probe.store(0, Ordering::Release);
                         }
                         return match self.claim_half_open_probe() {
                             Some(generation) => Entry::Probe(generation),
@@ -127,26 +125,34 @@ impl CircuitBreaker {
     }
 
     fn claim_half_open_probe(&self) -> Option<u64> {
+        let generation = loop {
+            let candidate = self
+                .inner
+                .next_probe_generation
+                .fetch_add(1, Ordering::Relaxed);
+            if candidate != 0 {
+                break candidate;
+            }
+        };
         self.inner
-            .half_open_probe_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .half_open_probe
+            .compare_exchange(0, generation, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
-        Some(self.inner.probe_generation.fetch_add(1, Ordering::AcqRel) + 1)
+        Some(generation)
     }
 
     fn release_probe(&self, generation: u64) {
-        if self.inner.probe_generation.load(Ordering::Acquire) == generation {
-            self.inner
-                .half_open_probe_claimed
-                .store(false, Ordering::Release);
-        }
+        let _ = self.inner.half_open_probe.compare_exchange(
+            generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     fn record_success(&self) {
         self.inner.failure_count.store(0, Ordering::Relaxed);
-        self.inner
-            .half_open_probe_claimed
-            .store(false, Ordering::Release);
+        self.inner.half_open_probe.store(0, Ordering::Release);
         let mut opened_at = self
             .inner
             .opened_at
@@ -163,9 +169,7 @@ impl CircuitBreaker {
             let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
             if *state != BreakerState::Open {
                 *state = BreakerState::Open;
-                self.inner
-                    .half_open_probe_claimed
-                    .store(false, Ordering::Release);
+                self.inner.half_open_probe.store(0, Ordering::Release);
                 let mut opened_at = self
                     .inner
                     .opened_at
@@ -438,6 +442,36 @@ mod tests {
         );
         drop(in_flight);
         assert!(registry.admit("probe").is_some());
+    }
+
+    #[test]
+    fn dropping_an_older_probe_does_not_release_a_newer_probe() {
+        let registry = CircuitBreakerRegistry::new();
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("probe");
+        }
+        registry.expire_open_window("probe");
+
+        let stale = registry
+            .admit("probe")
+            .expect("the first probe is admitted");
+        registry.record_failure("probe");
+        registry.expire_open_window("probe");
+        let current = registry
+            .admit("probe")
+            .expect("after re-opening and cooling down, a newer probe is admitted");
+
+        drop(stale);
+        assert!(
+            registry.admit("probe").is_none(),
+            "dropping an older admission must not clear the newer probe slot"
+        );
+
+        drop(current);
+        assert!(
+            registry.admit("probe").is_some(),
+            "dropping the current probe frees the slot"
+        );
     }
 
     #[test]

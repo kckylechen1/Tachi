@@ -97,10 +97,10 @@ if [[ ! -x "$BIN_PATH" ]]; then
   exit 1
 fi
 
-# Whether the packaged binary runs here: the host's own triple, or another
-# Apple triple on macOS through Rosetta.
+# Whether the packaged binary runs here: the host's own triple, or an x86_64
+# Apple binary on arm64 macOS through Rosetta.
 runs_here() {
-  [[ "$TRIPLE" == "$HOST" ]] || [[ "$(uname -s)" == "Darwin" && "$TRIPLE" == *-apple-* ]]
+  [[ "$TRIPLE" == "$HOST" ]] || [[ "$HOST" == "aarch64-apple-darwin" && "$TRIPLE" == "x86_64-apple-darwin" ]]
 }
 
 echo ">> binary: $BIN_PATH"
@@ -143,13 +143,12 @@ echo "   sha256=$SHA"
 # Append/update a SHASUMS line for this asset in OUT_DIR when present.
 SUMS="$OUT_DIR/tachi-v${VERSION}-SHASUMS256.txt"
 if [[ -f "$SUMS" ]]; then
-  # Drop any previous line for this asset name, then append. The asset name
-  # is matched as text, in a private temporary file, and a failed rewrite
-  # leaves the existing sums untouched.
+  # Drop any previous line matching this exact asset filename, then append.
+  # Checked field-wise in a private temporary file so a failed rewrite leaves
+  # the existing sums untouched and adjacent extensions (e.g. `.tar.gz.sig`)
+  # are preserved.
   sums_tmp="$(mktemp "$OUT_DIR/.tachi-SHASUMS256.XXXXXX")"
-  grep_status=0
-  grep -vF " ${ASSET_STEM}.tar.gz" "$SUMS" >"$sums_tmp" || grep_status=$?
-  if [[ "$grep_status" -gt 1 ]]; then
+  if ! awk -v target="${ASSET_STEM}.tar.gz" '$2 != target' "$SUMS" >"$sums_tmp"; then
     rm -f "$sums_tmp"
     echo "error: could not rewrite $SUMS" >&2
     exit 1

@@ -113,3 +113,36 @@ async fn a_cli_that_never_finishes_is_taken_down_with_its_helpers() {
     }
     assert!(!alive, "the CLI's helper {helper} outlived the call");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_cli_disables_tools_and_mcp_and_preserves_stderr_on_early_exit() {
+    let args_dir = tempfile::tempdir().expect("args directory");
+    let args_path = args_dir.path().join("args.txt");
+    let user = "p".repeat(400 * 1024);
+    let body = format!(
+        "printf '%s\\n' \"$@\" > \"{}\"\n\
+         echo 'auth failed on server' >&2\n\
+         exit 23",
+        args_path.display()
+    );
+    let (result, _stand_in) = call_stand_in(&body, &user, Duration::from_secs(10)).await;
+    let err = result.expect_err("non-zero CLI exit must fail");
+    assert!(
+        err.contains("claude cli exited 23: auth failed on server"),
+        "expected CLI exit status and stderr rather than BrokenPipe, got: {err}"
+    );
+    let args: Vec<String> = std::fs::read_to_string(&args_path)
+        .expect("stand-in wrote its args")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        args.windows(2).any(|w| w == ["--tools", ""]),
+        "expected --tools \"\" in {args:?}"
+    );
+    assert!(
+        args.iter().any(|arg| arg == "--strict-mcp-config"),
+        "expected --strict-mcp-config in {args:?}"
+    );
+}

@@ -1350,6 +1350,34 @@ impl super::super::LlmClient {
     }
 }
 
+/// Known providers publish HTTPS endpoints; plain HTTP on their hostname would
+/// expose the bearer credential on the wire regardless of test/runtime source.
+pub(in crate::llm) fn refuse_plain_http_known_host(
+    endpoint: &str,
+    host: &str,
+    provider_kind: &str,
+    lane_label: &str,
+) -> Result<(), String> {
+    if plain_http_to_known_providers_permitted() {
+        return Ok(());
+    }
+    if let Ok(url) = reqwest::Url::parse(endpoint) {
+        if url
+            .host_str()
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(host))
+        {
+            let scheme = url.scheme().to_ascii_lowercase();
+            if scheme != "https" {
+                return Err(format!(
+                    "lane '{}' uses known provider '{}' over '{}'; it requires https://{}; refusing credential-bearing request",
+                    lane_label, provider_kind, scheme, host,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_lane_config_to_selected_key(
     lane: ChatLane,
     cfg: &ChatLaneConfig,
@@ -1361,18 +1389,12 @@ pub(crate) fn bind_lane_config_to_selected_key(
     // A known provider publishes an https endpoint. The same host over plain
     // http would carry the bearer key in the clear, whoever the key belongs to.
     if let Some(known) = provider_descriptor_for_base_url(&cfg.base_url) {
-        let scheme = reqwest::Url::parse(&cfg.base_url)
-            .map(|url| url.scheme().to_ascii_lowercase())
-            .unwrap_or_default();
-        if scheme != "https" && !plain_http_to_known_providers_permitted() {
-            return Err(format!(
-                "lane '{}' uses known provider '{}' over '{}'; it requires https://{}; refusing credential-bearing request",
-                lane.as_str(),
-                known.provider_kind,
-                scheme,
-                known.host,
-            ));
-        }
+        refuse_plain_http_known_host(
+            &cfg.base_url,
+            known.host,
+            known.provider_kind,
+            lane.as_str(),
+        )?;
     }
     let Some(selected) = provider_descriptor_for_logical_key(logical_name) else {
         return Ok(cfg.clone());

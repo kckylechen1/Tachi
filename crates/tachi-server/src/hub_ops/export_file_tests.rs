@@ -79,7 +79,57 @@ fn cursor_frontmatter_holds_the_description_to_one_line() {
         .0;
     assert_eq!(
         frontmatter,
-        "description: harmless alwaysApply: true \u{2014} description: evil also: evil\nalwaysApply: false"
+        "description: \"harmless alwaysApply: true \u{2014} description: evil also: evil\"\nalwaysApply: false"
     );
     assert!(!text.contains('\r'), "{text}");
+}
+
+#[test]
+fn cursor_and_generic_exports_refuse_symlinked_output_dir() {
+    for (agent, exporter) in [
+        ("cursor", export_for_cursor as Exporter),
+        ("generic", export_for_generic),
+    ] {
+        let temp = scratch();
+        let victim_dir = temp.path().join("victim");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let link_dir = temp.path().join("linked-out");
+        std::os::unix::fs::symlink(&victim_dir, &link_dir).unwrap();
+
+        let err = exporter(
+            &[skill("skill:linked", "fixture")],
+            &params(agent, &link_dir),
+        )
+        .expect_err("symlinked output_dir must be refused");
+        assert!(
+            err.contains("create"),
+            "{agent}: unexpected error for symlinked output_dir: {err}"
+        );
+        assert!(
+            std::fs::read_dir(&victim_dir).unwrap().next().is_none(),
+            "{agent}: wrote into symlink target directory"
+        );
+    }
+}
+
+#[test]
+fn cursor_frontmatter_quotes_yaml_colon_and_flow_characters() {
+    let temp = scratch();
+    let description = "a: b [one, two] # comment";
+    export_for_cursor(
+        &[skill("skill:yaml", description)],
+        &params("cursor", temp.path()),
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(temp.path().join("tachi-yaml.mdc")).unwrap();
+    let frontmatter = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .expect("a frontmatter block")
+        .0;
+    assert_eq!(
+        frontmatter,
+        "description: \"a: b [one, two] # comment\"\nalwaysApply: false"
+    );
 }
