@@ -42,6 +42,12 @@ pub(super) fn unlocked_vault_child_env_map(
     env
 }
 
+/// Directories that may hold the credential profile of a dispatch in `cwd`,
+/// nearest first. The walk up from `cwd`, through its canonical path, stops
+/// at the enclosing checkout, so a nested checkout does not inherit the
+/// profiles of the project around it, and at the first directory the world can
+/// write: a profile there could be anyone's, and Tachi would materialize the
+/// operator's secrets by it.
 pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
@@ -51,6 +57,9 @@ pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
         // inside a nested checkout cannot walk lexically past the nested `.git`.
         let resolved_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         for ancestor in resolved_cwd.ancestors() {
+            if !closed_to_others(ancestor) {
+                break;
+            }
             let dir = ancestor.join(default_credentials_dir());
             let key = dir.to_string_lossy().to_string();
             if seen.insert(key) {
@@ -69,6 +78,20 @@ pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+/// Whether others can write into this directory.
+#[cfg(unix)]
+fn closed_to_others(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir)
+        .map(|metadata| metadata.is_dir() && metadata.mode() & 0o002 == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn closed_to_others(_dir: &Path) -> bool {
+    true
 }
 
 pub(super) fn find_dispatch_credential_profile(
@@ -303,5 +326,93 @@ mod tests {
                 "cwd alias must not escape nested checkout boundary: {alias_dirs:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod search_dirs_tests {
+    use super::*;
+
+    fn directories(cwd: &Path) -> Vec<PathBuf> {
+        credential_search_dirs(Some(cwd))
+    }
+
+    /// The candidates of the walk itself: `<ancestor>/.tachi/credentials`
+    /// for every ancestor of `cwd`'s canonical path that was searched.
+    fn project_directories(cwd: &Path) -> Vec<PathBuf> {
+        let canonical = std::fs::canonicalize(cwd).expect("canonical cwd");
+        directories(cwd)
+            .into_iter()
+            .filter(|dir| {
+                dir.parent().and_then(Path::parent).is_some_and(|ancestor| {
+                    ancestor.is_absolute() && canonical.starts_with(ancestor)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_nested_checkout_does_not_inherit_the_profiles_of_the_project_around_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(root.path()).expect("canonical root");
+        let outer = base.join("outer");
+        let inner = outer.join("inner");
+        let sub = inner.join("sub");
+        std::fs::create_dir_all(&sub).expect("nested directories");
+        std::fs::create_dir(outer.join(".git")).expect("outer checkout");
+        std::fs::create_dir(inner.join(".git")).expect("inner checkout");
+
+        let dirs = project_directories(&sub);
+
+        assert!(dirs.contains(&sub.join(".tachi/credentials")), "{dirs:?}");
+        assert!(dirs.contains(&inner.join(".tachi/credentials")), "{dirs:?}");
+        assert!(
+            !dirs.contains(&outer.join(".tachi/credentials")),
+            "{dirs:?}"
+        );
+    }
+
+    /// A profile in a directory the world can write may be anyone's; Tachi
+    /// would materialize the operator's secrets by it.
+    #[cfg(unix)]
+    #[test]
+    fn the_lookup_stops_at_a_directory_the_world_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(root.path()).expect("canonical root");
+        let open = base.join("open");
+        std::fs::create_dir(&open).expect("open directory");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777))
+            .expect("world-writable directory");
+        let project = open.join("project");
+        std::fs::create_dir(&project).expect("project directory");
+
+        assert_eq!(
+            project_directories(&project),
+            vec![project.join(".tachi/credentials")],
+            "nothing above the open directory is searched"
+        );
+        assert!(
+            project_directories(&open).is_empty(),
+            "a dispatch directory the world can write does not trust its own profiles"
+        );
+    }
+
+    #[test]
+    fn a_project_without_a_checkout_keeps_looking_up_through_its_ancestors() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(root.path()).expect("canonical root");
+        let project = base.join("project");
+        let sub = project.join("a").join("b");
+        std::fs::create_dir_all(&sub).expect("directories");
+
+        let dirs = project_directories(&sub);
+
+        assert!(dirs.contains(&sub.join(".tachi/credentials")), "{dirs:?}");
+        assert!(
+            dirs.contains(&project.join(".tachi/credentials")),
+            "{dirs:?}"
+        );
     }
 }
