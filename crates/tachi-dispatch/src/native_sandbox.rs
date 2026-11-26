@@ -1,5 +1,6 @@
-//! Server-owned filesystem write confinement for native ACP children.
-//! This is not network isolation or a claim that all host files are unreadable.
+//! Server-owned filesystem write confinement for native ACP children; on
+//! macOS the host services a confined child may reach as well. This is not
+//! network isolation or a claim that all host files are unreadable.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -487,14 +488,13 @@ pub fn native_sandbox_command(
 /// existing access mode, so none of these widens file-system writes.
 const MACOS_DEVICE_SINKS: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (subpath \"/dev/fd\"))";
 
-/// Host services that act for a confined process outside the filesystem
-/// rules: cfprefsd writes its preferences, LaunchServices and its job brokers
-/// start applications for it, and Apple Events / pasteboard cross into host
-/// apps. Neither native adapter needs one to start.
-const MACOS_IPC_BROKERS: &str = concat!(
-    "(deny appleevent-send)",
-    r#"(deny mach-lookup (global-name-regex #"^com\.apple\.(cfprefsd|launchd|coreservices|CoreServices|lsd|runningboard|RunningBoard|pasteboard|pboard)"))"#,
-);
+/// Host services are refused unless a native adapter needs one: account
+/// lookups, directory change notifications, and the keychain and certificate
+/// evaluators behind HTTPS. cfprefsd, LaunchServices and launchd write or
+/// launch on a process's behalf; the pasteboard and notification services
+/// carry the owner's desktop state. Apple Events are refused by name:
+/// denying their service lookup leaves the send itself allowed.
+const MACOS_IPC_BROKERS: &str = r#"(deny appleevent-send)(deny mach-lookup)(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.FSEvents") (global-name "com.apple.SecurityServer") (global-name "com.apple.trustd.agent"))"#;
 
 fn sbpl_path(path: &Path) -> Result<String, String> {
     let path = path
@@ -735,6 +735,107 @@ mod tests {
         assert!(
             !written,
             "a confined child wrote {plist:?} through cfprefsd ({status:?})"
+        );
+    }
+
+    /// A JavaScript for Automation script, built the way the runner builds a
+    /// confined child when a fixture is given.
+    #[cfg(target_os = "macos")]
+    fn automation(fixture: Option<&Fixture>, script: &str) -> std::process::Output {
+        let mut command = match fixture {
+            None => {
+                let mut command = Command::new("/usr/bin/osascript");
+                command.args(["-l", "JavaScript", "-e", script]);
+                command
+            }
+            Some(f) => {
+                let args = ["-l", "JavaScript", "-e", script].map(OsString::from);
+                let wrapper = native_sandbox_command(
+                    OsStr::new("/usr/bin/osascript"),
+                    &args,
+                    &f.cwd,
+                    &f.runtime,
+                    true,
+                )
+                .unwrap();
+                let mut command = Command::new(wrapper.program);
+                command
+                    .args(wrapper.args)
+                    .envs(wrapper.env)
+                    .current_dir(&f.cwd);
+                command
+            }
+        };
+        command.output().unwrap()
+    }
+
+    // AppKit reads the pasteboard through a host service, outside the
+    // filesystem rules: a confined child could read what the owner copied.
+    // The canary sits on a board of its own, so the owner's is not touched.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_read_the_pasteboard() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let board = format!(
+            "local.tachi.sandbox-probe.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        const CANARY: &str = "TACHI-PASTEBOARD-CANARY";
+        const FILL: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.clearContents; board.setStringForType($('CANARY'), $.NSPasteboardTypeString);";
+        const READ: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.stringForType($.NSPasteboardTypeString).js";
+        const CLEAR: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.clearContents;";
+        let on_board = |script: &str| {
+            script
+                .replace("BOARD", &board)
+                .replace("CANARY'", &format!("{CANARY}'"))
+        };
+        assert!(automation(None, &on_board(FILL)).status.success());
+        // Control: the same reader reaches the board without the profile. A
+        // host without a GUI session has no pasteboard server.
+        let control = String::from_utf8_lossy(&automation(None, &on_board(READ)).stdout)
+            .trim()
+            .to_string();
+        if control != CANARY {
+            eprintln!("no pasteboard on this host ({control:?}); probe skipped");
+            return;
+        }
+
+        let confined = automation(Some(&f), &on_board(READ));
+        let read = String::from_utf8_lossy(&confined.stdout).trim().to_string();
+        let _ = automation(None, &on_board(CLEAR));
+        assert!(
+            read != CANARY,
+            "a confined child read the pasteboard ({:?}): {read:?}",
+            confined.status
+        );
+    }
+
+    // Denying the lookup of the Apple Events service does not make the kernel
+    // refuse the send, and a sent event leaves the sandbox, held back only by
+    // the host's consent for the calling app. The child asks the kernel for
+    // its own decision, so no consent dialog is involved.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_send_apple_events() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        const ASK: &str = "ObjC.bindFunction('getpid', ['int', []]); ObjC.bindFunction('sandbox_check', ['int', ['int', 'char *', 'int', 'void *']]); $.sandbox_check($.getpid(), 'appleevent-send', 0, null)";
+        // An unconfined child is allowed the send.
+        assert_eq!(
+            String::from_utf8_lossy(&automation(None, ASK).stdout).trim(),
+            "0"
+        );
+        // 1 is a refusal; -1 would mean the kernel does not know the operation.
+        let confined = automation(Some(&f), ASK);
+        assert_eq!(
+            String::from_utf8_lossy(&confined.stdout).trim(),
+            "1",
+            "{confined:?}"
         );
     }
 
