@@ -1193,6 +1193,15 @@ impl DbRuntime {
         let gate_wait = write_started.elapsed();
         let store_wait_started = Instant::now();
         let mut store = lock_or_recover(&state.store, label.text());
+        store
+            .verify_opened_physical_db_identity(&state.db_path)
+            .map_err(|error| {
+                format!(
+                    "attached project write refused: physical identity changed under the \
+                     attached store: {}: {error}",
+                    state.db_path.display()
+                )
+            })?;
         let store_wait = store_wait_started.elapsed();
         _hold_warn.arm(gate_wait, store_wait);
         f(&mut store)
@@ -1421,8 +1430,18 @@ impl DbRuntime {
         db_path: &Path,
         conferral: StoreLabel<'_>,
     ) -> Result<(), String> {
-        Self::validate_declared_role_vs_stamp(state, db_path, conferral)?;
-        lock_or_recover(&state.store, "attached_project_store")
+        let claimed = conferral.identity();
+        let store = lock_or_recover(&state.store, "attached_project_store");
+        if claimed != memcore::path_router::UNKNOWN_DB_LABEL {
+            let bound_label = store.db_label().to_string();
+            memcore::db::store_identity::validate_declared_role_against_resolved_label(
+                &bound_label,
+                claimed,
+                db_path,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        store
             .verify_opened_physical_db_identity(&state.db_path)
             .map_err(|error| error.to_string())
     }
@@ -3581,6 +3600,57 @@ mod tests {
         let error =
             written.expect_err("a replaced file must not be written through the attached store");
         assert!(error.contains("identity changed"), "{error}");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn attached_write_refuses_file_replaced_while_waiting_for_rw_gate() {
+        let temp = unique_temp_dir("path-store-write-toctou");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        let replacement = temp.join("replacement/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        seed_project_db(&project_db, "project-a");
+        seed_project_db(&replacement, "project-a");
+        let runtime = std::sync::Arc::new(test_runtime(global_db));
+        runtime
+            .with_path_store_with_label(&project_db, "project-a", |_| Ok(()))
+            .expect("initial attach");
+
+        let key = project_db_cache_key(&project_db).expect("cache key");
+        let cached_state = runtime
+            .attached_project_dbs
+            .read()
+            .unwrap()
+            .get(&key)
+            .expect("cached project state")
+            .state
+            .clone();
+        let rw_gate = write_or_recover(&cached_state.rw_gate, "test_hold_rw_gate");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let runtime_clone = runtime.clone();
+        let db_clone = project_db.clone();
+        let writer = std::thread::spawn(move || {
+            let _ = entered_tx.send(());
+            runtime_clone.with_path_store_with_label::<()>(&db_clone, "project-a", |_| {
+                panic!("write closure must not run after underlying file is replaced");
+            })
+        });
+        entered_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::rename(&replacement, &project_db).expect("replace project file while waiting");
+        drop(rw_gate);
+
+        let err = writer
+            .join()
+            .expect("writer thread joined")
+            .expect_err("post-lock identity check must refuse replaced file");
+        assert!(
+            err.contains("attached project write refused: physical identity changed"),
+            "{err}"
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }

@@ -1034,14 +1034,18 @@ where
         ));
     }
     apply_candidates(&tx, &source_candidates, vec_available, profile)?;
-    let post = gc_candidate_facts(
-        &tx,
-        cfg,
-        profile,
-        as_of,
-        kanban_max_age_days,
-        include_kanban,
-    )?;
+    let post = if planned.is_some() {
+        gc_candidate_facts(
+            &tx,
+            cfg,
+            profile,
+            as_of,
+            kanban_max_age_days,
+            include_kanban,
+        )?
+    } else {
+        Vec::new()
+    };
     before_commit(&tx, &source, &post)?;
     tx.commit()?;
     Ok(GcMaintenanceOutcome { source, post })
