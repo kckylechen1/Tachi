@@ -920,6 +920,63 @@ async fn concurrent_wrong_unlocks_get_no_more_attempts_than_the_limit_allows() {
     );
 }
 
+/// Once a lockout has ended the count starts over under the turn, once:
+/// the attempts that queued up behind the first one share the new budget
+/// instead of each starting a count of their own.
+#[tokio::test]
+async fn attempts_after_an_ended_lockout_share_one_new_budget() {
+    use crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS as LIMIT;
+
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-expiry-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+    server.vault_write().failed_attempts = (LIMIT, Some(Instant::now() - Duration::from_secs(1)));
+
+    let queued = LIMIT as usize + 3;
+    let mut attempts = tokio::task::JoinSet::new();
+    for _ in 0..queued {
+        let server = server.clone();
+        attempts.spawn(async move {
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: "wrong-password".to_string(),
+                    password_fifo_path: None,
+                    use_keychain: false,
+                },
+            )
+            .await
+            .expect_err("a wrong password is refused")
+        });
+    }
+    let mut missed = 0;
+    let mut locked_out = 0;
+    let mut refused = 0;
+    while let Some(result) = attempts.join_next().await {
+        match result.expect("attempt task") {
+            err if err.starts_with("Wrong password") => missed += 1,
+            // The attempt whose failure reaches the limit is told about the
+            // lockout it caused.
+            err if err.starts_with("Too many failed vault unlock attempts") => locked_out += 1,
+            err if err.starts_with("Vault unlock temporarily locked") => refused += 1,
+            err => panic!("unexpected unlock answer: {err}"),
+        }
+    }
+
+    assert_eq!(
+        (missed, locked_out, refused),
+        (LIMIT as usize - 1, 1, queued - LIMIT as usize),
+        "the new budget is spent once, not once per attempt"
+    );
+    assert_eq!(server.vault_read().failed_attempts.0, LIMIT);
+}
+
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_fifo_path_together() {
     let db_path = crate::utils::test_fixture_path(format!(

@@ -94,7 +94,7 @@ pub(crate) async fn handle_vault_unlock(
         // Only serialize the CPU-heavy KDF and lockout-state update after any
         // interactive FIFO or Keychain password read completes.
         let _turn = UNLOCK_ADMISSION.lock().await;
-        ensure_vault_unlock_allowed(server)?;
+        admit_unlock_turn(server)?;
 
         // The KDF is deliberately slow. It runs off the async worker threads;
         // the password travels with it and is zeroed there.

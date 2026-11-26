@@ -189,6 +189,20 @@ pub(super) fn ensure_vault_unlock_allowed(server: &impl VaultCtx) -> Result<(), 
     Ok(())
 }
 
+/// Admit the attempt that holds the turn. A lockout that has ended starts
+/// the count over, so an owner who waited it out gets the whole budget again.
+/// The reset belongs here, where the attempts that queued up behind the first
+/// one share the new budget; the refusal is also checked before the turn, so
+/// that one stays a pure read.
+pub(super) fn admit_unlock_turn(server: &impl VaultCtx) -> Result<(), String> {
+    ensure_vault_unlock_allowed(server)?;
+    let mut v = server.vault_write();
+    if v.failed_attempts.1.is_some() {
+        v.failed_attempts = (0, None);
+    }
+    Ok(())
+}
+
 pub(super) fn record_vault_unlock_failure(server: &impl VaultCtx) -> Result<String, String> {
     let mut v = server.vault_write();
     v.failed_attempts.0 = v.failed_attempts.0.saturating_add(1);
