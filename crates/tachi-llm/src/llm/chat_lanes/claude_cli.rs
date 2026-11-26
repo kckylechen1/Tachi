@@ -208,6 +208,11 @@ impl super::super::LlmClient {
             .arg("--tools")
             .arg("")
             .arg("--strict-mcp-config")
+            // A project's `.claude/settings.json` can hold hooks, which run
+            // commands. The owner's own settings stay, for the endpoint and
+            // model they configure.
+            .arg("--setting-sources")
+            .arg("user")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

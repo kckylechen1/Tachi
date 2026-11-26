@@ -116,7 +116,7 @@ async fn a_cli_that_never_finishes_is_taken_down_with_its_helpers() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn claude_cli_disables_tools_and_mcp_and_preserves_stderr_on_early_exit() {
+async fn claude_cli_disables_tools_mcp_and_project_settings_and_preserves_stderr_on_early_exit() {
     let args_dir = tempfile::tempdir().expect("args directory");
     let args_path = args_dir.path().join("args.txt");
     let user = "p".repeat(400 * 1024);
@@ -144,5 +144,9 @@ async fn claude_cli_disables_tools_and_mcp_and_preserves_stderr_on_early_exit() 
     assert!(
         args.iter().any(|arg| arg == "--strict-mcp-config"),
         "expected --strict-mcp-config in {args:?}"
+    );
+    assert!(
+        args.windows(2).any(|w| w == ["--setting-sources", "user"]),
+        "expected --setting-sources user in {args:?}"
     );
 }
