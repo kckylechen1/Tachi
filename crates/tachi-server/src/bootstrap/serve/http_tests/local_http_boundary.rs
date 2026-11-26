@@ -44,6 +44,9 @@ async fn health_and_vault_routes_reject_a_host_that_is_not_the_loopback_daemon()
         "127.0.0.1@attacker.example",
         "127.0.0.1:",
         "[::1",
+        "[::1]junk",
+        "[localhost]",
+        "[127.0.0.1]",
     ] {
         let status = client
             .get(&live)
@@ -161,7 +164,15 @@ fn loopback_host_names_follow_the_mcp_allowlist() {
         "0.0.0.0",
         "::1",
         "[::1",
+        "[::1]junk",
+        "[::1].attacker.example",
+        "[::1]:",
         "[::1]:x",
+        "[::1]:99999",
+        "[localhost]",
+        "[localhost]:6919",
+        "[127.0.0.1]",
+        "127.0.0.1:99999",
         "",
     ] {
         assert!(!super::super::daemon::is_loopback_host(host), "{host:?}");

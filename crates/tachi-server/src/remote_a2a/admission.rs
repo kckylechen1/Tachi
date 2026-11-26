@@ -188,13 +188,10 @@ impl Connection {
         };
         let server = base.clone_for_mcp_session();
         admit_verified_agent_connection(&server, &request, &TlsProof(evidence)).map_err(
-            |message| {
-                // The writer's own reason is static validation text; it names no
-                // key material or request content.
-                Rejection {
-                    reason: format!("remote admission was refused: {message}"),
-                    key: String::new(),
-                }
+            |_message| {
+                // Keep log/rejection text static so dynamic SQLite errors from
+                // verified_admission never leak into operational logs.
+                Rejection::from("remote admission was refused by verified admission store")
             },
         )?;
         Ok(Self {

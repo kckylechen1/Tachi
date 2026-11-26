@@ -607,28 +607,32 @@ pub(crate) fn daemon_http_router(
         .layer(axum::middleware::from_fn(require_loopback_host))
 }
 
+fn is_valid_host_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
 /// Whether a `Host` header names the loopback daemon: `localhost`, `127.0.0.1`
-/// or `[::1]`, each with an optional port. It mirrors the hosts the `/mcp`
-/// service accepts on its own.
+/// or `[::1]`, each with an optional valid port. It mirrors the hosts the
+/// `/mcp` service accepts on its own.
 pub(super) fn is_loopback_host(value: &str) -> bool {
     let value = value.trim();
-    let (name, port) = if let Some(bracketed) = value.strip_prefix('[') {
+    if let Some(bracketed) = value.strip_prefix('[') {
         let Some((name, rest)) = bracketed.split_once(']') else {
             return false;
         };
-        (name, rest.strip_prefix(':'))
-    } else {
-        match value.rsplit_once(':') {
-            Some((name, port)) => (name, Some(port)),
-            None => (value, None),
+        if name != "::1" {
+            return false;
         }
+        return rest.is_empty() || rest.strip_prefix(':').is_some_and(is_valid_host_port);
+    }
+    let (name, port) = match value.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (value, None),
     };
-    let port_is_valid = match port {
-        None => true,
-        Some(port) => !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()),
-    };
-    port_is_valid
-        && (name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1")
+    port.is_none_or(is_valid_host_port)
+        && (name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1")
 }
 
 /// Rejects requests whose `Host` does not name the loopback daemon.
