@@ -85,7 +85,17 @@ fn open_regular_file_within(
     })?;
     let canonical_candidate = match candidate.canonicalize() {
         Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(format!(
+                    "refusing descriptor-bound read: {} is a dangling symlink",
+                    candidate.display()
+                ));
+            }
+            return Ok(None);
+        }
         Err(error) => {
             return Err(format!(
                 "refusing descriptor-bound read: {} cannot be resolved: {error}",

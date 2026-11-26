@@ -53,6 +53,9 @@ pub(super) fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
             if seen.insert(key) {
                 dirs.push(dir);
             }
+            if std::fs::symlink_metadata(ancestor.join(".git")).is_ok() {
+                break;
+            }
         }
     }
 
@@ -245,6 +248,33 @@ mod tests {
         assert!(
             err.contains(missing_selector),
             "production materializer must report the independently minted selector: {err}"
+        );
+    }
+
+    #[test]
+    fn credential_search_dirs_stops_at_enclosing_git_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outer = dir.path().join("outer");
+        let nested = outer.join("vendor/nested");
+        let nested_src = nested.join("src");
+        std::fs::create_dir_all(&nested_src).expect("nested src");
+        std::fs::create_dir_all(nested.join(".git")).expect("nested .git");
+
+        let dirs = credential_search_dirs(Some(&nested_src));
+        assert!(dirs.contains(&nested.join(default_credentials_dir())));
+        assert!(
+            !dirs.contains(&outer.join(default_credentials_dir())),
+            "credential search must not cross out of the nested checkout: {dirs:?}"
+        );
+
+        let linked = outer.join("vendor/linked");
+        std::fs::create_dir_all(linked.join("pkg")).expect("linked pkg");
+        std::fs::write(linked.join(".git"), "gitdir: /elsewhere/worktrees/linked\n")
+            .expect("linked .git file");
+        let linked_dirs = credential_search_dirs(Some(&linked.join("pkg")));
+        assert!(
+            !linked_dirs.contains(&outer.join(default_credentials_dir())),
+            "linked worktree .git file must also stop credential search: {linked_dirs:?}"
         );
     }
 }

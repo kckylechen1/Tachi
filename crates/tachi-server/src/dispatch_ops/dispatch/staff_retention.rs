@@ -183,11 +183,15 @@ fn release(
     reclaim(&lease.env_id).map_err(|error| format!("lease reclaim failed: {error}"))
 }
 
+fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    memcore::child_env::withhold_inherited_credentials(&mut cmd);
+    cmd
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let output = git_command(dir, args)
         .output()
         .map_err(|error| error.to_string())?;
     if output.status.success() {

@@ -106,6 +106,32 @@ async fn project_bindings_refuse_a_symlink_leaving_the_project() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_bindings_refuse_a_dangling_vault_env_symlink() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = server_with_secret("project-env-dangling-symlink").await;
+    let project = tempfile::tempdir().expect("project");
+    std::fs::create_dir_all(project.path().join(".tachi")).expect("mkdir .tachi");
+    std::fs::write(
+        project.path().join(".tachi").join("vault-bindings.env"),
+        format!("FALLBACK_KEY=vault:{SECRET_NAME}\n"),
+    )
+    .expect("write fallback bindings");
+    std::os::unix::fs::symlink(
+        "/nonexistent/outside/secret.env",
+        project.path().join(".tachi").join("vault.env"),
+    )
+    .expect("plant dangling symlink");
+
+    let error = injected_names(&server, project.path())
+        .expect_err("dangling symlink must be refused instead of falling through");
+    assert!(error.contains("dangling symlink"), "{error}");
+}
+
 // The project file names the variables a child receives; it must not be able
 // to name the ones that decide what the child loads or executes.
 #[tokio::test]

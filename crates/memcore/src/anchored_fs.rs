@@ -260,11 +260,32 @@ mod imp {
             }
         }
 
+        /// Read `name` only when it is a regular file (never following a
+        /// symlink, never blocking on a FIFO), bounded to `max_bytes`.
+        /// `Ok(None)` when missing or not a regular file.
+        pub fn read_regular_file(
+            &self,
+            name: &OsStr,
+            max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
+            self.read_regular_file_c(&c_name(name)?, max_bytes)
+        }
+
         /// `Ok(None)` when the captured entry is not a regular file.
         fn captured_file_contents(&self, name: &CString) -> io::Result<Option<Vec<u8>>> {
+            const MAX_CAPTURED_FILE_BYTES: usize = 4 * 1024 * 1024;
+            self.read_regular_file_c(name, MAX_CAPTURED_FILE_BYTES)
+                .map(|result| result.map(|(_, bytes)| bytes))
+        }
+
+        fn read_regular_file_c(
+            &self,
+            name: &CString,
+            max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
             // SAFETY: name is one component under a live descriptor. O_NOFOLLOW
-            // refuses a captured symlink; O_NONBLOCK keeps a captured FIFO or
-            // device from waiting for a writer.
+            // refuses a symlink; O_NONBLOCK keeps a FIFO or device from waiting
+            // for a writer.
             let fd = unsafe {
                 libc::openat(
                     self.fd.as_ref().as_raw_fd(),
@@ -274,19 +295,33 @@ mod imp {
             };
             if fd < 0 {
                 let error = io::Error::last_os_error();
-                if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                if error.kind() == io::ErrorKind::NotFound
+                    || matches!(error.raw_os_error(), Some(libc::ELOOP))
+                {
                     return Ok(None);
                 }
                 return Err(error);
             }
             // SAFETY: fd is fresh and exclusively owned.
             let mut file = unsafe { File::from_raw_fd(fd) };
-            if !file.metadata()?.is_file() {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
                 return Ok(None);
             }
+            let limit = u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
             let mut observed = Vec::new();
-            file.read_to_end(&mut observed)?;
-            Ok(Some(observed))
+            Read::by_ref(&mut file)
+                .take(limit)
+                .read_to_end(&mut observed)?;
+            if observed.len() > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("file exceeds maximum size of {max_bytes} bytes"),
+                ));
+            }
+            Ok(Some((metadata, observed)))
         }
 
         /// Put a captured entry back under its original name. `cause` names the
@@ -549,6 +584,14 @@ mod imp {
         }
 
         pub fn remove_entry(&self, _name: &OsStr) -> io::Result<bool> {
+            unsupported()
+        }
+
+        pub fn read_regular_file(
+            &self,
+            _name: &OsStr,
+            _max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
             unsupported()
         }
     }

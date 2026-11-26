@@ -91,7 +91,8 @@ fn redact_sensitive_string(input: &str) -> String {
     redact_inline_secret_markers(&out)
 }
 
-/// Every `?` in a whitespace-free token opens a query that runs to its `#`.
+/// Every `?` in a whitespace-free token opens a query that runs to its `#`,
+/// and any `?` inside the fragment (e.g. SPA callback routes) is also redacted.
 fn redact_queries(word: &str) -> String {
     let Some(query_start) = word.find('?') else {
         return word.to_string();
@@ -101,7 +102,13 @@ fn redact_queries(word: &str) -> String {
         Some(fragment_start) => tail.split_at(fragment_start),
         None => (tail, ""),
     };
-    format!("{head}{}{fragment}", redact_parameters(query))
+    let redacted_fragment = if let Some(frag_query_start) = fragment.find('?') {
+        let (frag_head, frag_query) = fragment.split_at(frag_query_start + 1);
+        format!("{frag_head}{}", redact_parameters(frag_query))
+    } else {
+        fragment.to_string()
+    };
+    format!("{head}{}{redacted_fragment}", redact_parameters(query))
 }
 
 /// Parameters are separated by `&`; a `?` inside a query opens a nested URL.

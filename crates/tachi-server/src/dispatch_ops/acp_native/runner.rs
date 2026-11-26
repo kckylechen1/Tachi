@@ -459,6 +459,14 @@ fn opencode_db_auth_snapshot(
     if !has_credential_store {
         return Ok(None);
     }
+    let has_any_credential: bool = connection
+        .query_row("SELECT EXISTS (SELECT 1 FROM credential)", [], |row| {
+            row.get(0)
+        })
+        .map_err(store_error)?;
+    if !has_any_credential {
+        return Ok(None);
+    }
     // Oversized values come back NULL so they are never materialized.
     let mut statement = connection
         .prepare(
@@ -1511,6 +1519,94 @@ mod auth_snapshot_tests {
             exported,
             serde_json::json!({"deepseek": {"type": "api", "key": "k-ds"}})
         );
+    }
+
+    #[test]
+    fn empty_credential_table_falls_back_to_auth_json_while_non_empty_table_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        let store_dir = xdg.join("opencode");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let db = store_dir.join("opencode.db");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE credential (id text PRIMARY KEY, \
+                 integration_id text, label text NOT NULL, value text NOT NULL, connector_id text, \
+                 method_id text, active integer, time_created integer NOT NULL, \
+                 time_updated integer NOT NULL);",
+            )
+            .unwrap();
+        std::fs::write(
+            store_dir.join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "openai": {"type": "api", "key": "secret-openai"},
+                "deepseek": {"type": "api", "key": "k-ds"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            opencode_db_auth_snapshot(&db, "deepseek/deepseek-v4-pro", 1200, NOW),
+            Ok(None)
+        );
+
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let spec = super::super::NativeAcpRunSpec {
+            managed: true,
+            sandbox_cwd: None,
+            #[cfg(any(unix, windows))]
+            approval: None,
+            mcp_servers: Vec::new(),
+            command: "opencode".to_string(),
+            args: vec!["acp".to_string()],
+            cwd: dir.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: String::new(),
+            mode: super::super::NativeAcpRunMode::Session,
+            permission_label: "server-read-only".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: serde_json::json!({
+                "profile_contract": {
+                    "backend": "opencode",
+                    "model": "deepseek/deepseek-v4-pro",
+                    "lifetime_timeout_secs": 1200
+                }
+            }),
+            env: std::collections::HashMap::from([(
+                "XDG_DATA_HOME".to_string(),
+                xdg.to_string_lossy().into_owned(),
+            )]),
+            env_remove: std::collections::HashSet::new(),
+        };
+        let mut command = Command::new("opencode");
+        let mut cleanup = NativeAuthCleanup::default();
+        snapshot_provider_auth(&spec, &runtime, &mut command, &mut cleanup).unwrap();
+        let exported: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(runtime.join("data/opencode/auth.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exported,
+            serde_json::json!({"deepseek": {"type": "api", "key": "k-ds"}})
+        );
+
+        // Once the DB holds at least one credential row, missing providers
+        // must fail closed rather than falling back to legacy auth.json.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO credential VALUES ('1', 'openai', 'label', '{\"type\":\"key\",\"key\":\"k\"}', NULL, NULL, 1, 0, 0)",
+                [],
+            )
+            .unwrap();
+        let err =
+            opencode_db_auth_snapshot(&db, "deepseek/deepseek-v4-pro", 1200, NOW).unwrap_err();
+        assert!(err.contains("no active deepseek credential"), "{err}");
     }
 }
 

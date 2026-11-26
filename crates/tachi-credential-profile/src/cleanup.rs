@@ -51,6 +51,30 @@ enum Removal {
     ForeignContent,
 }
 
+/// Safe descriptor-anchored inspection of a credential target for `doctor`.
+pub(crate) enum TargetInspection {
+    Missing,
+    RegularFile {
+        #[cfg(unix)]
+        mode: u32,
+        bytes: Vec<u8>,
+    },
+    UntrustedEntry {
+        reason: String,
+    },
+    Unreadable {
+        reason: String,
+    },
+}
+
+pub(crate) fn inspect_target_file(
+    target: &Path,
+    run_dir: Option<&Path>,
+    max_bytes: usize,
+) -> TargetInspection {
+    target_fs::inspect(target, run_dir, max_bytes)
+}
+
 pub fn cleanup_ephemeral_credential_materializations(
     store: &MemoryStore,
     run_dir: &Path,

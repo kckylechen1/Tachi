@@ -2,7 +2,9 @@
 //! The entry holding a target name is never followed, and only a regular file
 //! is removed.
 
-use super::{ManagedCredentialMaterialization, RemovableTarget, Removal, TargetLocation};
+use super::{
+    ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection, TargetLocation,
+};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -35,6 +37,74 @@ pub(super) fn locate(
             leaf: leaf.to_os_string(),
         }),
     }
+}
+
+pub(super) fn inspect(
+    target: &Path,
+    _run_dir: Option<&Path>,
+    max_bytes: usize,
+) -> TargetInspection {
+    match fs::symlink_metadata(target) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return TargetInspection::Missing,
+        Err(err) => {
+            return TargetInspection::Unreadable {
+                reason: err.to_string(),
+            }
+        }
+        Ok(entry) if entry.file_type().is_symlink() => {
+            return TargetInspection::UntrustedEntry {
+                reason: "it is a symlink".into(),
+            }
+        }
+        Ok(entry) if entry.is_dir() => {
+            return TargetInspection::UntrustedEntry {
+                reason: "it is a directory".into(),
+            }
+        }
+        Ok(entry) if !entry.is_file() => {
+            return TargetInspection::UntrustedEntry {
+                reason: "it is not a regular file".into(),
+            }
+        }
+        Ok(_) => {}
+    }
+    let mut file = match File::open(target) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return TargetInspection::Missing,
+        Err(err) => {
+            return TargetInspection::Unreadable {
+                reason: err.to_string(),
+            }
+        }
+    };
+    match file.metadata() {
+        Ok(meta) if !meta.is_file() => {
+            return TargetInspection::UntrustedEntry {
+                reason: "it is not a regular file".into(),
+            }
+        }
+        Err(err) => {
+            return TargetInspection::Unreadable {
+                reason: err.to_string(),
+            }
+        }
+        Ok(_) => {}
+    }
+    let limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    if let Err(err) = file.by_ref().take(limit).read_to_end(&mut bytes) {
+        return TargetInspection::Unreadable {
+            reason: err.to_string(),
+        };
+    }
+    if bytes.len() > max_bytes {
+        return TargetInspection::Unreadable {
+            reason: format!("file exceeds maximum size of {max_bytes} bytes"),
+        };
+    }
+    TargetInspection::RegularFile { bytes }
 }
 
 pub(super) fn remove<A: Fn(&[u8]) -> bool>(

@@ -206,3 +206,24 @@ fn retained_staff_worktrees_release_only_results_safe_on_a_remote() {
         .any(|id| id == "d-pushed" || id == "d-untouched"));
     assert_eq!(active.len(), 5, "{active:?}");
 }
+
+#[test]
+fn git_command_withholds_daemon_marker_and_credentials() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _daemon = EnvRestore::set("TACHI_DAEMON", "1");
+    let _key = EnvRestore::set("STAFF_RETENTION_TEST_API_KEY", "sk-secret");
+
+    let cmd = git_command(Path::new("."), &["status"]);
+    let removed: Vec<String> = cmd
+        .get_envs()
+        .filter(|(_, val)| val.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    assert!(removed.iter().any(|k| k == "TACHI_DAEMON"), "{removed:?}");
+    assert!(
+        removed.iter().any(|k| k == "STAFF_RETENTION_TEST_API_KEY"),
+        "{removed:?}"
+    );
+}

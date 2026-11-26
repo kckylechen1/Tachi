@@ -271,11 +271,10 @@ fn probe_native_sandbox() -> bool {
         }
         "macos" => {
             let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.args([
-                "-p",
-                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol)",
-                "/usr/bin/true",
-            ]);
+            let policy = format!(
+                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}{MACOS_IPC_BROKERS}"
+            );
+            command.args(["-p", &policy, "/usr/bin/true"]);
             command
         }
         _ => return false,
@@ -490,8 +489,12 @@ const MACOS_DEVICE_SINKS: &str = "(allow file-write* (literal \"/dev/null\") (li
 
 /// Host services that act for a confined process outside the filesystem
 /// rules: cfprefsd writes its preferences, LaunchServices and its job brokers
-/// start applications for it. Neither native adapter needs one to start.
-const MACOS_IPC_BROKERS: &str = r#"(deny mach-lookup (global-name-regex #"^com\.apple\.(cfprefsd|launchd|coreservices|CoreServices|lsd|runningboard|RunningBoard)"))"#;
+/// start applications for it, and Apple Events / pasteboard cross into host
+/// apps. Neither native adapter needs one to start.
+const MACOS_IPC_BROKERS: &str = concat!(
+    "(deny appleevent-send)",
+    r#"(deny mach-lookup (global-name-regex #"^com\.apple\.(cfprefsd|launchd|coreservices|CoreServices|lsd|runningboard|RunningBoard|pasteboard|pboard)"))"#,
+);
 
 fn sbpl_path(path: &Path) -> Result<String, String> {
     let path = path
@@ -732,6 +735,23 @@ mod tests {
         assert!(
             !written,
             "a confined child wrote {plist:?} through cfprefsd ({status:?})"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_access_host_pasteboard() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let status = f
+            .command(false, "/usr/bin/pbpaste >/dev/null 2>&1")
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "confined child must not read host pasteboard ({status:?})"
         );
     }
 

@@ -64,10 +64,11 @@ const EXECUTION_ENVIRONMENT_NAME_PREFIXES: &[&str] =
     &["LD_", "DYLD_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 pub fn is_execution_environment_name(name: &str) -> bool {
-    EXECUTION_ENVIRONMENT_NAMES.contains(&name)
+    let upper = name.to_ascii_uppercase();
+    EXECUTION_ENVIRONMENT_NAMES.contains(&upper.as_str())
         || EXECUTION_ENVIRONMENT_NAME_PREFIXES
             .iter()
-            .any(|prefix| name.starts_with(prefix))
+            .any(|prefix| upper.starts_with(prefix))
 }
 
 pub fn is_shell_env_name(name: &str) -> bool {
@@ -79,4 +80,25 @@ pub fn is_shell_env_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_execution_environment_name;
+
+    #[test]
+    fn execution_environment_names_match_case_insensitively() {
+        for name in [
+            "PATH",
+            "Path",
+            "COMSPEC",
+            "ComSpec",
+            "ld_preload",
+            "Dyld_Insert_Libraries",
+            "git_config_key_0",
+        ] {
+            assert!(is_execution_environment_name(name), "{name}");
+        }
+        assert!(!is_execution_environment_name("OPENAI_API_KEY"));
+    }
 }

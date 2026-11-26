@@ -301,6 +301,13 @@ fn redact_sensitive_value_covers_every_url_and_bearer_token_in_a_value() {
         value["prose"],
         json!("Bearer [REDACTED] then Bearer [REDACTED] and bearer [REDACTED]")
     );
+
+    let mut fragment_query = json!("https://app.test/?v=1#/callback?token=frag-secret&safe=ok");
+    redact_sensitive_value(&mut fragment_query);
+    assert_eq!(
+        fragment_query,
+        json!("https://app.test/?v=1#/callback?token=[REDACTED]&safe=ok")
+    );
 }
 
 #[test]
