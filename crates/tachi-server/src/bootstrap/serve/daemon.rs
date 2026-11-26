@@ -198,12 +198,13 @@ pub(super) async fn serve_http_daemon(
 
     // Idle shutdown is an explicit operator choice. Native HTTP clients need
     // the resident service to remain available without a stdio process.
+    let idle_shutdown = tokio_util::sync::CancellationToken::new();
     if let Some(idle_timeout) = daemon_idle_timeout() {
         let clock = server.activity_clock();
-        let ct_idle = ct.clone();
+        let idle_target = idle_shutdown.clone();
         let tick = std::time::Duration::from_secs(idle_timeout.as_secs().clamp(5, 60));
         spawn_background_loop("idle_reaper", ct.clone(), LOOP_RESTART_PAUSE, move || {
-            let ct_idle = ct_idle.clone();
+            let idle_target = idle_target.clone();
             let clock = clock.clone();
             Box::pin(async move {
                 loop {
@@ -217,7 +218,7 @@ pub(super) async fn serve_http_daemon(
                         idle_ms / 1000,
                         idle_timeout.as_secs()
                     );
-                        ct_idle.cancel();
+                        idle_target.cancel();
                         break;
                     }
                 }
@@ -348,7 +349,8 @@ pub(super) async fn serve_http_daemon(
         );
     }
 
-    let router = daemon_http_router(server, ct.clone());
+    let mcp_ct = tokio_util::sync::CancellationToken::new();
+    let router = daemon_http_router(server, mcp_ct.clone());
     eprintln!("Tachi daemon listening on http://{bind_addr}");
 
     // Write daemon discovery file so CLI invocations can forward writes
@@ -397,9 +399,19 @@ pub(super) async fn serve_http_daemon(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "SIGINT",
             _ = sigterm() => "SIGTERM",
+            _ = idle_shutdown.cancelled() => "idle timeout",
         }
     };
-    match serve_until_shutdown(listener, router, ct.clone(), SHUTDOWN_DRAIN_TIMEOUT, signal).await {
+    match serve_until_shutdown(
+        listener,
+        router,
+        ct.clone(),
+        mcp_ct.clone(),
+        SHUTDOWN_DRAIN_TIMEOUT,
+        signal,
+    )
+    .await
+    {
         Served::ByItself(result) => {
             // FAIL-LOUD serve contract (#936): the HTTP serve future must only
             // resolve because we asked it to (the idle-reaper cancels `ct`). Any
@@ -735,14 +747,15 @@ enum Served {
 
 /// Serves `router` until the surface stops by itself or `shutdown` resolves.
 ///
-/// A shutdown signal only cancels `ct`. The serve future is then awaited, so
-/// `with_graceful_shutdown` drains in-flight requests. Selecting the signal and
-/// the serve future against each other dropped the serve future as soon as the
-/// signal won, and nothing was ever drained.
+/// A shutdown signal cancels `ct` so `with_graceful_shutdown` stops accepting
+/// new connections and drains in-flight requests, while keeping `mcp_ct` live
+/// until the bounded drain finishes so in-flight `rmcp` SSE/JSON-RPC responses
+/// complete cleanly before session teardown.
 async fn serve_until_shutdown<S: std::future::Future<Output = &'static str>>(
     listener: tokio::net::TcpListener,
     router: axum::Router,
     ct: tokio_util::sync::CancellationToken,
+    mcp_ct: tokio_util::sync::CancellationToken,
     drain_timeout: std::time::Duration,
     shutdown: S,
 ) -> Served {
@@ -758,17 +771,19 @@ async fn serve_until_shutdown<S: std::future::Future<Output = &'static str>>(
     tokio::pin!(shutdown);
     let signal;
     tokio::select! {
-        result = &mut serve => return Served::ByItself(result),
+        result = &mut serve => {
+            mcp_ct.cancel();
+            return Served::ByItself(result);
+        }
         received = &mut shutdown => signal = received,
     }
     ct.cancel();
-    Served::Signalled {
-        signal,
-        drained: matches!(
-            tokio::time::timeout(drain_timeout, &mut serve).await,
-            Ok(Ok(()))
-        ),
-    }
+    let drained = matches!(
+        tokio::time::timeout(drain_timeout, &mut serve).await,
+        Ok(Ok(()))
+    );
+    mcp_ct.cancel();
+    Served::Signalled { signal, drained }
 }
 
 /// First pause before a failed background loop is restarted, and its ceiling.
@@ -1038,6 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn a_shutdown_signal_drains_in_flight_requests_instead_of_dropping_them() {
         let ct = tokio_util::sync::CancellationToken::new();
+        let mcp_ct = tokio_util::sync::CancellationToken::new();
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1049,6 +1065,7 @@ mod tests {
             listener,
             draining_router(started.clone(), release.clone(), ct.clone()),
             ct.clone(),
+            mcp_ct.clone(),
             std::time::Duration::from_secs(5),
             async {
                 let _ = signalled.await;
@@ -1062,6 +1079,10 @@ mod tests {
         // Shutdown has begun, and the request is still working on purpose.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(ct.is_cancelled(), "the signal cancels the daemon token");
+        assert!(
+            !mcp_ct.is_cancelled(),
+            "mcp_ct must remain uncancelled while in-flight requests drain"
+        );
         assert!(
             !serving.is_finished(),
             "shutdown must wait while a request is still in flight"
@@ -1083,11 +1104,16 @@ mod tests {
             ),
             "the serve future is awaited, not dropped with the signal"
         );
+        assert!(
+            mcp_ct.is_cancelled(),
+            "mcp_ct is cancelled after drain completes"
+        );
     }
 
     #[tokio::test]
     async fn a_request_that_ignores_shutdown_cannot_hold_the_daemon_open() {
         let ct = tokio_util::sync::CancellationToken::new();
+        let mcp_ct = tokio_util::sync::CancellationToken::new();
         let started = Arc::new(tokio::sync::Notify::new());
         let handler_started = started.clone();
         let router = axum::Router::new().route(
@@ -1109,6 +1135,7 @@ mod tests {
             listener,
             router,
             ct.clone(),
+            mcp_ct.clone(),
             std::time::Duration::from_millis(200),
             async {
                 let _ = signalled.await;
@@ -1141,6 +1168,178 @@ mod tests {
         );
         response.abort();
         assert!(ct.is_cancelled());
+        assert!(
+            mcp_ct.is_cancelled(),
+            "mcp_ct is cancelled once the bounded drain finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_signal_drains_in_flight_mcp_tool_call_over_sse() {
+        crate::ensure_tls_provider();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_db = tmp.path().join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("global dir");
+        let server = crate::MemoryServer::new(global_db, None).expect("server");
+
+        let ct = tokio_util::sync::CancellationToken::new();
+        let mcp_ct = tokio_util::sync::CancellationToken::new();
+        let router = daemon_http_router(server, mcp_ct.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let url = format!("http://{}/mcp", listener.local_addr().expect("addr"));
+        let (signal, signalled) = tokio::sync::oneshot::channel::<()>();
+        let serving = tokio::spawn(serve_until_shutdown(
+            listener,
+            router,
+            ct.clone(),
+            mcp_ct.clone(),
+            std::time::Duration::from_secs(5),
+            async {
+                let _ = signalled.await;
+                "SIGTERM"
+            },
+        ));
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client");
+
+        let init_resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "drain-test", "version": "1.0" }
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+        assert!(
+            init_resp.status().is_success(),
+            "initialize failed: {}",
+            init_resp.status()
+        );
+        let session_id = init_resp
+            .headers()
+            .get("mcp-session-id")
+            .expect("mcp-session-id")
+            .to_str()
+            .expect("session id UTF-8")
+            .to_string();
+
+        let initialized_resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session_id)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .send()
+            .await
+            .expect("initialized notification");
+        assert!(
+            initialized_resp.status().is_success(),
+            "initialized failed: {}",
+            initialized_resp.status()
+        );
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let pause_token = uuid::Uuid::new_v4().simple().to_string();
+        let _gate = crate::server_handler::arm_call_tool_gate(
+            pause_token.clone(),
+            started.clone(),
+            release.clone(),
+        );
+
+        let call_client = client.clone();
+        let call_url = url.clone();
+        let call_session = session_id.clone();
+        let response = tokio::spawn(async move {
+            call_client
+                .post(&call_url)
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", &call_session)
+                .header("x-tachi-test-pause", &pause_token)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tachi_memory",
+                        "arguments": { "action": "status" }
+                    }
+                }))
+                .send()
+                .await
+        });
+
+        started.notified().await;
+        signal.send(()).expect("signal the server task");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(ct.is_cancelled(), "the signal cancels the drain token");
+        assert!(
+            !mcp_ct.is_cancelled(),
+            "mcp_ct must remain uncancelled while an in-flight MCP tool call drains"
+        );
+        assert!(
+            !serving.is_finished(),
+            "shutdown must wait while /mcp tools/call is in flight"
+        );
+
+        release.notify_one();
+        let tool_resp = response
+            .await
+            .expect("tool task join")
+            .expect("HTTP response after signal");
+        assert_eq!(tool_resp.status(), reqwest::StatusCode::OK);
+        let body = tool_resp.text().await.expect("MCP response body");
+        let payload = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .or_else(|| {
+                body.lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim)
+                    .filter(|data| !data.is_empty())
+                    .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                    .find(|msg| msg.get("id") == Some(&serde_json::json!(2)))
+            })
+            .unwrap_or_else(|| panic!("expected JSON-RPC id=2 response in body, got: {body:?}"));
+        assert_eq!(payload["id"], serde_json::json!(2), "{payload:#}");
+        assert!(
+            payload.get("result").is_some(),
+            "expected complete JSON-RPC result after drain, got: {payload:#}"
+        );
+        assert!(
+            payload.get("error").is_none(),
+            "unexpected JSON-RPC error during drain: {payload:#}"
+        );
+
+        assert!(
+            matches!(
+                serving.await.unwrap(),
+                Served::Signalled {
+                    signal: "SIGTERM",
+                    drained: true
+                }
+            ),
+            "in-flight /mcp call must drain cleanly on SIGTERM"
+        );
+        assert!(
+            mcp_ct.is_cancelled(),
+            "mcp_ct must cancel after drain finishes"
+        );
     }
 
     #[tokio::test]
