@@ -376,10 +376,12 @@ mod export_dir_unix {
                                     if matches!(
                                         err.raw_os_error(),
                                         Some(libc::ELOOP | libc::ENOTDIR)
-                                    ) && std::fs::read_link(Path::new("/").join(part))
-                                        .is_ok_and(|target| {
-                                            target == Path::new("private").join(part)
-                                        }) =>
+                                    ) && std::fs::read_link(
+                                        std::path::Path::new("/").join(part),
+                                    )
+                                    .is_ok_and(|target| {
+                                        target == std::path::Path::new("private").join(part)
+                                    }) =>
                                 {
                                     let private =
                                         open_existing_child_dir(&current, OsStr::new("private"))?;
