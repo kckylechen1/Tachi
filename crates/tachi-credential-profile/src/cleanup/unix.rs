@@ -66,10 +66,17 @@ fn relative_under_run_dir(
     run_dir: &Path,
     canonical_run_dir: &Path,
 ) -> Option<PathBuf> {
-    if let Ok(rel) = target.strip_prefix(canonical_run_dir) {
+    // Strip the lexical `run_dir` prefix first so legacy records recorded under
+    // an alias located inside `canonical_run_dir` (e.g. `<real>/current -> <real>`)
+    // resolve cleanly relative to `canonical_run_dir` instead of leaving the
+    // symlink component at the head of the relative path.
+    if let Ok(rel) = target.strip_prefix(run_dir) {
         return Some(rel.to_path_buf());
     }
-    target.strip_prefix(run_dir).ok().map(Path::to_path_buf)
+    target
+        .strip_prefix(canonical_run_dir)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {

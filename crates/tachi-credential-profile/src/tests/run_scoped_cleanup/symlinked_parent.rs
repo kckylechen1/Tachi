@@ -196,3 +196,33 @@ fn credential_run_scoped_cleanup_does_not_redirect_when_run_dir_alias_points_els
         _ => panic!("expected regular file at dir_a"),
     }
 }
+
+#[test]
+fn credential_run_scoped_cleanup_handles_alias_nested_inside_real_run_dir() {
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
+        "credential-cleanup-nested-alias-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let root = tempfile::tempdir().expect("temp root");
+    let real_run_dir = root.path().join("job");
+    let alias_run_dir = real_run_dir.join("current");
+    std::fs::create_dir_all(real_run_dir.join("credentials")).expect("create real credentials");
+    std::os::unix::fs::symlink(&real_run_dir, &alias_run_dir)
+        .expect("create alias nested inside real_run_dir");
+
+    let legacy_target = alias_run_dir.join("credentials").join("auth.json");
+    let profile = legacy_auth_file_profile(&legacy_target);
+    seed_legacy_auth_file(&store, &profile);
+
+    let report =
+        crate::cleanup_ephemeral_credential_materializations(&store, &alias_run_dir, false)
+            .expect("cleanup via nested alias run_dir");
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(!real_run_dir.join("credentials").join("auth.json").exists());
+}
