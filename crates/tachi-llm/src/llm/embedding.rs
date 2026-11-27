@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use super::catalog_import::{DeploymentAttribution, ENV_EMBEDDING_LANE};
 use super::embedding_config::EmbeddingConfig;
+use super::helpers::{read_upstream_body, redact_provider_response};
 
 /// Voyage API base URL. Defaults to the public endpoint; `VOYAGE_BASE_URL`
 /// overrides it (same `*_BASE_URL` idiom as the chat lanes). This is the seam
@@ -345,6 +346,12 @@ impl super::LlmClient {
                 {
                     return Err(format!("Voyage embedding endpoint refused: {leak}"));
                 }
+                super::provider_health::refuse_plain_http_known_host(
+                    &endpoint,
+                    "api.voyageai.com",
+                    "voyage",
+                    "embedding",
+                )?;
                 // The embedding lane has a catalog row of its own
                 // (`env:embedding`, #1681 D7 PR-B), so its outcomes are
                 // attributable the same way a chat lane's are.
@@ -398,7 +405,7 @@ impl super::LlmClient {
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string);
-                let text = response.text().await.map_err(|e| {
+                let text = read_upstream_body(response).await.map_err(|e| {
                     // The body stalled: whatever the status line said, nothing
                     // usable came back.
                     self.note_deployment_unusable_body(attribution);
@@ -420,7 +427,11 @@ impl super::LlmClient {
                 self.note_recall_provider_outcome(false);
                 if status.as_u16() == 429 {
                     self.mark_secret_rate_limited(&selected, retry_after, attribution);
-                    last_err = format!("Voyage batch API error: {} - {}", status, text);
+                    last_err = format!(
+                        "Voyage batch API error: {} - {}",
+                        status,
+                        redact_provider_response(&text)
+                    );
                     if attempt < max_attempts {
                         continue;
                     }
@@ -432,7 +443,11 @@ impl super::LlmClient {
                         Some(&format!("Voyage batch auth failure {status}")),
                         attribution,
                     );
-                    return Err(format!("Voyage batch API error: {} - {}", status, text));
+                    return Err(format!(
+                        "Voyage batch API error: {} - {}",
+                        status,
+                        redact_provider_response(&text)
+                    ));
                 }
                 if !status.is_success() {
                     // 402, 5xx and the plain refusals — the same gap the chat
@@ -442,7 +457,11 @@ impl super::LlmClient {
                         status.as_u16(),
                         retry_after_header.as_deref(),
                     );
-                    return Err(format!("Voyage batch API error: {} - {}", status, text));
+                    return Err(format!(
+                        "Voyage batch API error: {} - {}",
+                        status,
+                        redact_provider_response(&text)
+                    ));
                 }
                 let json: Value = serde_json::from_str(&text).map_err(|e| {
                     // Protocol failure: a 2xx body that is not the protocol.

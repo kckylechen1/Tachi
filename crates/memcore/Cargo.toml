@@ -2,6 +2,7 @@
 name = "memcore"
 version = "2.1.0"
 edition = "2021"
+rust-version = { workspace = true }
 description = "MemCore — portable memory kernel (store, schema, hybrid search/scorer, graph, events)"
 license = "AGPL-3.0-only"
 
@@ -52,6 +53,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
+url = "2"
 jiff = { workspace = true }
 libsimple = "~0.9"
 sqlite-vec = { workspace = true }

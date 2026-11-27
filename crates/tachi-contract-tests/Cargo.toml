@@ -2,6 +2,7 @@
 name = "tachi-contract-tests"
 version = "1.9.1"
 edition = "2021"
+rust-version = { workspace = true }
 license = "AGPL-3.0-only"
 publish = false
 description = "Workspace contract/census tests (docs fixtures, schema shape, portable mirror). Test-only: the lib is empty and every dependency is a dev-dependency, so `cargo build --release` compiles nothing here. Extracted from tachi-server's test binary (#1610 Track T)."

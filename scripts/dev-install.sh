@@ -65,11 +65,19 @@ if [[ -L "${DESTINATION}" ]]; then
 fi
 if [[ -e "${DESTINATION}" || -L "${DESTINATION}" ]]; then
   backup="$(next_backup_path)"
-  mv "${DESTINATION}" "${backup}"
+  # Keep the previous entry under another name without moving it away: the
+  # installed path stays occupied until the rename below replaces it.
+  if [[ -L "${DESTINATION}" ]]; then
+    cp -P "${DESTINATION}" "${backup}"
+  elif ! ln "${DESTINATION}" "${backup}" 2>/dev/null; then
+    cp -p "${DESTINATION}" "${backup}"
+  fi
   printf 'dev-install: backed up %s to %s\n' "${DESTINATION}" "${backup}"
 fi
 
-if ! mv "${staged}" "${DESTINATION}"; then
+# One rename over the installed path: it never disappears and never holds a
+# partial file while a daemon or a CLI call may start it.
+if ! mv -f "${staged}" "${DESTINATION}"; then
   if [[ -n "${backup}" ]]; then
     mv "${backup}" "${DESTINATION}"
   fi
@@ -78,9 +86,10 @@ fi
 trap - EXIT
 
 if ! "${DESTINATION}" --version; then
-  rm -f "${DESTINATION}"
   if [[ -n "${backup}" ]]; then
-    mv "${backup}" "${DESTINATION}"
+    mv -f "${backup}" "${DESTINATION}"
+  else
+    rm -f "${DESTINATION}"
   fi
   fail "installed binary failed its version check"
 fi

@@ -37,12 +37,26 @@ pub(crate) async fn handle_hub_quick_add(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let requested = params.auto_approve;
+    let blocked_by_scan = register_json
+        .get("skill_scan")
+        .and_then(|scan| scan.get("blocked"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if !requested {
         resp.insert("auto_approve".into(), json!("not_requested"));
     } else if already_enabled {
         // Skill / plugin — register already activated it.
         resp.insert("auto_approve".into(), json!("already_enabled"));
+    } else if blocked_by_scan {
+        // The scan that kept register from activating the capability is not
+        // overruled here. Approving it is a person's call, through hub_review.
+        resp.insert("skill_scan".into(), register_json["skill_scan"].clone());
+        resp.insert("auto_approve".into(), json!("refused"));
+        resp.insert(
+            "reason".into(),
+            json!("the skill scan blocked this capability; review it with hub_review"),
+        );
     } else {
         let review_params = HubReviewParams {
             id: params.id.clone(),

@@ -133,8 +133,10 @@ class AcceptanceTests(unittest.TestCase):
     def test_empty_observational_list_can_restore_windows_as_required(self):
         # The exclusion is a narrow, reversible plan entry: moving the job
         # back into required_jobs reinstates blocking without schema change.
+        # Only the Windows entry moves; any other observational job keeps
+        # its classification.
         plan = dict(PLAN, required_jobs=PLAN["required_jobs"] + [WINDOWS],
-                    observational_jobs=[])
+                    observational_jobs=[job for job in PLAN["observational_jobs"] if job != WINDOWS])
         self.assertTrue(ci.evaluate(plan, green())[0])
         needs = green()
         needs[WINDOWS]["result"] = "failure"
@@ -194,7 +196,8 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(report["required_jobs"],
                          {job: "passed" for job in PLAN["required_jobs"]})
         self.assertEqual(report["observational_jobs"],
-                         {WINDOWS: "observational_failed_excluded"})
+                         {WINDOWS: "observational_failed_excluded",
+                          "rust-linux": "observational_passed"})
         self.assertEqual(report["observational_exclusions"],
                          {WINDOWS: "observational_failed_excluded"})
         self.assertIn("2026-09-23", report["policy"])
@@ -220,6 +223,7 @@ class WorkflowTests(unittest.TestCase):
                          {"build-seat-setup": "ubuntu-24.04", "rust": "macos-15",
                           "gitleaks": "ubuntu-24.04",
                           "physical-db-identity-windows": "windows-latest",
+                          "rust-linux": "ubuntu-24.04",
                           "acceptance": "ubuntu-24.04"})
         self.assertNotIn("self-hosted", self.workflow)
 
@@ -251,6 +255,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(set(identities), set(ALL_JOBS) | {"acceptance"})
         needs = re.search(r"^    needs: \[([^\]]+)\]$", jobs, re.M).group(1)
         self.assertEqual([name.strip() for name in needs.split(",")], ALL_JOBS)
+
+    def test_linux_rust_job_runs_the_suite_under_the_gate_job_admission(self):
+        # The macOS `rust` job stays the gate: Linux is observational, so its
+        # raw outcome is reported without deciding acceptance.
+        self.assertIn("rust-linux", PLAN["observational_jobs"])
+        self.assertNotIn("rust-linux", PLAN["required_jobs"])
+        jobs = self.parsed_workflow()["jobs"]
+        self.assertEqual(jobs["rust-linux"]["runs-on"], "ubuntu-24.04")
+        self.assertEqual(jobs["rust"]["runs-on"], "macos-15")
+        self.assertEqual(jobs["rust-linux"]["if"], jobs["rust"]["if"])
+        self.assertEqual(jobs["rust-linux"]["needs"], jobs["rust"]["needs"])
+        self.assertGreaterEqual(jobs["rust-linux"]["timeout-minutes"], jobs["rust"]["timeout-minutes"])
+        linux = self.workflow.split("  rust-linux:\n", 1)[1]
+        commands = [line.strip().removeprefix("run: ") for line in linux.splitlines()]
+        for command in ('"${AUDITED_NEXTEST:?}" nextest run "${scope_args[@]}" --locked --profile ci',
+                        '"${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci',
+                        "cargo test --workspace --locked --doc"):
+            self.assertEqual(commands.count(command), 1, command)
+        self.assertLess(linux.index("Setup Rust"), linux.index("Run workspace tests"))
 
     def test_windows_matrix_stays_defined_unconditional_and_dated(self):
         self.assertIn("runs-on: windows-latest", self.windows)

@@ -26,7 +26,7 @@
 
 ## 版次
 
-今版 `v2.0.0`，藏库卷册之 schema 为三十九。`main` 之上另有未刊之新法：一方之契唯走 HTTP，入门归于一途，宗门辨识、简报、汉文搜魂皆有精进。详询 [CHANGELOG.md](CHANGELOG.md)。
+今版 `v2.1.0`，藏库卷册之 schema 为四十一。此版之法：一方之契唯走 HTTP，入门归于一途，宗门辨识、简报、汉文搜魂皆有精进。`main` 之上未刊之更，详询 [CHANGELOG.md](CHANGELOG.md)。
 
 自 1.9.x 升册，或旧以 stdio 子进程唤起本阁者，必先读 [docs/UPGRADING.md](docs/UPGRADING.md)，再依 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 之序：先停守护，备份库册与旧器，离线改名，乃升册，逐条核其结果。旧器拒不启新册，回退当以备份为本。
 

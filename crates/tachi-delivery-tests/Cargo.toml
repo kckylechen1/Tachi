@@ -2,6 +2,7 @@
 name = "tachi-delivery-tests"
 version = "1.9.2"
 edition = "2021"
+rust-version = { workspace = true }
 license = "AGPL-3.0-only"
 publish = false
 description = "External durable delivery seam tests extracted from tachi-server (#1831 Track T)."

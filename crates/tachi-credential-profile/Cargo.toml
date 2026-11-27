@@ -2,6 +2,7 @@
 name = "tachi-credential-profile"
 version = "1.9.2"
 edition = "2021"
+rust-version = { workspace = true }
 license = "AGPL-3.0-only"
 publish = false
 description = "Credential-profile discovery, planning, materialization, cleanup and doctor. Carved out of tachi-server (#1610 Track T / #1611): zero MemoryServer coupling, so it lifts whole."

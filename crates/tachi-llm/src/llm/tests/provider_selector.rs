@@ -140,6 +140,7 @@ async fn deepseek_selected_extract_request_carries_canonical_key_only() {
     use std::sync::{Arc, Mutex};
 
     let _guard = crate::test_support::global_test_lock().lock();
+    let _plain_http = plain_http_to_known_providers();
     let _env = frontline_selector_env_guards();
     let _stale_extract_key = EnvRestore::set("EXTRACT_API_KEY", "stale-extract-alias-key");
     let _stale_sf_key = EnvRestore::set("SILICONFLOW_API_KEY", "stale-siliconflow-key");

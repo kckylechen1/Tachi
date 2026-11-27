@@ -735,13 +735,14 @@ jobs:
 
   acceptance:
     name: acceptance
-    needs: [build-seat-setup, rust, gitleaks, physical-db-identity-windows]
+    needs: [build-seat-setup, rust, gitleaks, physical-db-identity-windows, rust-linux]
     # Aggregate CI only; review/canary/owner approval remain separate gates.
     # This job must inspect failed/skipped dependencies, without admitting
     # forks. Required jobs fail closed on any non-success. Observational jobs
-    # (owner adjudication 2026-09-23, current delivery only:
-    # physical-db-identity-windows) are reported with their raw status but
-    # do not block -- see .github/acceptance-plan.json and
+    # (physical-db-identity-windows, owner adjudication 2026-09-23, current
+    # delivery only; rust-linux, which leaves the macOS rust job as the
+    # gate) are reported with their raw status but do not block -- see
+    # .github/acceptance-plan.json and
     # docs/engineering/operations/ci-scheduling.md.
     if: >-
       always() && (
@@ -769,3 +770,167 @@ jobs:
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_acceptance.py
+
+  rust-linux:
+    name: Rust workspace (Linux, observational)
+    # The workspace tests on Linux, without the JUnit report: the timing
+    # census is calibrated on the macOS runner. Formatting, clippy, the audit
+    # and the Python contracts do not depend on the platform and run once, in
+    # the macOS `rust` job, which stays the gate. This job is classified
+    # OBSERVATIONAL in .github/acceptance-plan.json: a red Linux run is
+    # reported as excluded in the acceptance receipt and does not block it.
+    # Owner admission and applicability are identical to the gate job.
+    needs: build-seat-setup
+    if: >-
+      needs.build-seat-setup.outputs.run_rust == 'true' && (
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner))
+    runs-on: ubuntu-24.04
+    # The gate job takes 30 to 35 minutes. Linux has no measurement yet.
+    timeout-minutes: 75
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      # With debug = 0 cargo defaults to `-C strip=debuginfo`, which makes rustc
+      # run the toolchain's rust-objcopy on every build script and binary. On
+      # the hosted macOS image that tool aborts (dyld: libLLVM.dylib missing),
+      # printing ~60 false "SIGABRT" warnings. Nothing here ships; skip the strip.
+      CARGO_PROFILE_DEV_STRIP: "none"
+      CARGO_PROFILE_TEST_STRIP: "none"
+      NEXTEST_TEST_THREADS: "4"
+      RUST_TEST_THREADS: "4"
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
+      - name: Setup Rust
+        id: rust_setup
+        uses: ./.github/actions/setup-rust
+      - name: Identify runner image for Rust cache
+        id: rust_cache_image
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          : "${ImageOS:?runner image OS is required}"
+          : "${ImageVersion:?runner image version is required}"
+          printf 'os=%s\nversion=%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # Restore-only here. PR-scoped caches are readable only by that PR, so
+      # saving ~1 GB per PR push evicted the main cache every PR restores
+      # from. Only main pushes save (see "Save Rust cache" at job end).
+      - name: Restore Rust dependencies and build outputs
+        id: rust_cache
+        if: ${{ !cancelled() && steps.rust_cache_image.outcome == 'success' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug
+            !target/debug/incremental
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust_cache_image.outputs.os }}-${{ steps.rust_cache_image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '.cargo/**', '.github/workflows/ci.yml', '.github/actions/setup-rust/**') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust_cache_image.outputs.os }}-${{ steps.rust_cache_image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '.cargo/**', '.github/workflows/ci.yml', '.github/actions/setup-rust/**') }}-
+      - name: Mark cargo-nextest install
+        id: nextest_mark
+        # #1998: see "Mark cargo-audit install".
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh --mark cargo-nextest
+      - name: Install cargo-nextest
+        id: nextest_install
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        # get.nextest.rs is unreachable from this runner's network (DNS blocked);
+        # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
+        # 0.9.140 is the pinned manifest's `latest`, i.e. what this step already
+        # installed by default; `fallback: none` forbids a source build.
+        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
+        with:
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
+      - name: Bind audited cargo-nextest
+        id: nextest_bind
+        # #1998: `cargo nextest` lets Cargo pick the executable
+        # ($CARGO_HOME/bin, then PATH), and this host keeps the owner's own
+        # ~/.cargo/bin/cargo-nextest (0.9.138). Bind the file this run's
+        # checksum-verified install wrote (after the mark step), assert its
+        # version (keep in sync with `tool:` above; the supply-chain policy
+        # rejects a mismatch) and export its absolute path; the tests run it.
+        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
+        run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
+      - name: Verify nextest retry acceptance
+        if: ${{ !cancelled() && steps.nextest_bind.outcome == 'success' }}
+        run: python3 .github/scripts/verify_nextest_retry_policy.py
+      - name: Install Linux sandbox primitive (bubblewrap)
+        id: bwrap_setup
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          /usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true
+      - name: Run workspace tests
+        id: workspace_tests
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' && steps.bwrap_setup.outcome == 'success' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          : "${AUDITED_NEXTEST:?}"
+          MEMCORE_TEST_TEMPLATE_DIR="$(mktemp -d)"
+          export MEMCORE_TEST_TEMPLATE_DIR
+          trap 'rm -rf -- "$MEMCORE_TEST_TEMPLATE_DIR"' EXIT
+          if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+            scope_args=()
+            while IFS= read -r arg; do
+              [[ -n "$arg" ]] && scope_args+=("$arg")
+            done < <(python3 .github/scripts/ci_affected_crates.py --nextest-args)
+            if ((${#scope_args[@]} == 0)); then
+              scope_args=(--workspace)
+            fi
+            "${AUDITED_NEXTEST:?}" nextest run "${scope_args[@]}" --locked --profile ci
+          else
+            "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          fi
+      - name: Verify portable-kernel feature boundary
+        id: portable
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]] || python3 .github/scripts/ci_affected_crates.py --includes portable-kernel; then
+            cargo test -p portable-kernel --features portable-contract-test --locked
+          else
+            echo "Skipping portable-kernel feature boundary: portable-kernel not in affected crate set"
+          fi
+      - name: Run doc tests
+        id: doctests
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: cargo test --workspace --locked --doc
+      - name: Save Rust cache
+        if: >-
+          ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+              steps.rust_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug
+            !target/debug/incremental
+          key: ${{ steps.rust_cache.outputs.cache-primary-key }}

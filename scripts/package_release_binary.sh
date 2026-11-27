@@ -63,6 +63,8 @@ mkdir -p "$OUT_DIR"
 ASSET_STEM="tachi-v${VERSION}-${TRIPLE}"
 STAGE="$OUT_DIR/$ASSET_STEM"
 TARBALL="$OUT_DIR/${ASSET_STEM}.tar.gz"
+# The staging directory is scaffolding: the tarball is the deliverable.
+trap 'rm -rf -- "$STAGE"' EXIT
 
 echo "== package ${ASSET_STEM} =="
 
@@ -95,10 +97,20 @@ if [[ ! -x "$BIN_PATH" ]]; then
   exit 1
 fi
 
+# Whether the packaged binary runs here: the host's own triple, or an x86_64
+# Apple binary on arm64 macOS through Rosetta.
+runs_here() {
+  [[ "$TRIPLE" == "$HOST" ]] || [[ "$HOST" == "aarch64-apple-darwin" && "$TRIPLE" == "x86_64-apple-darwin" ]]
+}
+
 echo ">> binary: $BIN_PATH"
-if ! "$BIN_PATH" --version; then
-  echo "error: smoke test failed — '$BIN_PATH --version' did not run cleanly; refusing to package a broken binary" >&2
-  exit 1
+if runs_here; then
+  if ! "$BIN_PATH" --version; then
+    echo "error: smoke test failed — '$BIN_PATH --version' did not run cleanly; refusing to package a broken binary" >&2
+    exit 1
+  fi
+else
+  echo ">> smoke test skipped: $TRIPLE does not run on $HOST"
 fi
 
 rm -rf "$STAGE"
@@ -110,9 +122,9 @@ chmod +x "$STAGE/tachi"
 # Ad-hoc re-sign (#937): Apple's linker ad-hoc-signs at build time
 # ("Signature=linker-signed"), which launchd/AMFI rejects when the binary is
 # spawned as a daemon. Force a real ad-hoc signature on the staged, final-name
-# binary so what we sign is what ships. macOS-only — this script may run its
-# build step on non-mac hosts for other triples, so guard on the tool.
-if [[ "$(uname -s)" == "Darwin" ]]; then
+# binary so what we sign is what ships. Decided by the target, not by the host:
+# a macOS host packaging another platform's triple has nothing to sign.
+if [[ "$TRIPLE" == *-apple-* && "$(uname -s)" == "Darwin" ]]; then
   echo ">> codesign --force -s - $STAGE/tachi"
   codesign --force -s - "$STAGE/tachi"
 fi
@@ -131,9 +143,17 @@ echo "   sha256=$SHA"
 # Append/update a SHASUMS line for this asset in OUT_DIR when present.
 SUMS="$OUT_DIR/tachi-v${VERSION}-SHASUMS256.txt"
 if [[ -f "$SUMS" ]]; then
-  # Drop any previous line for this asset name, then append.
-  grep -v " ${ASSET_STEM}.tar.gz\$" "$SUMS" >"${SUMS}.tmp" || true
-  mv "${SUMS}.tmp" "$SUMS"
+  # Drop any previous line matching this exact asset filename, then append.
+  # Checked field-wise in a private temporary file so a failed rewrite leaves
+  # the existing sums untouched and adjacent extensions (e.g. `.tar.gz.sig`)
+  # are preserved.
+  sums_tmp="$(mktemp "$OUT_DIR/.tachi-SHASUMS256.XXXXXX")"
+  if ! awk -v target="${ASSET_STEM}.tar.gz" '$2 != target' "$SUMS" >"$sums_tmp"; then
+    rm -f "$sums_tmp"
+    echo "error: could not rewrite $SUMS" >&2
+    exit 1
+  fi
+  mv "$sums_tmp" "$SUMS"
 fi
 echo "${SHA}  ${ASSET_STEM}.tar.gz" >>"$SUMS"
 echo ">> sums: $SUMS"

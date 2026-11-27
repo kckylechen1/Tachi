@@ -608,6 +608,10 @@ impl super::super::LlmClient {
             // `cargo test` (libtest shares one process; nextest's
             // process-per-test hid it).
             .no_proxy()
+            // A 3xx from a provider is not followed: the request carries a
+            // bearer key and a body, and a redirect would send both to
+            // wherever the response points.
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(60))
             .build()
@@ -1308,6 +1312,73 @@ impl super::super::LlmClient {
 /// provider-branded credential is also refused on an unknown host. The four
 /// lane-scoped aliases remain valid for caller-owned custom endpoints; their
 /// descriptor only supplies a default when no endpoint was configured.
+/// Lane tests reach a known provider's host through a capture server that
+/// speaks plain http. Only test builds can say so.
+#[cfg(any(test, feature = "test-support"))]
+static PLAIN_HTTP_TO_KNOWN_PROVIDERS_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test builds only. While it lives, a lane may call a known provider's host
+/// over plain http. Take the global test lock first: the permit is
+/// process-wide.
+#[cfg(any(test, feature = "test-support"))]
+pub struct PlainHttpToKnownProviders;
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for PlainHttpToKnownProviders {
+    fn drop(&mut self) {
+        PLAIN_HTTP_TO_KNOWN_PROVIDERS_FOR_TESTS.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn plain_http_to_known_providers_permitted() -> bool {
+    PLAIN_HTTP_TO_KNOWN_PROVIDERS_FOR_TESTS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn plain_http_to_known_providers_permitted() -> bool {
+    false
+}
+
+impl super::super::LlmClient {
+    /// Test builds only: see [`PlainHttpToKnownProviders`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn permit_plain_http_to_known_providers_for_tests() -> PlainHttpToKnownProviders {
+        PLAIN_HTTP_TO_KNOWN_PROVIDERS_FOR_TESTS.store(true, std::sync::atomic::Ordering::Release);
+        PlainHttpToKnownProviders
+    }
+}
+
+/// Known providers publish HTTPS endpoints; plain HTTP on their hostname would
+/// expose the bearer credential on the wire regardless of test/runtime source.
+pub(in crate::llm) fn refuse_plain_http_known_host(
+    endpoint: &str,
+    host: &str,
+    provider_kind: &str,
+    lane_label: &str,
+) -> Result<(), String> {
+    if plain_http_to_known_providers_permitted() {
+        return Ok(());
+    }
+    if let Ok(url) = reqwest::Url::parse(endpoint) {
+        if url.host_str().is_some_and(|candidate| {
+            candidate
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(host.trim_end_matches('.'))
+        }) {
+            let scheme = url.scheme().to_ascii_lowercase();
+            if scheme != "https" {
+                return Err(format!(
+                    "lane '{}' uses known provider '{}' over '{}'; it requires https://{}; refusing credential-bearing request",
+                    lane_label, provider_kind, scheme, host,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_lane_config_to_selected_key(
     lane: ChatLane,
     cfg: &ChatLaneConfig,
@@ -1316,6 +1387,16 @@ pub(crate) fn bind_lane_config_to_selected_key(
     allow_rebind: bool,
 ) -> Result<ChatLaneConfig, String> {
     authority.validate_selected_frontline_endpoint(lane, &cfg.base_url)?;
+    // A known provider publishes an https endpoint. The same host over plain
+    // http would carry the bearer key in the clear, whoever the key belongs to.
+    if let Some(known) = provider_descriptor_for_base_url(&cfg.base_url) {
+        refuse_plain_http_known_host(
+            &cfg.base_url,
+            known.host,
+            known.provider_kind,
+            lane.as_str(),
+        )?;
+    }
     let Some(selected) = provider_descriptor_for_logical_key(logical_name) else {
         return Ok(cfg.clone());
     };
@@ -1332,7 +1413,6 @@ pub(crate) fn bind_lane_config_to_selected_key(
             lane.as_str()
         ));
     }
-
     let Some(current_provider) = provider_descriptor_for_base_url(&cfg.base_url) else {
         if matches!(
             logical_name,

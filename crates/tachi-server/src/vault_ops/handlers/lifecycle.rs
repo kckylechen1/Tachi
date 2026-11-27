@@ -59,7 +59,7 @@ pub(crate) async fn handle_vault_unlock(
         } else {
             None
         };
-        let password = match (fifo_password.as_deref(), keychain_password.as_deref()) {
+        let password = match (fifo_password.take(), keychain_password.take()) {
             (Some(password), None) => password,
             (None, Some(password)) => password,
             (Some(_), Some(_)) => {
@@ -72,7 +72,7 @@ pub(crate) async fn handle_vault_unlock(
                             .to_string(),
                     );
                 }
-                &params.password
+                params.password.clone()
             }
         };
         // tachi#1080/#1187 fix-round (attack-pass finding A1; leader
@@ -91,33 +91,28 @@ pub(crate) async fn handle_vault_unlock(
         // other variant (algorithm mismatch, kdf_params format, invalid
         // salt, corrupt verifier) returns before it, exactly as the seam's
         // own doc comment and discrimination tests require.
-        let key = match crypto::derive_verified_key_from_stored_config(&config, password) {
-            Ok(key) => key,
-            Err(crypto::StoredVaultKeyDerivationError::WrongPassword) => {
-                if let Some(password) = fifo_password.as_mut() {
-                    crypto::zero_string(password);
-                }
-                if let Some(password) = keychain_password.as_mut() {
-                    crypto::zero_string(password);
-                }
+        // Only serialize the CPU-heavy KDF and lockout-state update after any
+        // interactive FIFO or Keychain password read completes.
+        let _turn = UNLOCK_ADMISSION.lock().await;
+        admit_unlock_turn(server)?;
+
+        // The KDF is deliberately slow. It runs off the async worker threads;
+        // the password travels with it and is zeroed there.
+        let key = match tokio::task::spawn_blocking(move || {
+            let mut password = password;
+            let derived = crypto::derive_verified_key_from_stored_config(&config, &password);
+            crypto::zero_string(&mut password);
+            derived
+        })
+        .await
+        {
+            Ok(Ok(key)) => key,
+            Ok(Err(crypto::StoredVaultKeyDerivationError::WrongPassword)) => {
                 return record_vault_unlock_failure(server);
             }
-            Err(err) => {
-                if let Some(password) = fifo_password.as_mut() {
-                    crypto::zero_string(password);
-                }
-                if let Some(password) = keychain_password.as_mut() {
-                    crypto::zero_string(password);
-                }
-                return Err(err.to_string());
-            }
+            Ok(Err(err)) => return Err(err.to_string()),
+            Err(err) => return Err(format!("vault unlock derivation task failed: {err}")),
         };
-        if let Some(password) = fifo_password.as_mut() {
-            crypto::zero_string(password);
-        }
-        if let Some(password) = keychain_password.as_mut() {
-            crypto::zero_string(password);
-        }
 
         {
             let mut v = server.vault_write();

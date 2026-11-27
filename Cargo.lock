@@ -1573,6 +1573,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "url",
  "uuid",
  "vault-kit",
 ]
@@ -2875,6 +2876,7 @@ dependencies = [
  "axum",
  "blake2",
  "jiff",
+ "libc",
  "memcore",
  "reqwest",
  "rusqlite",

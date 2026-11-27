@@ -31,6 +31,7 @@ permissions:
 jobs:
   resolve-version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -73,6 +74,7 @@ jobs:
           - runner: macos-15
             triple: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     name: Build CLI ${{ matrix.triple }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -120,6 +122,7 @@ jobs:
   publish-private-release:
     needs: [resolve-version, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     # Only this job creates/uploads the private GitHub Release, so only it
     # needs contents:write (#911 follow-up to #907).
     permissions:
@@ -180,6 +183,7 @@ jobs:
     needs: [resolve-version, publish-private-release]
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_promote != true }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Check tap secret
         env:

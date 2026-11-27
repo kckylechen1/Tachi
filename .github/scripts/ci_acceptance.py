@@ -24,7 +24,9 @@ class InvalidEvidence(ValueError):
 OBSERVATIONAL_POLICY = (
     "observational exclusions adjudicated 2026-09-23 (owner): "
     "current-delivery acceptance only; raw Windows status retained and "
-    "reported, never faked; windows release prohibition until #1963 fixed"
+    "reported, never faked; windows release prohibition until #1963 fixed; "
+    "rust-linux observational: the macOS rust job stays the gate, raw Linux "
+    "status retained and reported"
 )
 
 

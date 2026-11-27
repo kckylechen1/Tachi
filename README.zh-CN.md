@@ -34,7 +34,7 @@ Tachi 是一个单二进制、本地优先的 AI Agent 记忆与协调后端。�
 
 ## 发布状态
 
-- **当前版本：** `v2.0.0`（存储 schema 39）。见 [2.0.0 发布说明](CHANGELOG.md#200---2026-09-25)。
+- **当前版本：** `v2.1.0`（存储 schema 41）。见 [2.1.0 发布说明](CHANGELOG.md#210---2026-11-08)。
 - **`main` 上尚未发布的变化：** 一方 MCP 只走 HTTP，Agent 入口统一为一个默认配置，项目绑定、简报和中文召回都有改进。Hub 的上游 MCP 代理和自动建议生产者已退役。下文能力说明对应 `main`；已发布的二进制请查阅对应 tag 的文档。见 [Unreleased](CHANGELOG.md#unreleased)。
 - **升级提示：** 从 1.9.x 升级，或者以前是让客户端以 stdio 子进程方式启动 Tachi，请先阅读 [docs/UPGRADING.md](docs/UPGRADING.md)（英文）。
 
@@ -48,14 +48,14 @@ Tachi 是一个单二进制、本地优先的 AI Agent 记忆与协调后端。�
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-或者使用 shell 安装脚本。v2.0.0 标签不发布 OpenClaw 插件资产，因此需要加 `--skip-plugin`：
+或者使用 shell 安装脚本。发布标签不附带 OpenClaw 插件资产，因此需要加 `--skip-plugin`：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 - 在 macOS 上，安装脚本还会安装并重启用户级 LaunchAgent（`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`）。只想要二进制的话，加 `--skip-daemon-service`。
-- 标签流水线只提供一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon）。其他平台需要从源码编译（未经验证）。
+- 标签流水线只提供一个预编译包 `tachi-v2.1.0-aarch64-apple-darwin`（Apple Silicon）。其他平台需要从源码编译（未经验证）。
 
 验证：
 
@@ -305,7 +305,7 @@ cargo nextest run --workspace
 cargo run -p tachi-server -- --daemon --port 6919 serve
 ```
 
-需要 Rust ≥ 1.75。编码 Agent 遵循[仓库契约](AGENTS.md)；[CLAUDE.md](CLAUDE.md) 只是针对 Claude 的补充适配。
+需要 Rust 1.99，即 `rust-toolchain.toml` 钉住的工具链。编码 Agent 遵循[仓库契约](AGENTS.md)；[CLAUDE.md](CLAUDE.md) 只是针对 Claude 的补充适配。
 
 ---
 

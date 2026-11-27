@@ -10,6 +10,7 @@ use super::rerank::{
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 use super::{LlmClient, ProviderSecret, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE};
+use crate::test_support::TestLockGuard;
 use jiff::Timestamp;
 use memcore::time_compat::rfc3339_compat;
 use memcore::vault::VaultKeyHealth;
@@ -28,6 +29,15 @@ use std::time::{Duration, Instant};
 // `pub(super)` so sibling unit-test modules under `llm::` (e.g. the
 // thinking-suppression tests in `chat_lanes/lane_calls.rs`) can share the
 // same restore-on-drop guard under the global test lock.
+/// Lane tests reach a known provider's host through a capture server on
+/// plain http. The permit is process-wide, so it is taken under the global
+/// test lock and ends before the lock is released.
+pub(super) fn plain_http_to_known_providers() -> (impl Drop, TestLockGuard) {
+    let guard = crate::test_support::global_test_lock().lock();
+    let permit = LlmClient::permit_plain_http_to_known_providers_for_tests();
+    (permit, guard)
+}
+
 pub(super) struct EnvRestore {
     key: &'static str,
     original: Option<std::ffi::OsString>,
@@ -60,6 +70,7 @@ impl Drop for EnvRestore {
 mod auth_probe;
 mod catalog_import;
 mod chat_lanes;
+mod claude_cli;
 mod client_env;
 mod config_json;
 mod deployment_health;

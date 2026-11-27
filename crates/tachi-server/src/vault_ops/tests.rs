@@ -812,6 +812,172 @@ fn bootstrap_auto_unlock_owns_one_provider_refresh() {
     );
 }
 
+/// Argon2id takes long enough to be seen. While it runs for an unlock, the
+/// rest of the runtime must keep making progress.
+#[tokio::test(flavor = "current_thread")]
+async fn vault_unlock_derives_the_key_off_the_async_thread() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-off-thread-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+    });
+    // Let the ticker start before the unlock begins.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let before = ticks.load(Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: "correct-password".to_string(),
+            password_fifo_path: None,
+            use_keychain: false,
+        },
+    )
+    .await
+    .expect("the right password unlocks the vault");
+    let elapsed_ms = started.elapsed().as_millis() as usize;
+    ticker.abort();
+    let during = ticks.load(Ordering::SeqCst) - before;
+    assert!(
+        elapsed_ms >= 50,
+        "the KDF took {elapsed_ms} ms: too short for this test to tell where it ran"
+    );
+    assert!(
+        during >= 5,
+        "the ticker advanced {during} times while the unlock took {elapsed_ms} ms: the KDF ran on the async thread"
+    );
+}
+
+/// With one attempt left before a lockout, concurrent wrong passwords get
+/// that one attempt between them. Each of the others meets the lockout
+/// instead of deriving a key the limit no longer allows.
+#[tokio::test]
+async fn concurrent_wrong_unlocks_get_no_more_attempts_than_the_limit_allows() {
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-race-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+    server.vault_write().failed_attempts = (
+        crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS - 1,
+        None,
+    );
+
+    let mut attempts = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let server = server.clone();
+        attempts.spawn(async move {
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: "wrong-password".to_string(),
+                    password_fifo_path: None,
+                    use_keychain: false,
+                },
+            )
+            .await
+            .expect_err("a wrong password is refused")
+        });
+    }
+    let mut derived = 0;
+    let mut locked = 0;
+    while let Some(result) = attempts.join_next().await {
+        // The attempt whose failure reaches the limit is told about the lockout it caused.
+        match result.expect("attempt task") {
+            err if err.starts_with("Too many failed vault unlock attempts") => derived += 1,
+            err if err.starts_with("Vault unlock temporarily locked") => locked += 1,
+            err => panic!("unexpected unlock answer: {err}"),
+        }
+    }
+
+    assert_eq!(derived, 1, "more than one attempt derived a key");
+    assert_eq!(locked, 3);
+    assert_eq!(
+        server.vault_read().failed_attempts.0,
+        crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS,
+        "the recorded failures exceed the limit"
+    );
+}
+
+/// Once a lockout has ended the count starts over under the turn, once:
+/// the attempts that queued up behind the first one share the new budget
+/// instead of each starting a count of their own.
+#[tokio::test]
+async fn attempts_after_an_ended_lockout_share_one_new_budget() {
+    use crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS as LIMIT;
+
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-expiry-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+    server.vault_write().failed_attempts = (LIMIT, Some(Instant::now() - Duration::from_secs(1)));
+
+    let queued = LIMIT as usize + 3;
+    let mut attempts = tokio::task::JoinSet::new();
+    for _ in 0..queued {
+        let server = server.clone();
+        attempts.spawn(async move {
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: "wrong-password".to_string(),
+                    password_fifo_path: None,
+                    use_keychain: false,
+                },
+            )
+            .await
+            .expect_err("a wrong password is refused")
+        });
+    }
+    let mut missed = 0;
+    let mut locked_out = 0;
+    let mut refused = 0;
+    while let Some(result) = attempts.join_next().await {
+        match result.expect("attempt task") {
+            err if err.starts_with("Wrong password") => missed += 1,
+            // The attempt whose failure reaches the limit is told about the
+            // lockout it caused.
+            err if err.starts_with("Too many failed vault unlock attempts") => locked_out += 1,
+            err if err.starts_with("Vault unlock temporarily locked") => refused += 1,
+            err => panic!("unexpected unlock answer: {err}"),
+        }
+    }
+
+    assert_eq!(
+        (missed, locked_out, refused),
+        (LIMIT as usize - 1, 1, queued - LIMIT as usize),
+        "the new budget is spent once, not once per attempt"
+    );
+    assert_eq!(server.vault_read().failed_attempts.0, LIMIT);
+}
+
 #[tokio::test]
 async fn vault_unlock_rejects_password_and_fifo_path_together() {
     let db_path = crate::utils::test_fixture_path(format!(

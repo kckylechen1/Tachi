@@ -55,7 +55,9 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def run_install(self, content: str) -> subprocess.CompletedProcess[str]:
+    def run_install(
+        self, content: str, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ | {
             "HOME": str(self.home),
             # Pin the build output into the temp root: an inherited
@@ -66,6 +68,7 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
             "FAKE_CARGO_ARGS": str(self.root / "cargo-args"),
             "FAKE_BINARY_CONTENT": content,
         }
+        env |= extra_env or {}
         return subprocess.run(
             [str(SCRIPT)],
             cwd=ROOT,
@@ -107,6 +110,42 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
         backups = list(destination.parent.glob("tachi.backup.*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(encoding="utf-8"), "old binary")
+
+    def test_installed_path_stays_occupied_while_the_binary_is_replaced(self) -> None:
+        destination = self.home / "bin/tachi"
+        destination.parent.mkdir()
+        destination.write_text("old binary", encoding="utf-8")
+        observed = self.root / "mv-observations"
+        # Every mv the script runs reports, once it returns, whether the
+        # installed path is there. A daemon or a CLI call that starts in that
+        # moment must find a complete executable.
+        make_executable(
+            self.fake_bin / "mv",
+            """#!/bin/sh
+set -eu
+real_mv=
+for candidate in /bin/mv /usr/bin/mv; do
+  if [ -x "$candidate" ]; then real_mv="$candidate"; break; fi
+done
+"$real_mv" "$@"
+if [ -e "$OBSERVED_PATH" ] || [ -L "$OBSERVED_PATH" ]; then
+  printf 'present\n' >> "$OBSERVED_LOG"
+else
+  printf 'missing\n' >> "$OBSERVED_LOG"
+fi
+""",
+        )
+
+        result = self.run_install(
+            self.fake_binary(),
+            {"OBSERVED_PATH": str(destination), "OBSERVED_LOG": str(observed)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("dispatch_outcomes", destination.read_text(encoding="utf-8"))
+        observations = observed.read_text(encoding="utf-8").split()
+        self.assertTrue(observations, "the script did not move anything")
+        self.assertEqual(set(observations), {"present"}, observations)
 
     def test_replaces_a_symlink_but_preserves_it_as_the_backup(self) -> None:
         destination = self.home / "bin/tachi"
