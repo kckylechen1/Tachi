@@ -28,20 +28,25 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "COMSPEC",
     "NODE_OPTIONS",
     "NODE_PATH",
+    "NODE_REPL_EXTERNAL_MODULE",
     "NPM_CONFIG_SCRIPT_SHELL",
     "NPM_CONFIG_NODE_OPTIONS",
     "NPM_CONFIG_NODE_GYP",
     "NPM_CONFIG_USERCONFIG",
     "NPM_CONFIG_GLOBALCONFIG",
+    "NPM_CONFIG_GIT",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PYTHONHOME",
     "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
     "PERL5DB",
     "PERL5OPT",
     "PERL5LIB",
+    "PERLLIB",
     "RUBYOPT",
     "RUBYLIB",
+    "RUBYPATH",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
     "GIT_EXEC_PATH",
@@ -52,6 +57,9 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
     "RUSTC",
@@ -69,9 +77,13 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "CARGO_BUILD_RUSTC_WRAPPER",
     "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     "CARGO_HOME",
+    // Cargo runs the credential provider a registry names.
+    "CARGO_REGISTRY_CREDENTIAL_PROVIDER",
+    "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
     "MAVEN_OPTS",
     "GRADLE_OPTS",
 ];
@@ -155,15 +167,34 @@ mod tests {
             "NPM_CONFIG_NODE_GYP",
             "NPM_CONFIG_USERCONFIG",
             "NPM_CONFIG_GLOBALCONFIG",
+            // npm runs `git` through NPM_CONFIG_GIT; Python, Node, Ruby, Perl
+            // and the JVM load code from these; Git runs these as programs;
+            // Cargo runs the credential provider a registry names.
+            "NPM_CONFIG_GIT",
+            "PYTHONBREAKPOINT",
+            "NODE_REPL_EXTERNAL_MODULE",
+            "RUBYPATH",
+            "PERLLIB",
+            "CLASSPATH",
+            "GIT_EDITOR",
+            "GIT_SEQUENCE_EDITOR",
+            "GIT_PAGER",
+            "CARGO_REGISTRY_CREDENTIAL_PROVIDER",
+            "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS",
         ] {
             assert!(is_execution_environment_name(name), "{name}");
         }
+        // Ordinary settings. A download source and a JDK location do not
+        // choose a program for this invocation.
         for name in [
             "NPM_CONFIG_REGISTRY",
             "NPM_CONFIG_CACHE",
             "CARGO_TARGET_DIR",
             "CARGO_BUILD_JOBS",
+            "CARGO_REGISTRY_DEFAULT",
             "RUSTUP_IO_THREADS",
+            "RUSTUP_DIST_SERVER",
+            "JAVA_HOME",
         ] {
             assert!(!is_execution_environment_name(name), "{name}");
         }
