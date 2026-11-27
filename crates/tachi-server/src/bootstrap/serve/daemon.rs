@@ -340,6 +340,11 @@ pub(super) async fn serve_http_daemon(
                                 // fail-loud serve path, so a respawning daemon or CLI
                                 // client never forwards a write to this dead pid.
                                 let _ = tokio::fs::remove_file(&pid_path_watchdog).await;
+                                // A shutdown that arrived while the file was
+                                // being removed owns the exit from here.
+                                if ct_watchdog.is_cancelled() {
+                                    break;
+                                }
                                 std::process::exit(code);
                             }
                         }

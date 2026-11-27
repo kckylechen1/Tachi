@@ -293,6 +293,16 @@ impl Drop for BackgroundEarlyExitCleanup {
     }
 }
 
+/// What a background dispatch owns from the moment its resources are handed
+/// over, before its task runs. Fields drop in declaration order, so a task
+/// dropped before its first poll still releases the credentials and the
+/// dispatch slot before the authority that guards them goes away.
+struct BackgroundHandover {
+    early_exit_cleanup: BackgroundEarlyExitCleanup,
+    mcp_cleanup: McpCleanup,
+    managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
+}
+
 #[cfg(test)]
 static MANAGED_TIMEOUT_OVERRIDES: OnceLock<
     Mutex<std::collections::HashMap<(PathBuf, PathBuf), std::time::Duration>>,

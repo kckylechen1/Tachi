@@ -114,6 +114,45 @@ pub fn append_dispatch_adjudication_correction(
     append_event(conn, &correction, Some(prior_event_key))
 }
 
+/// The event already recorded under `new.event_key`, when `new` is an exact
+/// replay of it. `None` for anything else; the caller then takes the write
+/// lock and repeats every check there.
+fn committed_replay(
+    conn: &Connection,
+    new: &NewDispatchAdjudication,
+    prior_event_key: Option<&str>,
+) -> Result<Option<DispatchAdjudication>, MemoryError> {
+    let parent_exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM dispatch_outcomes WHERE outcome_id = ?1",
+            params![new.outcome_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if parent_exists.is_none() {
+        return Ok(None);
+    }
+    if let Some(prior_event_key) = prior_event_key {
+        match get_by_event_key(conn, prior_event_key)? {
+            Some(prior) if prior.outcome_id == new.outcome_id => {}
+            _ => return Ok(None),
+        }
+    }
+    let Some(existing) = get_by_event_key(conn, &new.event_key)? else {
+        return Ok(None);
+    };
+    if existing.outcome_id != new.outcome_id
+        || !replay_payload_matches(&existing, new)
+        || !receipt_replay_matches(
+            existing.adjudication_receipt.as_deref(),
+            new.adjudication_receipt.as_ref(),
+        )
+    {
+        return Ok(None);
+    }
+    Ok(Some(existing))
+}
+
 fn append_event(
     conn: &Connection,
     new: &NewDispatchAdjudication,
@@ -130,6 +169,19 @@ fn append_event(
     }
     if let Some(receipt) = new.adjudication_receipt.as_ref() {
         receipt.validate_for_write()?;
+    }
+
+    // An exact replay is a read. It answers from a read snapshot, so the
+    // replay of a committed event does not wait for a write transaction
+    // another connection holds. Anything else goes on to the write lock,
+    // where every check is repeated and each miss keeps its own error. The
+    // snapshot is closed before that: one connection carries one transaction.
+    let replay = {
+        let snapshot = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)?;
+        committed_replay(&snapshot, new, prior_event_key)?
+    };
+    if let Some(existing) = replay {
+        return Ok(existing);
     }
 
     // FIX-1 (#1035): the parent INSERT and every signature INSERT MUST be in
@@ -445,6 +497,30 @@ mod tests {
             signatures: Vec::new(),
             adjudication_receipt: None,
         }
+    }
+
+    /// An exact replay is a read. It answers from a read snapshot, so it does
+    /// not wait for a write transaction another connection holds.
+    #[test]
+    fn an_exact_replay_does_not_wait_for_another_connections_write_lock() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("adjudications.sqlite");
+        let conn = crate::test_fixtures::file_backed_connection(&path);
+        seed_outcome(&conn, "outcome-1");
+        append_dispatch_adjudication(&conn, &event("replay"))
+            .expect("the first append records the event");
+
+        let writer = Connection::open(&path).expect("second connection");
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the second connection holds the write lock");
+
+        let replay = append_dispatch_adjudication(&conn, &event("replay"));
+        writer
+            .execute_batch("ROLLBACK")
+            .expect("release the write lock");
+        let replay = replay.expect("an exact replay needs no write lock");
+        assert_eq!(replay.event_key, "replay");
     }
 
     // A writer that committed between this append's existence reads and its
