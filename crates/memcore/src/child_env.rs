@@ -29,6 +29,19 @@ const CREDENTIAL_SUFFIXES: &[&str] = &[
     "_CREDENTIALS",
 ];
 
+/// Credential variables whose names carry none of the suffixes above. Named
+/// exactly: a `_PWD` suffix would also take the working directory.
+const CREDENTIAL_NAMES: &[&str] = &[
+    "PGPASSWORD",
+    "MYSQL_PWD",
+    "PGPASSFILE",
+    "REDISCLI_AUTH",
+    "DOCKER_AUTH_CONFIG",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "KRB5CCNAME",
+];
+
 /// Toolchain configuration is the build tool's own setting: a private registry
 /// token under `CARGO_` stays, because withholding it breaks the build.
 const TOOLCHAIN_PREFIXES: &[&str] = &["CARGO_", "RUSTUP_"];
@@ -38,9 +51,10 @@ pub fn is_credential_env_name(name: &str) -> bool {
     !TOOLCHAIN_PREFIXES
         .iter()
         .any(|prefix| name.starts_with(prefix))
-        && CREDENTIAL_SUFFIXES
-            .iter()
-            .any(|suffix| name.ends_with(suffix) || name == suffix.trim_start_matches('_'))
+        && (CREDENTIAL_NAMES.contains(&name.as_str())
+            || CREDENTIAL_SUFFIXES
+                .iter()
+                .any(|suffix| name.ends_with(suffix) || name == suffix.trim_start_matches('_')))
 }
 
 /// A child that inherits this process's environment still never inherits the
@@ -128,6 +142,45 @@ mod tests {
                 &mut command
             ),
             vec!["TACHI_DAEMON".to_string()]
+        );
+    }
+
+    // A credential whose name carries none of the suffixes.
+    #[test]
+    fn builds_do_not_inherit_credentials_named_without_a_suffix() {
+        let mut command = Command::new("cargo");
+        let mut expected: Vec<String> = [
+            "PGPASSWORD",
+            "MYSQL_PWD",
+            "PGPASSFILE",
+            "REDISCLI_AUTH",
+            "DOCKER_AUTH_CONFIG",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "KRB5CCNAME",
+            "TACHI_DAEMON",
+        ]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+        expected.sort();
+        assert_eq!(
+            withheld(
+                &[
+                    "PGPASSWORD",
+                    "MYSQL_PWD",
+                    "PGPASSFILE",
+                    "REDISCLI_AUTH",
+                    "DOCKER_AUTH_CONFIG",
+                    "AWS_SHARED_CREDENTIALS_FILE",
+                    "AWS_WEB_IDENTITY_TOKEN_FILE",
+                    "KRB5CCNAME",
+                    // The working directory is not a credential.
+                    "PWD",
+                ],
+                &mut command
+            ),
+            expected
         );
     }
 

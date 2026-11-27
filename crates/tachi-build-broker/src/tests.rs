@@ -1079,6 +1079,47 @@ fn a_new_receipt_carries_a_ninety_day_hard_state_ttl() {
     assert_eq!(stored.expires_at, receipt.expires_at);
 }
 
+/// A failure report reads a ticket's status before it writes the new one. A
+/// cancel that committed in between was overwritten back to `Queued`, so a
+/// ticket its owner had cancelled was built anyway.
+#[test]
+fn a_cancel_cannot_land_between_a_failure_reports_read_and_its_write() {
+    let tmp = crate::test_support::non_skipped_fixture_tempdir("build-broker-cancel-race-");
+    let db = tmp.path().join("global").join("memory.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let db_str = db.to_str().unwrap().to_string();
+    let setup = MemoryStore::open(&db_str).expect("open store");
+    submit_ticket(&setup, &ticket("t-cancel-race", MAIN_SHA)).expect("submit");
+    drop(setup);
+
+    let mut store = MemoryStore::open(&db_str).expect("open store");
+    // Opened ahead of time: opening a store takes the write lock itself.
+    let mut other = MemoryStore::open(&db_str).expect("second store");
+    let cancel_answer = Arc::new(Mutex::new(None));
+    let answer_in_hook = Arc::clone(&cancel_answer);
+    super::ticket::set_after_failed_attempt_read(Box::new(move || {
+        *answer_in_hook.lock().unwrap() = Some(
+            cancel_queued_ticket(&mut other, "t-cancel-race", "owner cancelled")
+                .map(|outcome| format!("{outcome:?}")),
+        );
+    }));
+
+    let recorded = super::ticket::record_failed_attempt(&mut store, "t-cancel-race", "boom")
+        .expect("the failure is recorded");
+
+    let answer = cancel_answer.lock().unwrap().take();
+    assert!(
+        matches!(answer, Some(Err(_))),
+        "a cancel must not commit while the failure is being recorded, got {answer:?}"
+    );
+    assert!(matches!(recorded.state, TicketState::Queued));
+    assert_eq!(
+        cancel_queued_ticket(&mut store, "t-cancel-race", "owner cancelled").unwrap(),
+        CancelOutcome::Cancelled,
+        "the cancel lands once the report has committed"
+    );
+}
+
 /// #1342 follow-up: a submitted ticket (write-once) and every ticket-status
 /// write (failed attempt, cancel) must carry a 90-day `hard_state` TTL.
 #[test]
@@ -1093,7 +1134,7 @@ fn ticket_and_status_writes_carry_a_ninety_day_hard_state_ttl() {
     assert_ninety_day_ttl(&loaded.expires_at);
 
     let failed_status =
-        super::ticket::record_failed_attempt(&store, "t-ttl-ticket", "boom").unwrap();
+        super::ticket::record_failed_attempt(&mut store, "t-ttl-ticket", "boom").unwrap();
     assert_ninety_day_ttl(&failed_status.expires_at);
 
     let to_cancel = ticket("t-ttl-cancel", MAIN_SHA);

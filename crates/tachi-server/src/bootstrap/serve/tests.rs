@@ -1398,6 +1398,50 @@ impl Drop for HostProfileEnvFixture {
     }
 }
 
+/// Restores one process variable when it goes out of scope.
+struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        match self.1.as_ref() {
+            Some(value) => std::env::set_var(self.0, value),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// A project-local file may set ordinary Tachi settings. It does not speak
+/// for the operator's Vault: `TACHI_VAULT_CHILD_ENV=all` from a checkout
+/// would hand every dispatch the project's undeclared secrets.
+#[test]
+fn project_local_env_does_not_set_vault_authority() {
+    let fixture = HostProfileEnvFixture::new();
+    let _restore_mode = RestoreEnv(
+        "TACHI_VAULT_CHILD_ENV",
+        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
+    );
+    let _restore_probe = RestoreEnv(
+        "TACHI_VAULT_PROBE_FIXTURE",
+        std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
+    );
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=repo\n",
+    );
+
+    fixture.load();
+
+    assert!(
+        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
+        "a project-local file must not choose what the Vault exports to dispatches"
+    );
+    // Only the export mode is refused. Other settings still load.
+    assert_eq!(
+        std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
+        Ok("repo")
+    );
+}
+
 #[test]
 fn app_home_is_only_host_profile_authority() {
     let fixture = HostProfileEnvFixture::new();

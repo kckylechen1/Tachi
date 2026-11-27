@@ -118,6 +118,14 @@ fn load_project_env_file(path: &Path, override_existing: bool) {
             );
             continue;
         }
+        // A checkout does not choose what the Vault hands to a dispatch.
+        if key.eq_ignore_ascii_case("TACHI_VAULT_CHILD_ENV") {
+            tracing::warn!(
+                "[startup] ignored Vault export-mode variable '{key}' from {}",
+                path.display()
+            );
+            continue;
+        }
         if override_existing || std::env::var_os(&key).is_none() {
             std::env::set_var(&key, &value);
         }

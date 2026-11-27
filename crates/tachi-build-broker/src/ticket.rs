@@ -373,11 +373,10 @@ pub(crate) fn ticket_state(
         .unwrap_or(TicketState::Queued))
 }
 
-fn write_status(store: &MemoryStore, status: &TicketStatus) -> Result<(), String> {
+fn write_status(tx: &StateTransaction<'_>, status: &TicketStatus) -> Result<(), String> {
     let value =
         serde_json::to_string(status).map_err(|e| format!("serialize ticket status: {e}"))?;
-    store
-        .set_state(STATUS_NS, &status.ticket_id, &value)
+    tx.set_state(STATUS_NS, &status.ticket_id, &value)
         .map_err(|e| format!("write ticket status {}: {e}", status.ticket_id))?;
     Ok(())
 }
@@ -395,11 +394,18 @@ fn write_status(store: &MemoryStore, status: &TicketStatus) -> Result<(), String
 /// Returns the status row as it now stands (so the caller can log/report the
 /// dead letter).
 pub(crate) fn record_failed_attempt(
-    store: &MemoryStore,
+    store: &mut MemoryStore,
     ticket_id: &str,
     error: &str,
 ) -> Result<TicketStatus, String> {
-    let previous = load_status(store, ticket_id)?;
+    // Read, decide and write under one write lock. A cancel that committed
+    // between a separate read and write was overwritten back to `Queued`.
+    let tx = store
+        .begin_state_transaction(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let previous = load_status(&tx, ticket_id)?;
+    #[cfg(test)]
+    run_after_failed_attempt_read();
     // A terminal ticket is not re-opened by a late failure report.
     if let Some(status) = previous.as_ref() {
         if status.state.is_terminal() {
@@ -421,8 +427,32 @@ pub(crate) fn record_failed_attempt(
         expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
             .to_string(),
     };
-    write_status(store, &status)?;
+    write_status(&tx, &status)?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(status)
+}
+
+/// Test seam: what to run once a failure report has read the ticket's status
+/// and before it writes the new one.
+#[cfg(test)]
+static AFTER_FAILED_ATTEMPT_READ: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_after_failed_attempt_read(hook: Box<dyn FnMut() + Send>) {
+    *AFTER_FAILED_ATTEMPT_READ
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+}
+
+#[cfg(test)]
+fn run_after_failed_attempt_read() {
+    let mut hook = AFTER_FAILED_ATTEMPT_READ
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hook) = hook.as_mut() {
+        hook();
+    }
 }
 
 /// Outcome of [`cancel_ticket`].
