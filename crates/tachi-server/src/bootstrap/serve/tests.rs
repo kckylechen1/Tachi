@@ -1384,9 +1384,14 @@ impl HostProfileEnvFixture {
         );
     }
 
-    /// The app home as startup resolves it, flagged the way startup flags it.
-    fn load_with_resolved_app_home(&self) -> crate::path_utils::TachiHomeSource {
+    /// Resolves the app home the way startup does, lets the caller check it,
+    /// and only then loads with it, flagged the way startup flags it.
+    fn load_with_resolved_app_home(
+        &self,
+        check: impl FnOnce(&std::path::Path, crate::path_utils::TachiHomeSource),
+    ) {
         let resolution = crate::path_utils::resolve_tachi_home();
+        check(&resolution.path, resolution.source);
         load_env_files(
             self.home.path(),
             &resolution.path,
@@ -1394,7 +1399,6 @@ impl HostProfileEnvFixture {
             true,
             Some(self.repo.path()),
         );
-        resolution.source
     }
 }
 
@@ -1466,8 +1470,14 @@ fn project_local_env_does_not_set_vault_authority() {
 #[test]
 fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
     let fixture = HostProfileEnvFixture::new();
-    let _restore_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
-    std::env::remove_var("TACHI_HOME");
+    // Every name the resolver honors. With one of them left set, the test
+    // would load the operator's real app home before it failed.
+    let _restore_tachi_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
+    let _restore_sigil_home = RestoreEnv("SIGIL_HOME", std::env::var_os("SIGIL_HOME"));
+    let _restore_app_home = RestoreEnv("TACHI_APP_HOME", std::env::var_os("TACHI_APP_HOME"));
+    for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
+        std::env::remove_var(key);
+    }
     let _restore_mode = RestoreEnv(
         "TACHI_VAULT_CHILD_ENV",
         std::env::var_os("TACHI_VAULT_CHILD_ENV"),
@@ -1495,13 +1505,22 @@ fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
          TACHI_VAULT_PROBE_FIXTURE=app_home\n",
     );
 
-    let source = fixture.load_with_resolved_app_home();
+    // Checked before anything is loaded: a resolution that is not the
+    // fixture's must not get as far as loading its files. The resolver works
+    // from the canonical cwd, so the expected path is canonicalized too.
+    let canonical_app_home = std::fs::canonicalize(&app_home).expect("the fixture's app home");
+    fixture.load_with_resolved_app_home(|resolved, source| {
+        assert_eq!(
+            source,
+            crate::path_utils::TachiHomeSource::WorkspaceData,
+            "the fixture must be resolved the way a checkout-found app home is"
+        );
+        assert_eq!(
+            resolved, canonical_app_home,
+            "the resolved app home must be the fixture's"
+        );
+    });
 
-    assert_eq!(
-        source,
-        crate::path_utils::TachiHomeSource::WorkspaceData,
-        "the fixture must be resolved the way a checkout-found app home is"
-    );
     assert!(
         std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
         "an app home found in a checkout must not choose what the Vault exports"
