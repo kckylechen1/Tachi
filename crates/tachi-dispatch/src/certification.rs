@@ -254,7 +254,7 @@ fn probe_codex_program_with_timeout(
     let mut command = std::process::Command::new(program);
     command.args(["exec", "--help"]);
     let Ok(output) = run_bounded_probe(
-        &mut command,
+        command,
         &ProbeLimits {
             timeout,
             stdout_bytes: MAX_HELP_BYTES,
@@ -323,7 +323,7 @@ fn run_version_probe(program: &std::path::Path) -> Option<String> {
 fn probe_version_within(program: &std::path::Path, timeout: std::time::Duration) -> Option<String> {
     let mut command = std::process::Command::new(program);
     command.arg("--version");
-    let output = probe_version_output(&mut command, timeout)?;
+    let output = probe_version_output(command, timeout)?;
     if !output.status.success() {
         return None;
     }
@@ -333,7 +333,7 @@ fn probe_version_within(program: &std::path::Path, timeout: std::time::Duration)
 
 #[cfg(unix)]
 fn probe_version_output(
-    command: &mut std::process::Command,
+    command: std::process::Command,
     timeout: std::time::Duration,
 ) -> Option<crate::bounded_probe::ProbeOutput> {
     crate::bounded_probe::run_bounded_probe(
@@ -351,7 +351,7 @@ fn probe_version_output(
 /// a worker thread, and only its answer is bounded.
 #[cfg(not(unix))]
 fn probe_version_output(
-    command: &mut std::process::Command,
+    command: std::process::Command,
     timeout: std::time::Duration,
 ) -> Option<std::process::Output> {
     let (tx, rx) = std::sync::mpsc::channel();
