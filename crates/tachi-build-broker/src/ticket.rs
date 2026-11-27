@@ -405,7 +405,7 @@ pub(crate) fn record_failed_attempt(
         .map_err(|e| e.to_string())?;
     let previous = load_status(&tx, ticket_id)?;
     #[cfg(test)]
-    run_after_failed_attempt_read();
+    run_after_failed_attempt_read(ticket_id);
     // A terminal ticket is not re-opened by a late failure report.
     if let Some(status) = previous.as_ref() {
         if status.state.is_terminal() {
@@ -432,25 +432,30 @@ pub(crate) fn record_failed_attempt(
     Ok(status)
 }
 
-/// Test seam: what to run once a failure report has read the ticket's status
-/// and before it writes the new one.
+/// Test seam: what to run once a failure report has read the given ticket's
+/// status and before it writes the new one. It runs for that ticket only and
+/// once, so another test's report in the same process cannot set it off.
 #[cfg(test)]
-static AFTER_FAILED_ATTEMPT_READ: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
+type AfterFailedAttemptRead = Option<(String, Box<dyn FnMut() + Send>)>;
+
+#[cfg(test)]
+static AFTER_FAILED_ATTEMPT_READ: std::sync::Mutex<AfterFailedAttemptRead> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
-pub(crate) fn set_after_failed_attempt_read(hook: Box<dyn FnMut() + Send>) {
+pub(crate) fn set_after_failed_attempt_read(ticket_id: &str, hook: Box<dyn FnMut() + Send>) {
     *AFTER_FAILED_ATTEMPT_READ
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((ticket_id.to_string(), hook));
 }
 
 #[cfg(test)]
-fn run_after_failed_attempt_read() {
-    let mut hook = AFTER_FAILED_ATTEMPT_READ
+fn run_after_failed_attempt_read(ticket_id: &str) {
+    let mut seam = AFTER_FAILED_ATTEMPT_READ
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(hook) = hook.as_mut() {
+    if seam.as_ref().is_some_and(|(id, _)| id == ticket_id) {
+        let (_, mut hook) = seam.take().expect("checked just above");
         hook();
     }
 }

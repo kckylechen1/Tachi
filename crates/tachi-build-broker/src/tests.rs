@@ -1097,21 +1097,29 @@ fn a_cancel_cannot_land_between_a_failure_reports_read_and_its_write() {
     let mut other = MemoryStore::open(&db_str).expect("second store");
     let cancel_answer = Arc::new(Mutex::new(None));
     let answer_in_hook = Arc::clone(&cancel_answer);
-    super::ticket::set_after_failed_attempt_read(Box::new(move || {
-        *answer_in_hook.lock().unwrap() = Some(
-            cancel_queued_ticket(&mut other, "t-cancel-race", "owner cancelled")
-                .map(|outcome| format!("{outcome:?}")),
-        );
-    }));
+    super::ticket::set_after_failed_attempt_read(
+        "t-cancel-race",
+        Box::new(move || {
+            *answer_in_hook.lock().unwrap() = Some(
+                cancel_queued_ticket(&mut other, "t-cancel-race", "owner cancelled")
+                    .map(|outcome| format!("{outcome:?}")),
+            );
+        }),
+    );
 
     let recorded = super::ticket::record_failed_attempt(&mut store, "t-cancel-race", "boom")
         .expect("the failure is recorded");
 
     let answer = cancel_answer.lock().unwrap().take();
-    assert!(
-        matches!(answer, Some(Err(_))),
-        "a cancel must not commit while the failure is being recorded, got {answer:?}"
-    );
+    match answer {
+        Some(Err(error)) => assert!(
+            error.contains("locked"),
+            "the cancel must fail on the write lock the report holds, got: {error}"
+        ),
+        other => {
+            panic!("a cancel must not commit while the failure is being recorded, got {other:?}")
+        }
+    }
     assert!(matches!(recorded.state, TicketState::Queued));
     assert_eq!(
         cancel_queued_ticket(&mut store, "t-cancel-race", "owner cancelled").unwrap(),

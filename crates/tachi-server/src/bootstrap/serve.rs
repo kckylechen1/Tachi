@@ -135,6 +135,7 @@ fn load_project_env_file(path: &Path, override_existing: bool) {
 fn load_env_files(
     home: &Path,
     app_home: &Path,
+    app_home_in_checkout: bool,
     load_project_local_env: bool,
     git_root: Option<&Path>,
 ) {
@@ -142,9 +143,20 @@ fn load_env_files(
     // Load provider configuration for explicit daemon and CLI startup.
     // `from_path` (not override): already-set process env — Cursor inject,
     // shell export, prior dotenv — wins over the file.
-    let _ = dotenvy::from_path(app_home.join("secrets.env"));
+    //
+    // An app home found inside a checkout is content a repository can hold.
+    // Its files get the same refusals as the project-local ones below.
+    if app_home_in_checkout {
+        load_project_env_file(&app_home.join("secrets.env"), false);
+    } else {
+        let _ = dotenvy::from_path(app_home.join("secrets.env"));
+    }
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
-    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    if app_home_in_checkout {
+        load_project_env_file(&app_home.join("config.env"), true);
+    } else {
+        let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    }
     let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
 
@@ -601,6 +613,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     load_env_files(
         &home,
         &app_home,
+        app_home_resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
         load_project_local_env,
         git_root.as_deref(),
     );
