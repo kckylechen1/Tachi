@@ -98,36 +98,44 @@ fn same_process_record(
     if matches!(scoped, DaemonStatus::Running { .. }) {
         return Some(scoped.clone());
     }
-    if let (
-        DaemonStatus::Foreign {
-            global_db: Some(scoped_db),
-            reason: scoped_reason,
-            ..
+    let conflict = match (scoped, legacy) {
+        (
+            DaemonStatus::Foreign {
+                global_db: scoped_db,
+                reason: scoped_reason,
+                ..
+            },
+            DaemonStatus::Foreign {
+                lock_path,
+                reason: legacy_reason,
+                version,
+                port,
+                global_db: legacy_db,
+                ..
+            },
+        ) => match (
+            recorded_database(scoped_db.as_deref()),
+            recorded_database(legacy_db.as_deref()),
+        ) {
+            (Some(scoped_db), Some(legacy_db))
+                if !path_matches_string(Path::new(scoped_db), legacy_db) =>
+            {
+                Some(DaemonStatus::Foreign {
+                    pid,
+                    lock_path: lock_path.clone(),
+                    reason: format!(
+                        "conflicting daemon records for pid {pid}: the scoped record says '{scoped_reason}', the legacy record says '{legacy_reason}'; resolve manually"
+                    ),
+                    version: version.clone(),
+                    port: *port,
+                    global_db: Some(legacy_db.to_string()),
+                })
+            }
+            _ => None,
         },
-        DaemonStatus::Foreign {
-            lock_path,
-            reason: legacy_reason,
-            version,
-            port,
-            global_db: Some(legacy_db),
-            ..
-        },
-    ) = (scoped, legacy)
-    {
-        if !path_matches_string(Path::new(scoped_db), legacy_db) {
-            return Some(DaemonStatus::Foreign {
-                pid,
-                lock_path: lock_path.clone(),
-                reason: format!(
-                    "conflicting daemon records for pid {pid}: the scoped record says '{scoped_reason}', the legacy record says '{legacy_reason}'; resolve manually"
-                ),
-                version: version.clone(),
-                port: *port,
-                global_db: Some(legacy_db.clone()),
-            });
-        }
-    }
-    Some(legacy.clone())
+        _ => None,
+    };
+    conflict.or_else(|| Some(legacy.clone()))
 }
 
 pub(crate) fn collect_daemon_inventory(
@@ -405,6 +413,12 @@ fn daemon_inventory_entry(
     }
 }
 
+/// The database a receipt names, if it names one. An empty string is no more a
+/// database than a missing field.
+fn recorded_database(db: Option<&str>) -> Option<&str> {
+    db.filter(|db| !db.is_empty())
+}
+
 pub(crate) fn daemon_mismatch_reason(
     lock_pid: i32,
     pid_info: Option<&DaemonPidInfo>,
@@ -428,7 +442,7 @@ pub(crate) fn daemon_mismatch_reason(
     // mismatch, which is the upgrade path for this scope's own daemon. One
     // that belongs to another database scope must be named by that, whatever
     // version it runs, or the installer would stop it.
-    let Some(daemon_global) = info.global_db.as_deref().filter(|db| !db.is_empty()) else {
+    let Some(daemon_global) = recorded_database(info.global_db.as_deref()) else {
         return Some("daemon scope unknown: daemon.pid records no global_db".to_string());
     };
     if !path_matches_string(global_db_path, daemon_global) {

@@ -144,73 +144,143 @@ launchctl_bootstrap_plist() {
   fi
 }
 
-# The status of whatever holds this DB scope, or nothing. Nothing means the
-# binary did not answer: it failed, or its answer was cut short.
+# The top-level fields of the status of whatever holds this DB scope, one
+# `name<TAB>type<TAB>value` line each, or nothing. Nothing means the binary
+# did not answer: it failed, or what it printed is not one JSON object.
 daemon_status_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
   local status
 
   status=$(TACHI_DISABLE_AUTO_DAEMON=1 \
-    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null) || status=""
-  printf '%s\n' "$status" | json_complete_object
+    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null) || return 0
+  printf '%s\n' "$status" | json_object_fields
 }
 
-# Print the first JSON object of the input, only when it is complete: every
-# brace and bracket closed, no string left open, nothing after it. A missing
-# closing brace is all that tells a cut-short `{"state": "none"` from a real
-# one, and the first says nothing about the scope.
-json_complete_object() {
+# One `name<TAB>type<TAB>value` line for each top-level field of the input,
+# and nothing else unless the whole input is exactly one JSON object. Nothing
+# else may read the status: matched as text, a nested field passes for the
+# top-level one and a value of the wrong type for the right one. A string is
+# printed as it stands between its quotes, and a control character cannot
+# occur there, so a line holds one field.
+json_object_fields() {
   awk '
-    {
-      if (failed) next
-      line = $0
-      n = length(line)
-      for (i = 1; i <= n; i++) {
-        c = substr(line, i, 1)
-        if (!started) {
-          if (c == "{") { started = 1; depth = 1; text = "{" }
-          continue
-        }
-        if (done) {
-          if (index(" \t\r", c) == 0) failed = 1
-          continue
-        }
-        text = text c
-        if (in_string) {
-          if (escaped) { escaped = 0; continue }
-          if (c == "\\") { escaped = 1; continue }
-          if (c == "\"") in_string = 0
-          continue
-        }
-        if (c == "\"") in_string = 1
-        else if (c == "{" || c == "[") depth++
-        else if (c == "}" || c == "]") {
-          depth--
-          if (depth < 0) failed = 1
-          else if (depth == 0) done = 1
-        }
+    function ws(c) {
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") i++
+        else break
       }
-      if (started && !done) text = text "\n"
+    }
+    # A string opens at i. Leaves i just after its closing quote.
+    function string(c, e) {
+      i++
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\"") { i++; return }
+        if (c == "\\") {
+          e = substr(s, i + 1, 1)
+          if (index("\"\\/bfnrt", e) > 0) { i += 2; continue }
+          if (e == "u" && substr(s, i + 2, 4) ~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/) { i += 6; continue }
+          bad = 1
+          return
+        }
+        if (c < " ") { bad = 1; return }
+        i++
+      }
+      bad = 1
+    }
+    # A value opens at i, whitespace already skipped. Returns its type, or
+    # sets bad.
+    function value(depth, c) {
+      if (bad || depth > 32) { bad = 1; return "" }
+      c = substr(s, i, 1)
+      if (c == "{") return object(depth + 1, 0)
+      if (c == "[") return array(depth + 1)
+      if (c == "\"") { string(); return bad ? "" : "string" }
+      if (substr(s, i, 4) == "true") { i += 4; return "true" }
+      if (substr(s, i, 5) == "false") { i += 5; return "false" }
+      if (substr(s, i, 4) == "null") { i += 4; return "null" }
+      if (match(substr(s, i), /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+        i += RLENGTH
+        return "number"
+      }
+      bad = 1
+      return ""
+    }
+    function object(depth, top,   key, f, t, c) {
+      i++
+      ws()
+      if (substr(s, i, 1) == "}") { i++; return "object" }
+      for (;;) {
+        ws()
+        if (substr(s, i, 1) != "\"") { bad = 1; return "" }
+        f = i
+        string()
+        if (bad) return ""
+        key = substr(s, f + 1, i - f - 2)
+        ws()
+        if (substr(s, i, 1) != ":") { bad = 1; return "" }
+        i++
+        ws()
+        f = i
+        t = value(depth)
+        if (bad) return ""
+        if (top) {
+          if (key in seen) { bad = 1; return "" }
+          seen[key] = 1
+          out = out key "\t" t "\t" shown(f, t) "\n"
+        }
+        ws()
+        c = substr(s, i, 1)
+        if (c == ",") { i++; continue }
+        if (c == "}") { i++; return "object" }
+        bad = 1
+        return ""
+      }
+    }
+    function array(depth, c) {
+      i++
+      ws()
+      if (substr(s, i, 1) == "]") { i++; return "array" }
+      for (;;) {
+        ws()
+        value(depth)
+        if (bad) return ""
+        ws()
+        c = substr(s, i, 1)
+        if (c == ",") { i++; continue }
+        if (c == "]") { i++; return "array" }
+        bad = 1
+        return ""
+      }
+    }
+    # What to print for a value that ran from f up to i.
+    function shown(f, t) {
+      if (t == "string") return substr(s, f + 1, i - f - 2)
+      if (t == "number") return substr(s, f, i - f)
+      return ""
+    }
+    {
+      s = s (NR > 1 ? "\n" : "") $0
     }
     END {
-      if (started && done && !failed) print text
+      n = length(s)
+      i = 1
+      ws()
+      if (substr(s, i, 1) != "{") exit 1
+      object(1, 1)
+      ws()
+      if (bad || i <= n) exit 1
+      printf "%s", out
     }
   '
 }
 
-daemon_status_is_running() {
-  grep -q '"state": "running"'
-}
-
-# The value of a quoted field of the status JSON, or nothing.
-daemon_status_text() {
-  sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -n 1
-}
-
-# The value of a numeric field of the status JSON, or nothing.
-daemon_status_number() {
-  sed -n "s/.*\"$1\": \([0-9][0-9]*\).*/\1/p" | head -n 1
+# The value of a top-level field of decoded status fields, when that field is
+# of the given type.
+daemon_status_field() {
+  awk -F '\t' -v name="$2" -v type="$3" '$1 == name && $2 == type { print $3; exit }' <<<"$1"
 }
 
 # What may be done about whatever holds this DB scope, from one read-only
@@ -220,10 +290,10 @@ daemon_status_number() {
 daemon_scope_verdict() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status state reason pid
+  local fields state reason pid
 
-  status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-  state=$(printf '%s\n' "$status" | daemon_status_text state)
+  fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+  state=$(daemon_status_field "$fields" state string)
   case "$state" in
     none|stale_pid) echo free ;;
     running) echo stop ;;
@@ -232,13 +302,13 @@ daemon_scope_verdict() {
       # foreign, and `daemon kill` refuses it. It holds the lock and the port
       # of this scope until it exits, so the upgrade has to stop it the way
       # launchd does. Any other foreign daemon is left alone and reported.
-      reason=$(printf '%s\n' "$status" | daemon_status_text reason)
-      pid=$(printf '%s\n' "$status" | daemon_status_number pid)
+      reason=$(daemon_status_field "$fields" reason string)
+      pid=$(daemon_status_field "$fields" pid number)
       if [[ "$reason" == "daemon version "* && "$pid" =~ ^[0-9]+$ ]]; then
         echo "stop-previous $pid"
       else
         echo "❌ a foreign Tachi daemon holds this DB scope and was not stopped"
-        printf '%s\n' "$status"
+        printf '%s\n' "$fields"
         return 1
       fi
       ;;
@@ -246,7 +316,7 @@ daemon_scope_verdict() {
       # `unavailable` is a live pid whose state could not be read; an empty
       # state means the binary did not answer. Neither says the scope is free.
       echo "❌ cannot tell what holds this DB scope (daemon status: ${state:-unreadable}); not installing over it"
-      printf '%s\n' "$status"
+      printf '%s\n' "$fields"
       return 1
       ;;
   esac
@@ -255,7 +325,7 @@ daemon_scope_verdict() {
 stop_existing_daemon_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
-  local verdict status state pid
+  local verdict fields state pid
 
   verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
     printf '%s\n' "$verdict"
@@ -276,32 +346,32 @@ stop_existing_daemon_for_scope() {
   esac
 
   for _ in $(seq 1 50); do
-    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    state=$(printf '%s\n' "$status" | daemon_status_text state)
+    fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+    state=$(daemon_status_field "$fields" state string)
     case "$state" in
       running|foreign) sleep 0.2 ;;
       none|stale_pid) return 0 ;;
       *)
         echo "❌ daemon status became unreadable while waiting for the previous daemon to stop"
-        printf '%s\n' "$status"
+        printf '%s\n' "$fields"
         return 1
         ;;
     esac
   done
 
   echo "❌ previous daemon for this DB scope did not stop"
-  printf '%s\n' "$status"
+  printf '%s\n' "$fields"
   return 1
 }
 
 wait_for_daemon_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status
+  local fields
 
   for _ in $(seq 1 50); do
-    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    if printf '%s\n' "$status" | daemon_status_is_running; then
+    fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+    if [[ "$(daemon_status_field "$fields" state string)" == running ]]; then
       TACHI_DISABLE_AUTO_DAEMON=1 \
         "$tachi_bin" --global-db "$global_db" --no-project-db daemon status || true
       return 0
@@ -310,7 +380,7 @@ wait_for_daemon_for_scope() {
   done
 
   echo "❌ daemon service did not report state=running"
-  printf '%s\n' "$status"
+  printf '%s\n' "$fields"
   return 1
 }
 

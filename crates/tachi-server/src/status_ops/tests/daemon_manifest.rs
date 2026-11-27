@@ -321,6 +321,36 @@ fn the_same_process_claimed_for_two_databases_is_a_conflict() {
             ..
         }) if *lock_path == legacy_lock
     ));
+    // An empty database is no more a claim than a missing one: the legacy
+    // record still answers, whichever side the empty one is on.
+    let empty = |lock: &str| DaemonStatus::Foreign {
+        pid: 7,
+        lock_path: PathBuf::from(lock),
+        reason: "daemon scope unknown: daemon.pid records no global_db".to_string(),
+        version: None,
+        port: None,
+        global_db: Some(String::new()),
+    };
+    for (scoped, legacy, expected) in [
+        (
+            empty("/scoped.lock"),
+            claimed("/legacy.lock", old_version, ours),
+            old_version,
+        ),
+        (
+            claimed("/scoped.lock", old_version, ours),
+            empty("/legacy.lock"),
+            "daemon scope unknown: daemon.pid records no global_db",
+        ),
+    ] {
+        match prefer_live_record(Some(scoped), Some(legacy)) {
+            Some(DaemonStatus::Foreign { reason, .. }) => assert_eq!(
+                reason, expected,
+                "an empty database contradicts nothing, so this is no conflict"
+            ),
+            other => panic!("expected the legacy record to answer, got {other:?}"),
+        }
+    }
     // A running legacy record says the process is this scope's daemon: the
     // installer stops it through the CLI, it does not signal the pid.
     let running = prefer_live_record(

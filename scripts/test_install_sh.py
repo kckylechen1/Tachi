@@ -18,13 +18,11 @@ SCRIPT = ROOT / "scripts/install.sh"
 LABEL = "com.kckylechen.tachi.daemon"
 
 STATUS_FUNCTIONS = [
-    "json_complete_object",
+    "json_object_fields",
     "daemon_status_for_scope",
-    "daemon_status_text",
-    "daemon_status_number",
+    "daemon_status_field",
 ]
 STOP_FUNCTIONS = STATUS_FUNCTIONS + [
-    "daemon_status_is_running",
     "daemon_scope_verdict",
     "stop_existing_daemon_for_scope",
 ]
@@ -39,12 +37,16 @@ SERVICE_FUNCTIONS = STOP_FUNCTIONS + [
 
 # Answers `daemon status` from a file and then exits with STATUS_EXIT. After a
 # kill it answers STATUS_AFTER_KILL if that is set, else `none`. After a
-# bootstrap it answers `running`.
+# bootstrap it answers STATUS_AFTER_BOOTSTRAP if that is set, else `running`.
 FAKE_TACHI = """#!/bin/sh
 case "$*" in
   *"daemon status"*)
     if [ -f "$BOOTSTRAP_MARKER" ]; then
-      printf '{\\n  "state": "running",\\n  "pid": 5,\\n  "lock_path": "/tmp/lock"\\n}\\n'
+      if [ -n "${STATUS_AFTER_BOOTSTRAP+set}" ]; then
+        printf '%b\\n' "$STATUS_AFTER_BOOTSTRAP"
+      else
+        printf '{\\n  "state": "running",\\n  "pid": 5,\\n  "lock_path": "/tmp/lock"\\n}\\n'
+      fi
     else
       cat "$STATUS_FILE"
     fi
@@ -246,21 +248,29 @@ sleep() { :; }
     def test_a_refused_scope_is_refused_before_anything_is_replaced(self) -> None:
         directory = self.launch_agents()
         plist = directory / f"{LABEL}.plist"
-        for previous in ("previous plist\n", None):
-            with self.subTest(previous=previous):
+        held = (
+            foreign(
+                "daemon global_db /elsewhere/tachi-memory.db does not match /tmp/tachi-memory.db"
+            ),
+            "foreign Tachi daemon holds this DB scope",
+        )
+        unreadable = ('{"state": "none"]', "cannot tell what holds this DB scope")
+        for previous, (status, complaint) in (
+            ("previous plist\n", held),
+            (None, held),
+            ("previous plist\n", unreadable),
+            (None, unreadable),
+        ):
+            with self.subTest(previous=previous, status=status):
+                self.calls.unlink(missing_ok=True)
                 for entry in directory.iterdir():
                     entry.unlink()
                 if previous is not None:
                     plist.write_text(previous, encoding="utf-8")
-                self.status.write_text(
-                    foreign(
-                        "daemon global_db /elsewhere/tachi-memory.db does not match /tmp/tachi-memory.db"
-                    ),
-                    encoding="utf-8",
-                )
+                self.status.write_text(status, encoding="utf-8")
                 result = self.run_bash(self.service_driver(), {})
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn("foreign Tachi daemon holds this DB scope", result.stdout)
+                self.assertIn(complaint, result.stdout)
                 expected = [plist.name] if previous is not None else []
                 self.assertEqual([entry.name for entry in directory.iterdir()], expected)
                 if previous is not None:
@@ -272,37 +282,51 @@ sleep() { :; }
 
     # ── what counts as an answer ───────────────────────────────────────────
 
-    def test_only_a_complete_json_object_is_an_answer(self) -> None:
-        whole = (
-            '{\n  "state": "none",\n  "nested": {"a": [1, "}"]},\n'
-            '  "q": "say \\"hi\\""\n}\n'
-        )
-
-        def answer_is(text: str) -> subprocess.CompletedProcess[str]:
+    def test_only_one_json_object_is_an_answer(self) -> None:
+        def fields_of(text: str) -> subprocess.CompletedProcess[str]:
             body = (
-                function("json_complete_object")
-                + "\ncat <<'ANSWER' | json_complete_object\n" + text + "\nANSWER\n"
+                function("json_object_fields")
+                + "\ncat <<'ANSWER' | json_object_fields\n" + text + "\nANSWER\n"
             )
             return self.run_bash(body, {})
 
-        # Text before the object is not part of it.
-        for text, expected in ((whole, whole), ("a warning line first\n" + whole, whole)):
-            with self.subTest(text=text):
-                result = answer_is(text)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, expected)
+        whole = (
+            '{\n  "state": "none",\n  "pid": 4242,\n  "ratio": 1.5,\n  "flag": true,\n'
+            '  "nothing": null,\n  "nested": {"a": [1, "}"]},\n  "q": "say \\"hi\\""\n}\n'
+        )
+        # One line per top-level field, with its type. A nested value is one
+        # field of its own kind, whatever it holds.
+        expected = (
+            "state\tstring\tnone\npid\tnumber\t4242\nratio\tnumber\t1.5\nflag\ttrue\t\n"
+            'nothing\tnull\t\nnested\tobject\t\nq\tstring\tsay \\"hi\\"\n'
+        )
+        result = fields_of(whole)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        # Whitespace around the object is the only thing beyond it that passes.
+        self.assertEqual(fields_of("\n  " + whole + "\t\n").stdout, expected)
         for text in (
             "",
             "not json\n",
+            "a warning line first\n" + whole,  # text before the object
+            whole + "and then this\n",  # text after it
+            whole + whole,  # a second object
+            '[\n  "state"\n]',  # not an object
             '{\n  "state": "none"\n',  # the closing brace never came
             '{\n  "state": "non\n',  # cut inside a string
             '{\n  "nested": {"a": 1}\n',  # the inner one closed, the outer did not
-            '{\n  "state": "none"\n} {"state": "none"\n',
-            '{\n  "state": "none"\n} and then this\n',
+            '{"state": "none"]',  # a bracket where a brace belongs
+            '{"state": "none",}',
+            "{'state': 'none'}",
+            '{"state": truex}',
+            '{"state": "running", "pid": 12abc}',
+            '{"state": "none", "state": "running"}',  # the same name twice
+            '{"state": "run\nning"}',  # a raw control character in a string
+            '{"state": "a\\qb"}',  # not an escape
         ):
             with self.subTest(text=text):
-                result = answer_is(text)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                result = fields_of(text)
+                self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertEqual(result.stdout, "")
 
     def test_a_cut_short_answer_is_not_read_as_free(self) -> None:
@@ -310,14 +334,46 @@ sleep() { :; }
             '{"state": "none"',
             '{\n  "state": "none"\n',
             '{\n  "state": "stale_pid", "pid": 4242\n',
+            '{"state": "none"]',  # closed with the wrong bracket
+            'a warning line\n{"state": "none"}',  # something was printed first
         ):
             with self.subTest(status=status):
+                self.calls.unlink(missing_ok=True)
                 self.status.write_text(status, encoding="utf-8")
                 result = self.run_bash(
                     self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
                 )
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("cannot tell what holds this DB scope", result.stdout)
+                self.assertEqual(self.call_log(), [], "nothing was signalled")
+
+    def test_a_nested_or_mistyped_field_is_not_the_status(self) -> None:
+        # Each answer is one JSON object. None of them says what a match on
+        # the text would find.
+        for status, complaint in (
+            (
+                '{"state": "unavailable", "detail": {"state": "running"}}',
+                "cannot tell what holds this DB scope",
+            ),
+            (
+                '{"state": "foreign", "reason": "daemon version 2.0.0 does not match binary 2.1.0",'
+                ' "pid": "4242"}',
+                "foreign Tachi daemon holds this DB scope",
+            ),
+            (
+                '{"state": "foreign", "reason": {"text": "daemon version 2.0.0 does not match'
+                ' binary 2.1.0"}, "pid": 4242}',
+                "foreign Tachi daemon holds this DB scope",
+            ),
+        ):
+            with self.subTest(status=status):
+                self.calls.unlink(missing_ok=True)
+                self.status.write_text(status, encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(complaint, result.stdout)
                 self.assertEqual(self.call_log(), [], "nothing was signalled")
 
     def test_a_failing_binary_has_not_answered(self) -> None:
@@ -331,19 +387,35 @@ sleep() { :; }
         self.assertEqual(self.call_log(), [], "nothing was signalled")
 
     def test_an_answer_that_breaks_while_waiting_for_the_stop_ends_the_install(self) -> None:
-        self.status.write_text('{\n  "state": "running",\n  "pid": 7\n}\n', encoding="utf-8")
-        # The daemon was asked to stop, and the next answer is cut short right
-        # after its state field. That does not say the scope is free.
+        # The daemon was asked to stop. The next answer is cut short right
+        # after its state field, or closed with the wrong bracket. Neither
+        # says the scope is free.
+        for answer in ('{"state": "none"', '{"state": "none"]'):
+            with self.subTest(answer=answer):
+                self.calls.unlink(missing_ok=True)
+                self.status.write_text('{\n  "state": "running",\n  "pid": 7\n}\n', encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(),
+                    {
+                        "TACHI_FAKE": str(self.fake_bin / "tachi"),
+                        "STATUS_AFTER_KILL": answer,
+                    },
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(self.call_log(), ["daemon kill"])
+                self.assertIn("became unreadable while waiting", result.stdout)
+
+    def test_a_nested_running_does_not_end_the_wait_for_the_new_daemon(self) -> None:
+        self.launch_agents()
+        self.status.write_text('{\n  "state": "none"\n}\n', encoding="utf-8")
+        # The service was asked to start. `running` nested under another
+        # state is not the new daemon reporting in.
         result = self.run_bash(
-            self.stop_driver(),
-            {
-                "TACHI_FAKE": str(self.fake_bin / "tachi"),
-                "STATUS_AFTER_KILL": '{"state": "none"',
-            },
+            self.service_driver(),
+            {"STATUS_AFTER_BOOTSTRAP": '{"state": "none", "detail": {"state": "running"}}'},
         )
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(self.call_log(), ["daemon kill"])
-        self.assertIn("became unreadable while waiting", result.stdout)
+        self.assertIn("did not report state=running", result.stdout)
 
 
 if __name__ == "__main__":
