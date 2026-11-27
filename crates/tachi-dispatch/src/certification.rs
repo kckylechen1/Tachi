@@ -309,6 +309,7 @@ fn binary_identity(program: &std::path::Path) -> BinaryIdentity {
 }
 
 /// What `<program> --version` may print on one stream before the probe gives up.
+#[cfg(unix)]
 const MAX_VERSION_BYTES: usize = 64 * 1024;
 /// How long `<program> --version` may take.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -347,11 +348,20 @@ fn probe_version_output(
     .ok()
 }
 
-/// Elsewhere there are no process groups to reclaim. There the probe keeps to
-/// a worker thread, and only its answer is bounded.
 #[cfg(not(unix))]
 fn probe_version_output(
     command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    output_from_a_thread(command, timeout)
+}
+
+/// Elsewhere there are no process groups to reclaim. There the probe keeps to
+/// a worker thread, and only its answer is bounded. It is compiled with the
+/// tests on every platform, so that it is checked where the probes run too.
+#[cfg(any(not(unix), test))]
+fn output_from_a_thread(
+    mut command: std::process::Command,
     timeout: std::time::Duration,
 ) -> Option<std::process::Output> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -504,6 +514,17 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_threaded_fallback_reads_a_cli_that_ends() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf 'codex-cli 9.8.7' >&2; exit 0"]);
+        let output = output_from_a_thread(command, std::time::Duration::from_secs(5))
+            .expect("the CLI ended");
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"codex-cli 9.8.7");
     }
 
     #[cfg(unix)]
