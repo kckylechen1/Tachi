@@ -68,36 +68,41 @@ impl CircuitBreaker {
         }
     }
 
+    /// Every decision is made under the state lock, on the state as it is
+    /// then. Deciding on a read snapshot and claiming outside the lock let a
+    /// caller claim a probe slot a failure had just freed, while the first
+    /// probe was still in flight, and read a cooldown left over from an
+    /// earlier open phase.
     fn enter(&self) -> Entry {
-        let state = *self.inner.state.read().unwrap_or_else(|e| e.into_inner());
-        match state {
-            BreakerState::Closed => Entry::Open,
-            BreakerState::HalfOpen => match self.claim_half_open_probe() {
-                Some(generation) => Entry::Probe(generation),
-                None => Entry::Refused,
-            },
-            BreakerState::Open => {
-                let opened_at = self
-                    .inner
-                    .opened_at
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(at) = *opened_at {
-                    if at.elapsed() >= OPEN_DURATION {
-                        drop(opened_at);
-                        let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
-                        if *state == BreakerState::Open {
-                            *state = BreakerState::HalfOpen;
-                            self.inner.half_open_probe.store(0, Ordering::Release);
-                        }
-                        return match self.claim_half_open_probe() {
-                            Some(generation) => Entry::Probe(generation),
-                            None => Entry::Refused,
-                        };
-                    }
-                }
-                Entry::Refused
+        loop {
+            if *self.inner.state.read().unwrap_or_else(|e| e.into_inner()) == BreakerState::Closed {
+                return Entry::Open;
             }
+            let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
+            match *state {
+                BreakerState::Closed => return Entry::Open,
+                BreakerState::HalfOpen => {
+                    return match self.claim_half_open_probe() {
+                        Some(generation) => Entry::Probe(generation),
+                        None => Entry::Refused,
+                    };
+                }
+                BreakerState::Open => {
+                    let opened_at = self
+                        .inner
+                        .opened_at
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let expired = opened_at.is_some_and(|at| at.elapsed() >= OPEN_DURATION);
+                    if !expired {
+                        return Entry::Refused;
+                    }
+                    *state = BreakerState::HalfOpen;
+                    self.inner.half_open_probe.store(0, Ordering::Release);
+                }
+            }
+            // Half-open now. The next pass claims under a fresh look at the
+            // state, which a failure may already have changed back.
         }
     }
 
@@ -154,10 +159,11 @@ impl CircuitBreaker {
     /// other way here could deadlock against a failure arriving at the
     /// threshold. Closing under the state lock is what ends the half-open
     /// phase, so the probe slot is not freed here: it may belong to a probe
-    /// still in flight, and that probe releases itself.
+    /// still in flight, and that probe releases itself. The failure count is
+    /// written under the same lock as the state, so the two never disagree.
     fn record_success(&self) {
-        self.inner.failure_count.store(0, Ordering::Relaxed);
         let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
+        self.inner.failure_count.store(0, Ordering::Relaxed);
         *state = BreakerState::Closed;
         let mut opened_at = self
             .inner
@@ -168,19 +174,18 @@ impl CircuitBreaker {
     }
 
     fn record_failure(&self) {
-        let count = self.inner.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if count >= FAILURE_THRESHOLD {
-            let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
-            if *state != BreakerState::Open {
-                *state = BreakerState::Open;
-                self.inner.half_open_probe.store(0, Ordering::Release);
-                let mut opened_at = self
-                    .inner
-                    .opened_at
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                *opened_at = Some(Instant::now());
-            }
+        let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
+        let count = self.inner.failure_count.load(Ordering::Relaxed) + 1;
+        self.inner.failure_count.store(count, Ordering::Relaxed);
+        if count >= FAILURE_THRESHOLD && *state != BreakerState::Open {
+            *state = BreakerState::Open;
+            self.inner.half_open_probe.store(0, Ordering::Release);
+            let mut opened_at = self
+                .inner
+                .opened_at
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *opened_at = Some(Instant::now());
         }
     }
 
