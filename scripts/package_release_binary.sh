@@ -113,6 +113,14 @@ else
   echo ">> smoke test skipped: $TRIPLE does not run on $HOST"
 fi
 
+# An Apple binary needs the ad-hoc signature applied below: the linker's own
+# is rejected by launchd. Only macOS can apply it, so an Apple triple packaged
+# anywhere else would ship unsigned.
+if [[ "$TRIPLE" == *-apple-* && "$(uname -s)" != "Darwin" ]]; then
+  echo "error: refusing to package ${TRIPLE} from $(uname -s): it would ship without a signature. Package it on macOS." >&2
+  exit 1
+fi
+
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 # Public install name is `tachi` (Homebrew bin.install "tachi").
@@ -140,22 +148,22 @@ SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 echo ">> wrote $TARBALL"
 echo "   sha256=$SHA"
 
-# Append/update a SHASUMS line for this asset in OUT_DIR when present.
+# Append/update a SHASUMS line for this asset in OUT_DIR when present. The
+# new manifest is written whole and moved into place with one rename: a write
+# that fails or is interrupted leaves the existing sums untouched, and
+# adjacent extensions (e.g. `.tar.gz.sig`) are preserved.
 SUMS="$OUT_DIR/tachi-v${VERSION}-SHASUMS256.txt"
 if [[ -f "$SUMS" ]]; then
-  # Drop any previous line matching this exact asset filename, then append.
-  # Checked field-wise in a private temporary file so a failed rewrite leaves
-  # the existing sums untouched and adjacent extensions (e.g. `.tar.gz.sig`)
-  # are preserved.
   sums_tmp="$(mktemp "$OUT_DIR/.tachi-SHASUMS256.XXXXXX")"
-  if ! awk -v target="${ASSET_STEM}.tar.gz" '$2 != target' "$SUMS" >"$sums_tmp"; then
+  if ! { awk -v target="${ASSET_STEM}.tar.gz" '$2 != target' "$SUMS"; printf '%s  %s\n' "$SHA" "${ASSET_STEM}.tar.gz"; } >"$sums_tmp"; then
     rm -f "$sums_tmp"
     echo "error: could not rewrite $SUMS" >&2
     exit 1
   fi
   mv "$sums_tmp" "$SUMS"
+else
+  printf '%s  %s\n' "$SHA" "${ASSET_STEM}.tar.gz" >"$SUMS"
 fi
-echo "${SHA}  ${ASSET_STEM}.tar.gz" >>"$SUMS"
 echo ">> sums: $SUMS"
 
 # Machine-readable outputs for CI.

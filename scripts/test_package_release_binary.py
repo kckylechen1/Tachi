@@ -127,6 +127,20 @@ class PackageReleaseBinaryTests(unittest.TestCase):
             f"{sig_line}{digest}  tachi-v{VERSION}-{triple}.tar.gz\n",
         )
 
+    def test_an_apple_triple_is_not_packaged_unsigned_from_another_host(self) -> None:
+        triple = "aarch64-apple-darwin"
+        self.write_tool("rustc", "#!/bin/sh\nprintf 'host: aarch64-unknown-linux-gnu\\n'\n")
+        self.write_tool("uname", "#!/bin/sh\necho Linux\n")
+        self.stage_binary(triple, runs=False)
+
+        result = self.run_packager("--triple", triple)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refusing to package", result.stderr)
+        self.assertEqual(self.lines(self.codesign_log), [])
+        self.assertEqual(self.lines(self.smoke_log), [])
+        self.assertEqual([entry.name for entry in self.out.iterdir()], [], "an unsigned tarball was produced")
+
 
 if __name__ == "__main__":
     unittest.main()
