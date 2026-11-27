@@ -139,9 +139,13 @@ pub(crate) async fn forward_daemon_task(
     }
     crate::ensure_tls_provider();
     let http = reqwest::Client::builder()
+        // Loopback only, carrying the owner capability: no proxy may see it.
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
+        // Connecting is bounded; the request itself is not, because the
+        // notification stream of a session stays open by design.
+        .connect_timeout(Duration::from_secs(5))
         .build()
         .map_err(|_| TaskForwardError::before("MCP Tasks HTTP client unavailable"))?;
     let transport = StreamableHttpClientTransport::with_client(

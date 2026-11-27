@@ -311,9 +311,8 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
-        Commands::Poke { action } => {
-            super::super::poke_cli::run_poke_command(app_home, action.clone()).await?;
-            Ok(true)
+        Commands::Poke { .. } => {
+            unreachable!("Poke is routed before the runtime in tokio_main")
         }
         Commands::Eval { action } => {
             super::super::eval_cli::run_eval_command(

@@ -2,9 +2,10 @@
 //! A reserved attempt is durable before I/O. It is not a destination receipt.
 
 use super::{resolve_current_local_admission, A2aTransitionActor, MAX_REMOTE_JOB_BYTES};
-use crate::db::common::with_composable_write;
+use crate::db::common::{normalize_utc_iso, now_utc_iso, with_composable_write};
 use crate::db::session_claims::{get_claim, work_claim_project, ClaimState};
 use crate::error::MemoryError;
+use crate::time_compat::millis_z;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -224,6 +225,10 @@ pub fn prepare_remote_submission(
     let domain = text("trust_domain")?;
     let issued = timestamp(text("issued_at")?)?;
     let expires = timestamp(text("expires_at")?)?;
+    // The row keeps the canonical millisecond UTC spelling of the origin's
+    // window; the frozen body and its digest keep the operator's own bytes.
+    let issued_at = normalize_utc_iso(text("issued_at")?)?;
+    let expires_at = normalize_utc_iso(text("expires_at")?)?;
     let digest = format!("{:x}", Sha256::digest(canonical_body.as_bytes()));
     with_composable_write(conn, |conn| {
         let now = jiff::Timestamp::now();
@@ -258,7 +263,7 @@ pub fn prepare_remote_submission(
               body,body_digest,issued_at,expires_at,current_state,state_version,attempts,retry_allowed,updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',1,0,1,?12)",
             params![id, actor.agent_identity_id, admission_id, serde_json::to_string(binding)?, key, nonce, domain,
-                canonical_body, digest, text("issued_at")?, text("expires_at")?, now.to_string()],
+                canonical_body, digest, issued_at, expires_at, now_utc_iso()],
         )?;
         read(conn, actor, &id)
     })
@@ -269,7 +274,7 @@ fn stop(conn: &Connection, submission: &RemoteSubmission, reason: &str) -> Resul
         "UPDATE a2a_remote_submissions SET current_state=?2,state_version=state_version+1,
          attempt_token=NULL,attempt_until=NULL,last_error=?3,retry_allowed=0,updated_at=?4 WHERE submission_id=?1",
         params![submission.submission_id, if submission.attempts == 0 {"blocked"} else {"unknown"},
-            reason, jiff::Timestamp::now().to_string()],
+            reason, now_utc_iso()],
     )?;
     Ok(())
 }
@@ -301,16 +306,24 @@ pub fn reserve_remote_submission(
         {
             return Ok(None);
         }
-        let reason = if submission.binding != *binding || submission.trust_domain != trust_domain {
-            Some("operator_binding_changed")
-        } else if authorize(conn, actor, binding, now).is_err() {
-            Some("origin_authority_changed")
-        } else if timestamp(&submission.expires_at)? <= now {
-            Some("start_window_expired")
-        } else if submission.attempts >= 3 {
-            Some("attempts_exhausted")
+        let authority = if submission.binding != *binding || submission.trust_domain != trust_domain
+        {
+            Err("operator_binding_changed")
         } else {
-            None
+            match authorize(conn, actor, binding, now) {
+                Ok(()) => Ok(()),
+                // Only a real authority mismatch stops the submission. A
+                // storage error is returned unchanged and leaves the row as
+                // it was, so a later resume can reserve the same attempt.
+                Err(MemoryError::InvalidArg(_)) => Err("origin_authority_changed"),
+                Err(error) => return Err(error),
+            }
+        };
+        let reason = match authority {
+            Err(reason) => Some(reason),
+            Ok(()) if timestamp(&submission.expires_at)? <= now => Some("start_window_expired"),
+            Ok(()) if submission.attempts >= 3 => Some("attempts_exhausted"),
+            Ok(()) => None,
         };
         if let Some(reason) = reason {
             stop(conn, &submission, reason)?;
@@ -327,7 +340,7 @@ pub fn reserve_remote_submission(
         conn.execute(
             "UPDATE a2a_remote_submissions SET current_state='in_flight',state_version=state_version+1,
              attempts=attempts+1,attempt_token=?2,attempt_until=?3,last_error=NULL,updated_at=?4 WHERE submission_id=?1",
-            params![id, token, (now + jiff::SignedDuration::from_secs(45)).to_string(), now.to_string()],
+            params![id, token, millis_z(now + jiff::SignedDuration::from_secs(45)), now_utc_iso()],
         )?;
         Ok(Some(RemoteSubmissionAttempt {
             submission: read(conn, actor, id)?,
@@ -357,7 +370,7 @@ pub fn remote_submission_attempt_is_current(
                 attempt.submission.submission_id,
                 actor.agent_identity_id,
                 attempt.token,
-                now.to_string()
+                millis_z(now)
             ],
             |row| row.get(0),
         )?)
@@ -414,7 +427,7 @@ pub fn finish_remote_submission(
                 retry,
                 task_id,
                 receipt,
-                jiff::Timestamp::now().to_string()
+                now_utc_iso()
             ],
         )?;
         if changed != 1 {

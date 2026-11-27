@@ -9,13 +9,16 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use memcore::db::a2a::{
-    insert_remote_rejection, list_remote_tasks, read_remote_task, NewRemoteTask, RemoteJobGrant,
-    RemoteTask, RemoteTaskAccess, RemoteTaskHeader, RemoteTaskInsertOutcome,
+    insert_remote_rejection, is_retained_task_quota_exceeded, list_remote_tasks, read_remote_task,
+    NewRemoteTask, RemoteJobGrant, RemoteTask, RemoteTaskAccess, RemoteTaskHeader,
+    RemoteTaskInsertOutcome,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+
+const LOG_TARGET: &str = "tachi::remote_a2a";
 
 #[derive(Clone, Copy)]
 struct RpcError {
@@ -35,6 +38,18 @@ const NOT_FOUND: RpcError = RpcError {
     code: -32001,
     message: "Task not found",
 };
+const QUOTA_EXCEEDED: RpcError = RpcError {
+    code: -32006,
+    message: "Peer task quota exceeded",
+};
+
+/// Runs certificate revalidation, SQLite and store-gate work on the blocking
+/// pool. A Tokio worker is never held while the store may block.
+pub(super) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(work).await
+}
 
 fn response(status: StatusCode, value: Value) -> Response {
     let mut response = (status, Json(value)).into_response();
@@ -55,6 +70,13 @@ fn response(status: StatusCode, value: Value) -> Response {
 }
 
 fn failure(id: Value, error: RpcError) -> Response {
+    // Only the static code and reason reach the log: no request bytes or ids.
+    tracing::warn!(
+        target: LOG_TARGET,
+        code = error.code,
+        reason = error.message,
+        "remote gateway: RPC refused"
+    );
     response(
         StatusCode::OK,
         json!({"jsonrpc":"2.0", "id":id,
@@ -62,15 +84,34 @@ fn failure(id: Value, error: RpcError) -> Response {
     )
 }
 
+fn admission_unavailable() -> Response {
+    tracing::warn!(
+        target: LOG_TARGET,
+        reason = "remote admission unavailable",
+        "remote gateway: request refused"
+    );
+    response(
+        StatusCode::FORBIDDEN,
+        json!({"error":"remote admission unavailable"}),
+    )
+}
+
+/// Revalidates the certificate and the durable admission of a connection. It
+/// blocks on the store, so it runs on the blocking pool.
+async fn recheck(
+    connection: &Arc<Connection>,
+) -> Result<Result<(), String>, tokio::task::JoinError> {
+    let connection = connection.clone();
+    blocking(move || connection.current()).await
+}
+
 pub(super) async fn handle(
     State(connection): State<Arc<Connection>>,
     request: Request,
 ) -> Response {
-    if connection.current().is_err() {
-        return response(
-            StatusCode::FORBIDDEN,
-            json!({"error":"remote admission unavailable"}),
-        );
+    // Admission is rechecked before any byte of the body is read.
+    if !matches!(recheck(&connection).await, Ok(Ok(()))) {
+        return admission_unavailable();
     }
     let headers = request.headers();
     if headers
@@ -151,14 +192,22 @@ pub(super) async fn handle(
         );
     };
     let id = request.id;
-    // No database work or business input reaches a worker. Every operation
-    // below rechecks durable admission inside the existing storage transaction.
-    match dispatch(&connection, &request.method, request.params) {
-        Ok(result) => response(
+    // No database work or business input reaches a managed worker. Every
+    // operation below rechecks durable admission inside the existing storage
+    // transaction; that SQLite work stays off the Tokio worker.
+    let method = request.method;
+    let params = request.params;
+    let stored = {
+        let connection = connection.clone();
+        blocking(move || dispatch(&connection, &method, params)).await
+    };
+    match stored {
+        Ok(Ok(result)) => response(
             StatusCode::OK,
             json!({"jsonrpc":"2.0","id":id,"result":result}),
         ),
-        Err(error) => failure(id, error),
+        Ok(Err(error)) => failure(id, error),
+        Err(_) => failure(id, INTERNAL),
     }
 }
 
@@ -167,11 +216,17 @@ fn typed<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
 }
 
 fn storage<T>(result: Result<Result<T, memcore::MemoryError>, String>) -> Result<T, RpcError> {
-    result.map_err(|_| INTERNAL)?.map_err(|error| match error {
+    let error = match result {
+        Ok(Ok(value)) => return Ok(value),
+        Ok(Err(error)) => error,
+        Err(_) => return Err(INTERNAL),
+    };
+    Err(match &error {
         memcore::MemoryError::Duplicate(_) => RpcError {
             code: -32602,
             message: "Conflicting remote submission",
         },
+        error if is_retained_task_quota_exceeded(error) => QUOTA_EXCEEDED,
         memcore::MemoryError::InvalidArg(_) => INVALID,
         _ => INTERNAL,
     })
@@ -390,11 +445,8 @@ fn task_value(task: &RemoteTask) -> Result<Value, RpcError> {
 }
 
 pub(super) async fn agent_card(State(connection): State<Arc<Connection>>) -> Response {
-    if connection.current().is_err() {
-        return response(
-            StatusCode::FORBIDDEN,
-            json!({"error":"remote admission unavailable"}),
-        );
+    if !matches!(recheck(&connection).await, Ok(Ok(()))) {
+        return admission_unavailable();
     }
     let Some(endpoint) = &connection.config.public_endpoint else {
         return response(

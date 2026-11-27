@@ -312,3 +312,114 @@ fn expiry_is_local_block_or_unknown_and_body_gc_keeps_replay_tombstone() {
     assert_eq!(scrubbed.nonce, prepared.nonce);
     assert_eq!(scrubbed.binding, prepared.binding);
 }
+
+#[test]
+fn storage_error_while_rechecking_authority_does_not_stop_the_submission() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let (actor, binding, body) = fixture(&store);
+    let prepared = prepare_remote_submission(store.connection(), &actor, &binding, &body).unwrap();
+    // Refuse only the WorkClaim read of the authority recheck. The store then
+    // cannot answer, as with a busy or failing disk; it does not answer "the
+    // claim changed".
+    store
+        .connection_mut()
+        .authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Read {
+                table_name: "session_claims",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+    assert!(matches!(
+        reserve_remote_submission(
+            store.connection(),
+            &actor,
+            &binding,
+            "owner:domain",
+            &prepared.submission_id
+        ),
+        Err(MemoryError::Sqlite(_))
+    ));
+    store
+        .connection_mut()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    let untouched =
+        read_remote_submission(store.connection(), &actor, &prepared.submission_id).unwrap();
+    assert_eq!(untouched.current_state, "pending");
+    assert_eq!(untouched.state_version, prepared.state_version);
+    assert_eq!(untouched.attempts, 0);
+    assert!(untouched.retry_allowed);
+    assert!(untouched.last_error.is_none());
+    let attempt = reserve_remote_submission(
+        store.connection(),
+        &actor,
+        &binding,
+        "owner:domain",
+        &prepared.submission_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(attempt.submission.attempts, 1);
+}
+
+#[test]
+fn stored_window_and_attempt_deadline_use_the_canonical_utc_spelling() {
+    let store = MemoryStore::open_in_memory().unwrap();
+    let (actor, binding, body) = fixture(&store);
+    let conn = store.connection();
+    // An operator file may spell a live window without a fraction and with a
+    // numeric offset instead of `Z`.
+    let now = jiff::Timestamp::now();
+    let whole_second = |offset: jiff::SignedDuration| {
+        let canonical = crate::time_compat::millis_z(now + offset);
+        canonical[..canonical.find('.').unwrap()].to_string()
+    };
+    let issued = whole_second(jiff::SignedDuration::ZERO);
+    let expires = whole_second(jiff::SignedDuration::from_mins(5));
+    let mut spelled: Value = serde_json::from_str(&body).unwrap();
+    spelled["issued_at"] = json!(format!("{issued}Z"));
+    spelled["expires_at"] = json!(format!("{expires}+00:00"));
+    let prepared = prepare_remote_submission(conn, &actor, &binding, &spelled.to_string()).unwrap();
+    assert_eq!(prepared.issued_at, format!("{issued}.000Z"));
+    assert_eq!(prepared.expires_at, format!("{expires}.000Z"));
+    let (stored_body, stored_updated_at): (Option<String>, String) = conn
+        .query_row(
+            "SELECT body,updated_at FROM a2a_remote_submissions WHERE submission_id=?1",
+            [&prepared.submission_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // The frozen bytes are the operator's own; only the row's columns are
+    // normalized.
+    assert_eq!(
+        serde_json::from_str::<Value>(stored_body.as_deref().unwrap()).unwrap()["issued_at"],
+        json!(format!("{issued}Z"))
+    );
+    assert_eq!(prepared.updated_at, stored_updated_at);
+    assert_eq!(stored_updated_at.len(), 24, "{stored_updated_at}");
+    let attempt = reserve_remote_submission(
+        conn,
+        &actor,
+        &binding,
+        "owner:domain",
+        &prepared.submission_id,
+    )
+    .unwrap()
+    .unwrap();
+    let stored_until: String = conn
+        .query_row(
+            "SELECT attempt_until FROM a2a_remote_submissions WHERE submission_id=?1",
+            [&prepared.submission_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        attempt.submission.attempt_until.as_deref(),
+        Some(stored_until.as_str())
+    );
+    assert_eq!(stored_until.len(), 24, "{stored_until}");
+}

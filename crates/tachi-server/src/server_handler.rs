@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 mod admission;
 mod protocol;
 pub(crate) use admission::parse_http_tool_profile;
+#[cfg(test)]
+pub(crate) use protocol::arm_call_tool_gate;
 
 pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();

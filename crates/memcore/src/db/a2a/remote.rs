@@ -22,6 +22,24 @@ pub const A2A_REMOTE_JOB_KIND: &str = "tachi.remote_job/v1";
 pub const MAX_REMOTE_JOB_BYTES: usize = 32768;
 const MAX_JOB_TTL_SECS: i64 = 15 * 60;
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+/// Largest accepted difference between the other host's clock and this one.
+/// Origin and destination compare each other's timestamps against their own
+/// clock, so only "the other host's timestamp is ahead of us" is relaxed by
+/// this bound. Expiry keeps using the local clock: a first submission is never
+/// admitted once its declared window has closed here.
+pub const REMOTE_CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
+/// Tasks with a retained body that one issuer may hold. It bounds what a
+/// single enrolled peer can store. Retention scrubs bodies after 90 days, so
+/// the capacity returns; a replay returns its existing task and never counts.
+pub const MAX_RETAINED_REMOTE_TASKS_PER_PEER: i64 = 5_000;
+/// `MemoryError::InvalidArg` message of a first submission refused by that bound.
+pub const RETAINED_TASK_QUOTA_EXCEEDED: &str = "remote task retained task quota exceeded";
+
+/// Whether a storage error is the retained-task quota refusing a first
+/// submission from an issuer that already holds its bound.
+pub fn is_retained_task_quota_exceeded(error: &MemoryError) -> bool {
+    matches!(error, MemoryError::InvalidArg(message) if message == RETAINED_TASK_QUOTA_EXCEEDED)
+}
 
 /// Retained after body GC. The destination host comes from gateway config,
 /// not from a claim by the remote sender.
@@ -407,17 +425,32 @@ pub fn insert_remote_rejection(
         let issued = parse(&request.issued_at)?;
         let expires = parse(&request.expires_at)?;
         let authoritative_now = parse(&now)?;
-        if issued > authoritative_now
+        // The origin stamped issued_at with its own clock. Admit a job it just
+        // created even when that clock runs ahead of this host, bounded by the
+        // shared tolerance; expires_at is still judged by the local clock.
+        if issued
+            > authoritative_now + jiff::SignedDuration::from_secs(REMOTE_CLOCK_SKEW_TOLERANCE_SECS)
             || expires <= authoritative_now
             || expires <= issued
             || expires - issued > jiff::SignedDuration::from_secs(MAX_JOB_TTL_SECS)
         {
             return Err(invalid(
-                "first admission requires issued_at <= now < expires_at and TTL <= 15 minutes",
+                "first admission requires issued_at within the clock tolerance, now < expires_at and TTL <= 15 minutes",
             ));
         }
         let created_at = crate::db::common::normalize_utc_iso(&request.issued_at)?;
         let expires_at = crate::db::common::normalize_utc_iso(&request.expires_at)?;
+        // Counted inside the admission transaction, after the replay lookup, so
+        // an issuer at its bound can still replay but not add another task.
+        let retained: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM a2a_envelopes
+             WHERE issuer_agent_identity_id=?1 AND kind='tachi.remote_job/v1' AND body IS NOT NULL",
+            params![binding.agent_identity_id],
+            |row| row.get(0),
+        )?;
+        if retained >= MAX_RETAINED_REMOTE_TASKS_PER_PEER {
+            return Err(invalid("retained task quota exceeded"));
+        }
         let metadata = serde_json::to_string(&request.header)?;
         conn.execute(
             "INSERT INTO a2a_envelopes

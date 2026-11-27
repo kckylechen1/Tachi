@@ -374,6 +374,8 @@ impl ServerHandler for MemoryServer {
                     .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));
             }
             server.touch_activity();
+            #[cfg(test)]
+            pause_if_armed(&context).await;
             let name_owned = params.name.as_ref().to_string();
             let name = name_owned.as_str();
             let env_patterns = current_exposed_tool_patterns();
@@ -799,4 +801,69 @@ fn tachi_skill() -> Result<rmcp::model::Skill, rmcp::ErrorData> {
     serde_json::from_value(crate::server_instructions::skill_manifest().clone()).map_err(|error| {
         rmcp::ErrorData::internal_error(format!("bundled skill manifest: {error}"), None)
     })
+}
+
+#[cfg(test)]
+type CallToolGateEntry = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+#[cfg(test)]
+fn call_tool_gates(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, CallToolGateEntry>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, CallToolGateEntry>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct CallToolGateGuard {
+    token: String,
+}
+
+#[cfg(test)]
+impl Drop for CallToolGateGuard {
+    fn drop(&mut self) {
+        call_tool_gates()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.token);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn arm_call_tool_gate(
+    token: impl Into<String>,
+    started: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+) -> CallToolGateGuard {
+    let token = token.into();
+    call_tool_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(token.clone(), (started, release));
+    CallToolGateGuard { token }
+}
+
+#[cfg(test)]
+async fn pause_if_armed(context: &RequestContext<RoleServer>) {
+    let Some(token) = context
+        .extensions
+        .get::<axum::http::request::Parts>()
+        .and_then(|parts| parts.headers.get("x-tachi-test-pause"))
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+    let entry = call_tool_gates()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(token)
+        .cloned();
+    if let Some((started, release)) = entry {
+        started.notify_one();
+        release.notified().await;
+    }
 }

@@ -24,19 +24,27 @@ pub(crate) fn run(
         | RemoteA2aAction::Revoke { config, .. } => config,
     };
     let config = GatewayConfig::load(path)?;
+    let probe = match action {
+        RemoteA2aAction::Probe { peer, .. } => Some(peer),
+        _ => None,
+    };
+    if probe.is_none() {
+        // Set the process home before constructing any server, and before the
+        // runtime's workers exist: `set_var` must not race another thread's
+        // `getenv`. User/project dotenv is not loaded and no implicit live
+        // database is resolved.
+        std::env::set_var("TACHI_HOME", &config.home);
+        std::env::remove_var(memcore::db::SCHEMA_MIGRATION_LEGACY_ENV);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        if let RemoteA2aAction::Probe { peer, .. } = action {
+        if let Some(peer) = probe {
             let result = transport::probe(&config, peer).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             return Ok(());
         }
-        // Set the process home before constructing any server/runtime, without
-        // loading user/project dotenv or resolving an implicit live database.
-        std::env::set_var("TACHI_HOME", &config.home);
-        std::env::remove_var(memcore::db::SCHEMA_MIGRATION_LEGACY_ENV);
         let migration = if allow_schema_migration {
             memcore::MigrationAuthority::Allow {
                 approved_by: "a2a remote --allow-schema-migration".into(),
@@ -66,7 +74,8 @@ pub(crate) fn run(
                 println!("{{\"revoked\":true,\"scope\":\"mtls-peer-key\"}}");
                 Ok(())
             }
-            RemoteA2aAction::Probe { .. } => unreachable!(),
+            // A probe returned above, before any store was opened.
+            RemoteA2aAction::Probe { .. } => unreachable!("probe returned before the store"),
             RemoteA2aAction::Submit { .. }
             | RemoteA2aAction::Resume { .. }
             | RemoteA2aAction::Status { .. } => {

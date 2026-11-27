@@ -95,3 +95,91 @@ fn response_duplicates_and_unexpected_content_never_become_receipts() {
         }
     ));
 }
+
+#[test]
+fn refusal_receipts_stamped_by_a_clock_ahead_are_accepted_within_the_tolerance() {
+    let (submission, mut task) = fixture();
+    let half = REMOTE_CLOCK_SKEW_TOLERANCE_SECS / 2;
+    // The destination stamped both receipts with a clock that runs `ahead`
+    // seconds faster than this origin.
+    for ahead in [half, REMOTE_CLOCK_SKEW_TOLERANCE_SECS + half] {
+        let now = jiff::Timestamp::now();
+        let received = (now + jiff::SignedDuration::from_secs(ahead)).to_string();
+        let refused = (now + jiff::SignedDuration::from_secs(ahead + 1)).to_string();
+        task["metadata"][PROVENANCE]["receipts"][0]["occurred_at"] = json!(received);
+        task["metadata"][PROVENANCE]["receipts"][1]["occurred_at"] = json!(refused);
+        task["status"]["timestamp"] = json!(refused);
+        assert_eq!(
+            valid_refusal(&task, &submission),
+            ahead <= REMOTE_CLOCK_SKEW_TOLERANCE_SECS,
+            "{ahead}s ahead"
+        );
+    }
+}
+
+#[test]
+fn only_a_real_authority_change_ends_an_attempt_before_egress() {
+    assert!(admit_egress(GatewayKeyCheck::Current, Ok(OriginAuthority::Current)).is_ok());
+    for (key, origin, class, retry_allowed) in [
+        (
+            GatewayKeyCheck::Revoked,
+            Ok(OriginAuthority::Current),
+            "destination_authority_changed",
+            false,
+        ),
+        (
+            GatewayKeyCheck::Unavailable,
+            Ok(OriginAuthority::Current),
+            "destination_authority_unavailable",
+            true,
+        ),
+        (
+            GatewayKeyCheck::Current,
+            Ok(OriginAuthority::Changed),
+            "origin_authority_changed",
+            false,
+        ),
+        (
+            GatewayKeyCheck::Current,
+            Ok(OriginAuthority::Unavailable),
+            "origin_authority_unavailable",
+            true,
+        ),
+        (
+            GatewayKeyCheck::Current,
+            Err(String::from("global store is unavailable")),
+            "origin_authority_unavailable",
+            true,
+        ),
+    ] {
+        assert!(
+            matches!(
+                admit_egress(key, origin),
+                Err(RemoteSubmissionResult::Unknown {
+                    error_class,
+                    retry_allowed: retry
+                }) if error_class == class && retry == retry_allowed
+            ),
+            "{class}"
+        );
+    }
+    // An unreadable store is not an authority verdict.
+    assert_eq!(
+        classify_attempt_check(Err(memcore::MemoryError::InvalidArg(
+            "claim changed".into()
+        ))),
+        OriginAuthority::Changed
+    );
+    assert_eq!(
+        classify_attempt_check(Err(memcore::MemoryError::Io(std::io::Error::other(
+            "temporary I/O failure"
+        )))),
+        OriginAuthority::Unavailable
+    );
+    assert_eq!(
+        classify_key_check(Err(String::from("store is unavailable"))),
+        GatewayKeyCheck::Unavailable
+    );
+    assert_eq!(classify_key_check(Ok(true)), GatewayKeyCheck::Revoked);
+    assert_eq!(classify_key_check(Ok(false)), GatewayKeyCheck::Current);
+}

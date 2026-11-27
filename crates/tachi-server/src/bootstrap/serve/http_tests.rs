@@ -1,3 +1,4 @@
+mod local_http_boundary;
 mod memory_routing;
 mod presence_reporting;
 mod rmcp_compat;

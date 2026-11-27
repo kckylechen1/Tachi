@@ -167,9 +167,11 @@ pub(in crate::bootstrap) async fn call_daemon_vault(
     capability.set_sensitive(true);
     crate::ensure_tls_provider();
     let client = reqwest::Client::builder()
+        // Loopback only, carrying the owner capability: no proxy may see it.
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
+        .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
     let response = client

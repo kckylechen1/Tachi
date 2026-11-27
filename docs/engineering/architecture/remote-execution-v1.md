@@ -138,7 +138,7 @@ inside `data`, not an A2A Part discriminator. Limits are UTF-8 bytes.
 | `kind` | Exactly `tachi.remote_job/v1` |
 | `sender`, `recipient`, `trust_domain` | Explicit enrolled principal IDs/domain; each at most 256 bytes and equal to admitted bindings |
 | `idempotency_key`, `nonce` | Distinct opaque tokens, each 1–128 bytes; the nonce is not the transport-admission nonce |
-| `issued_at`, `expires_at` | UTC timestamps; no future issue time; start window at most fifteen minutes |
+| `issued_at`, `expires_at` | UTC timestamps; `issued_at` may run at most 60 seconds ahead of receiver clock (`REMOTE_CLOCK_SKEW_TOLERANCE_SECS`); `expires_at` is evaluated against receiver clock with start window at most fifteen minutes (TLS `mtls-peer/v1` verified-admission TTL is not relaxed) |
 | `repository` | Canonical repository identifier in both peers' allowlists; never a caller-selected clone URL or path |
 | `head_sha` | Exact immutable repository commit ID, checked against the fetched object and requested PR where applicable |
 | `origin_claim` | Closed `{claim_id, transition_version}` reference in the authenticated sender's namespace |
