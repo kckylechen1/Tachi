@@ -71,12 +71,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         // Keep the registry entry and its sender alive for the entire
         // background lifecycle. Binding this outside the async move drops the
         // guard as soon as scheduling returns and makes the child observe a
-        // closed cancellation receiver before it can spawn.
-        let BackgroundHandover {
-            managed_run_guard: _managed_run_guard,
-            mcp_cleanup: _mcp_cleanup,
-            mut early_exit_cleanup,
-        } = handover;
+        // closed cancellation receiver before it can spawn. The bindings are
+        // written so the scope drops them in reverse: credentials and the
+        // dispatch slot, the temporary MCP config, then the authority.
+        let (_managed_run_guard, _mcp_cleanup, mut early_exit_cleanup) = handover.into_parts();
 
         // execute_started — Stage 2 (or, in V1, the only stage).
         let execute_started_at = jiff::Timestamp::now();
