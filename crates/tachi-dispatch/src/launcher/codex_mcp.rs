@@ -1,5 +1,7 @@
 //! Codex per-run MCP projection, preserving the carrier's configuration layers.
 
+#[cfg(unix)]
+use crate::bounded_probe::GroupProcess;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
@@ -92,22 +94,16 @@ fn inspect_inventory_command(
     stdout_timeout: Duration,
 ) -> Result<BTreeSet<String>, String> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
 
     command
-        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let child = command.spawn().map_err(|error| {
+    let mut process = GroupProcess::spawn(command).map_err(|error| {
         format!("Cannot inspect Codex MCP configuration before injection: {error}")
     })?;
-    let mut process = InventoryProcess {
-        child,
-        owns_root: true,
-    };
     let mut stdout = process
-        .child
+        .child_mut()
         .stdout
         .take()
         .expect("piped Codex inventory stdout");
@@ -165,99 +161,6 @@ fn inspect_inventory_command(
             return Err(format!("Codex MCP configuration inspection timed out after {timeout:?}; injection was refused. Run `codex mcp list --json` in the admitted workspace before retrying."));
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// As in the managed subprocess runner, keep the group leader unreaped until
-/// every group signal finishes. This covers ordinary wrapper descendants, not
-/// processes that deliberately escape with setsid/setpgid.
-#[cfg(unix)]
-struct InventoryProcess {
-    child: std::process::Child,
-    owns_root: bool,
-}
-
-#[cfg(unix)]
-impl InventoryProcess {
-    fn observe_exit(&mut self) -> std::io::Result<bool> {
-        if !self.owns_root {
-            return Err(std::io::Error::other(
-                "Codex inventory child ownership was lost",
-            ));
-        }
-        // WNOWAIT reserves the child's PID/PGID even after its normal exit.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                self.child.id() as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ECHILD) {
-                self.owns_root = false;
-            }
-            return Err(error);
-        }
-        Ok(unsafe { info.si_pid() } != 0)
-    }
-
-    fn terminate_and_reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        if !self.owns_root {
-            return Err(std::io::Error::other(
-                "Codex inventory child ownership was lost",
-            ));
-        }
-        let _exit_observed = match self.observe_exit() {
-            Ok(exited) => exited,
-            Err(error) if !self.owns_root => return Err(error),
-            Err(_) => false,
-        };
-        // SAFETY: process_group(0) created this group, and WNOWAIT has not
-        // consumed its leader. No termination signal follows an attempt to reap it.
-        let result = unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
-        let signal_error = (result != 0)
-            .then(std::io::Error::last_os_error)
-            .filter(|error| error.raw_os_error() != Some(libc::ESRCH));
-        if signal_error.is_some() {
-            let _ = self.child.kill();
-        }
-        self.owns_root = false;
-        let status = self.child.wait();
-        #[cfg(target_os = "macos")]
-        let signal_error = signal_error.filter(|error| {
-            // Darwin skips zombie group members and can return EPERM for a
-            // sole unreaped leader. Only definite absence after a successful
-            // reap resolves that error; live or unobservable groups still fail.
-            !(_exit_observed
-                && status.is_ok()
-                && error.raw_os_error() == Some(libc::EPERM)
-                && inventory_group_is_absent(self.child.id() as libc::pid_t))
-        });
-        match signal_error {
-            Some(error) => Err(error),
-            None => status,
-        }
-    }
-}
-
-#[cfg(all(unix, any(target_os = "macos", test)))]
-fn inventory_group_is_absent(pgid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 is only an existence/permission query. A recycled PGID
-    // can make this proof fail conservatively, but receives no termination signal.
-    let result = unsafe { libc::kill(-pgid, 0) };
-    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
-#[cfg(unix)]
-impl Drop for InventoryProcess {
-    fn drop(&mut self) {
-        if self.owns_root {
-            let _ = self.terminate_and_reap();
-        }
     }
 }
 

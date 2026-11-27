@@ -5,6 +5,8 @@
 //! writes stay in `tachi-server`.
 
 pub mod authority;
+#[cfg(unix)]
+mod bounded_probe;
 pub mod certification;
 mod dsh;
 pub mod identity;

@@ -237,86 +237,36 @@ fn probe_codex_read_only_program(program: &std::path::Path) -> bool {
     probe_codex_program_with_timeout(program, std::time::Duration::from_secs(5))
 }
 
+/// What the help of `codex exec --help` may print before the probe gives up.
+#[cfg(unix)]
+const MAX_HELP_BYTES: usize = 64 * 1024;
+
+/// The vendor binary is run as it is: no shell around it, and so no exit
+/// protocol to read back. Vendor arguments are positional values, never
+/// interpolated shell source. What the CLI prints on stderr is not part of its
+/// help, as before.
 #[cfg(unix)]
 fn probe_codex_program_with_timeout(
     program: &std::path::Path,
     timeout: std::time::Duration,
 ) -> bool {
-    use std::io::Read;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-    // Keep an unreaped supervisor alive until all process-group signals finish.
-    // Vendor arguments are positional values, never interpolated shell source.
-    let Ok(mut child) = Command::new("/bin/sh")
-        .args(["-c", r#""$@" </dev/null; code=$?; printf '\nTACHI_CODEX_PROBE_EXIT=%s\n' "$code"; exec 1>&-; read -r hold"#, "tachi-codex-probe"])
-        .arg(program).args(["exec", "--help"])
-        .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-    else { return false };
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(65537).read_to_end(&mut bytes);
-        let _ = tx.send((result, bytes));
-    });
-    let output = rx.recv_timeout(timeout);
-    let timed_out = output.is_err();
-    // SAFETY: the group leader is our unreaped child (`child` and its piped
-    // stdin stay alive until `child.wait()`), so its PID/PGID cannot be
-    // reused. Stop-then-kill shrinks the fork-vs-kill window, `waitid(WNOWAIT)`
-    // pins the PGID until the leader exits, and bounded post-leader sweeps
-    // reap any grandchild forked just before the leader died (#1299).
-    let pgid = child.id() as libc::pid_t;
-    unsafe {
-        libc::kill(-pgid, libc::SIGSTOP);
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    loop {
-        let rc = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id() as libc::id_t,
-                &mut siginfo,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        if rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            break;
-        }
-    }
-    let mut output = output;
-    let sweep_deadline = std::time::Instant::now() + Duration::from_secs(1);
-    for round in 0..20 {
-        unsafe {
-            libc::kill(-pgid, libc::SIGSTOP);
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-        if output.is_err() {
-            output = rx.recv_timeout(Duration::from_millis(25));
-        } else if round >= 1 || std::time::Instant::now() >= sweep_deadline {
-            break;
-        } else {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    let _ = child.wait();
-    let output = output.or_else(|_| rx.recv_timeout(Duration::from_secs(1)));
-    if output.is_ok() {
-        let _ = reader.join();
-    }
-    let Ok((Ok(_), bytes)) = output else {
+    use crate::bounded_probe::{run_bounded_probe, ProbeLimits};
+    let mut command = std::process::Command::new(program);
+    command.args(["exec", "--help"]);
+    let Ok(output) = run_bounded_probe(
+        &mut command,
+        &ProbeLimits {
+            timeout,
+            stdout_bytes: MAX_HELP_BYTES,
+            stderr_bytes: None,
+        },
+    ) else {
         return false;
     };
-    if timed_out || bytes.len() > 65536 {
+    if !output.status.success() {
         return false;
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let Some(help) = text.strip_suffix("\nTACHI_CODEX_PROBE_EXIT=0\n") else {
-        return false;
-    };
-    codex_help_supports_read_only(help)
+    codex_help_supports_read_only(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn codex_help_supports_read_only(help: &str) -> bool {
@@ -358,28 +308,57 @@ fn binary_identity(program: &std::path::Path) -> BinaryIdentity {
     )
 }
 
+/// What `<program> --version` may print on one stream before the probe gives up.
+const MAX_VERSION_BYTES: usize = 64 * 1024;
+/// How long `<program> --version` may take.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// `<program> --version`, on a leash: a vendor binary that hangs must not hang
-/// the dispatch, so the probe runs on a worker thread and a timeout resolves to
-/// `None` (fail closed), not to a wait.
+/// the dispatch, and the timeout resolves to `None` (fail closed), not to a
+/// wait. On Unix the probe and its process group are reclaimed either way.
 fn run_version_probe(program: &std::path::Path) -> Option<String> {
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    probe_version_within(program, PROBE_TIMEOUT)
+}
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let program = program.to_path_buf();
-    std::thread::spawn(move || {
-        let output = std::process::Command::new(&program)
-            .arg("--version")
-            .output();
-        let _ = tx.send(output);
-    });
-
-    let output = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;
+fn probe_version_within(program: &std::path::Path, timeout: std::time::Duration) -> Option<String> {
+    let mut command = std::process::Command::new(program);
+    command.arg("--version");
+    let output = probe_version_output(&mut command, timeout)?;
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_version_output(&stdout)
+    parse_version_output(&String::from_utf8_lossy(&output.stdout))
         .or_else(|| parse_version_output(&String::from_utf8_lossy(&output.stderr)))
+}
+
+#[cfg(unix)]
+fn probe_version_output(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<crate::bounded_probe::ProbeOutput> {
+    crate::bounded_probe::run_bounded_probe(
+        command,
+        &crate::bounded_probe::ProbeLimits {
+            timeout,
+            stdout_bytes: MAX_VERSION_BYTES,
+            stderr_bytes: Some(MAX_VERSION_BYTES),
+        },
+    )
+    .ok()
+}
+
+/// Elsewhere there are no process groups to reclaim. There the probe keeps to
+/// a worker thread, and only its answer is bounded.
+#[cfg(not(unix))]
+fn probe_version_output(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(command.output());
+    });
+    rx.recv_timeout(timeout).ok()?.ok()
 }
 
 /// First `program` on `PATH` — the same resolution `Command::new("codex")` does,
@@ -421,6 +400,110 @@ mod tests {
         assert!(!probe_codex_read_only_program(std::path::Path::new(
             "/no/such/codex"
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_reads_either_stream_and_refuses_a_failing_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-probe-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, body, expected) in [
+            (
+                "on-stderr",
+                "printf 'codex-cli 9.8.7\\n' >&2",
+                Some("9.8.7"),
+            ),
+            ("on-stdout", "printf 'codex-cli 9.8.7\\n'", Some("9.8.7")),
+            ("failing", "printf 'codex-cli 9.8.7\\n'\nexit 3", None),
+        ] {
+            let program = root.join(name);
+            std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(
+                run_version_probe(&program),
+                expected.map(str::to_string),
+                "{name}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_gives_up_on_a_hanging_cli_and_leaves_nothing_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-probe-hang-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("leader");
+        let program = root.join("hanging");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 20\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_version_within(&program, std::time::Duration::from_secs(1)),
+            None
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the deadline must end the probe: {:?}",
+            started.elapsed()
+        );
+        // The script writes its pid as soon as it runs. A readable pid file
+        // means the CLI was there to be reclaimed. An absent one means the
+        // script was killed before it ran at all, so there is no witness (#2340).
+        let spawn_grace = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break Some(pid);
+            }
+            if std::time::Instant::now() >= spawn_grace {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        if let Some(pid) = pid {
+            // The CLI is the probe's own child and is reaped before the probe
+            // returns, so nothing of it may be left the moment the probe is
+            // done. A CLI left to itself would only end with its own 20 seconds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while unsafe { kill(pid, 0) } == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the hanging CLI (pid {pid}) outlived the probe"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
