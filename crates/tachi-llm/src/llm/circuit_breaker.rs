@@ -74,10 +74,10 @@ impl CircuitBreaker {
     /// probe was still in flight, and read a cooldown left over from an
     /// earlier open phase.
     ///
-    /// One probe per half-open phase. The slot is cleared when the breaker is
-    /// opened again, so a request left over from an earlier phase may still
-    /// be running when the next phase's probe is admitted; it cannot hold the
-    /// only slot for a whole cooldown.
+    /// One probe at a time per half-open phase. The slot is cleared when the
+    /// breaker is opened again, so a request left over from an earlier phase
+    /// may still be running when the next phase's probe is admitted; it
+    /// cannot hold the only slot for a whole cooldown.
     fn enter(&self) -> Entry {
         loop {
             if *self.inner.state.read().unwrap_or_else(|e| e.into_inner()) == BreakerState::Closed {
