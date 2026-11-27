@@ -262,13 +262,44 @@ fn probe_codex_program_with_timeout(
     });
     let output = rx.recv_timeout(timeout);
     let timed_out = output.is_err();
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    // SAFETY: the group leader is our unreaped child, so its PID cannot be
-    // reused. Keep its stdin open until signaling and reaping have completed.
+    // SAFETY: the group leader is our unreaped child (`child` and its piped
+    // stdin stay alive until `child.wait()`), so its PID/PGID cannot be
+    // reused. Stop-then-kill shrinks the fork-vs-kill window, `waitid(WNOWAIT)`
+    // pins the PGID until the leader exits, and bounded post-leader sweeps
+    // reap any grandchild forked just before the leader died (#1299).
+    let pgid = child.id() as libc::pid_t;
     unsafe {
-        kill(-(child.id() as i32), 9);
+        libc::kill(-pgid, libc::SIGSTOP);
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut siginfo,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+    }
+    let mut output = output;
+    let sweep_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    for round in 0..20 {
+        unsafe {
+            libc::kill(-pgid, libc::SIGSTOP);
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+        if output.is_err() {
+            output = rx.recv_timeout(Duration::from_millis(25));
+        } else if round >= 1 || std::time::Instant::now() >= sweep_deadline {
+            break;
+        } else {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     let _ = child.wait();
     let output = output.or_else(|_| rx.recv_timeout(Duration::from_secs(1)));
