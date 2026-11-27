@@ -24,6 +24,18 @@ standalone CLI cannot impersonate a bound agent. API environment values override
 the declared child variables; missing values fail before spawn. The rest of the
 parent environment is inherited, so this facility is not an environment sandbox.
 
+A worker launched without the native sandbox inherits the daemon's environment,
+including the provider keys the daemon was started with; in the default and
+`fill_missing` modes those keys keep precedence over a Vault value of the same
+name. The daemon marker `TACHI_DAEMON` is withheld from every worker, because a
+process that inherits it stops forwarding its own writes to the daemon.
+
+A Build Broker build executes the ticket's source code instead, so it inherits
+none of the daemon's credentials: a variable whose name ends in `_API_KEY`,
+`_TOKEN`, `_SECRET`, `_PASSWORD` or `_CREDENTIALS` is withheld unless it sits
+under the `CARGO_` or `RUSTUP_` toolchain namespace. `PATH`, proxy settings and
+`SSH_AUTH_SOCK` stay inherited.
+
 ## Retired scope
 
 The earlier inventory of harness login/config files was exploratory. It no

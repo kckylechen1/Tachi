@@ -24,8 +24,28 @@
 //! re-point a source sha), while the *lifecycle* is allowed to move — which is
 //! the only thing a queue can do with a ticket that keeps failing.
 
+use memcore::error::MemoryError;
+use memcore::store::state::StateTransaction;
 use memcore::MemoryStore;
 use serde::{Deserialize, Serialize};
+
+/// The store and one of its state transactions answer the same reads, so a
+/// decision can be taken inside the write lock that will also carry its write.
+pub(crate) trait StateReader {
+    fn state(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError>;
+}
+
+impl StateReader for MemoryStore {
+    fn state(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError> {
+        self.get_state_kv(namespace, key)
+    }
+}
+
+impl StateReader for StateTransaction<'_> {
+    fn state(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError> {
+        self.get_state(namespace, key)
+    }
+}
 
 /// `hard_state` namespace for the immutable ticket payloads.
 pub const TICKET_NS: &str = "build_ticket";
@@ -289,11 +309,11 @@ pub fn submit_ticket(store: &MemoryStore, ticket: &BuildTicket) -> Result<(), St
 
 /// Load a ticket by id.
 pub(crate) fn load_ticket(
-    store: &MemoryStore,
+    source: &impl StateReader,
     ticket_id: &str,
 ) -> Result<Option<BuildTicket>, String> {
-    let row = store
-        .get_state_kv(TICKET_NS, ticket_id)
+    let row = source
+        .state(TICKET_NS, ticket_id)
         .map_err(|e| format!("load ticket {ticket_id}: {e}"))?;
     match row {
         None => Ok(None),
@@ -329,11 +349,11 @@ pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, Stri
 
 /// Read a ticket's lifecycle record. `None` = never attempted, never cancelled.
 pub(crate) fn load_status(
-    store: &MemoryStore,
+    source: &impl StateReader,
     ticket_id: &str,
 ) -> Result<Option<TicketStatus>, String> {
-    let row = store
-        .get_state_kv(STATUS_NS, ticket_id)
+    let row = source
+        .state(STATUS_NS, ticket_id)
         .map_err(|e| format!("load ticket status {ticket_id}: {e}"))?;
     match row {
         None => Ok(None),
@@ -344,8 +364,11 @@ pub(crate) fn load_status(
 }
 
 /// The effective state of a ticket (a missing status row = `Queued`).
-pub(crate) fn ticket_state(store: &MemoryStore, ticket_id: &str) -> Result<TicketState, String> {
-    Ok(load_status(store, ticket_id)?
+pub(crate) fn ticket_state(
+    source: &impl StateReader,
+    ticket_id: &str,
+) -> Result<TicketState, String> {
+    Ok(load_status(source, ticket_id)?
         .map(|s| s.state)
         .unwrap_or(TicketState::Queued))
 }
@@ -415,41 +438,42 @@ pub enum CancelOutcome {
 
 /// Cancel a queued ticket — a terminal state the executor never picks up.
 ///
-/// Refused (as an error, not a silent no-op) when the ticket already has a
-/// receipt: the build ran, and "cancelling" a finished build would only mean
-/// lying about it. The *running* case is refused by the caller
-/// ([`super::cancel_queued_ticket`]), which can see the executor slot: killing a
-/// live cargo is `build abandon`'s job, and only after its process is dead.
+/// Refused (as an error, not a silent no-op) by the caller when the ticket
+/// already has a receipt: the build ran, and "cancelling" a finished build
+/// would only mean lying about it. The *running* case is refused by the caller
+/// too ([`super::cancel_queued_ticket`]), which can see the executor slot:
+/// killing a live cargo is `build abandon`'s job, and only after its process
+/// is dead. The write lands in `tx`, so those refusals and the cancellation
+/// are one decision.
 pub(crate) fn cancel_ticket(
-    store: &MemoryStore,
+    tx: &StateTransaction<'_>,
     ticket_id: &str,
     reason: &str,
 ) -> Result<CancelOutcome, String> {
-    if load_ticket(store, ticket_id)?.is_none() {
+    if load_ticket(tx, ticket_id)?.is_none() {
         return Ok(CancelOutcome::NotFound);
     }
-    if let Some(status) = load_status(store, ticket_id)? {
+    let previous = load_status(tx, ticket_id)?;
+    if let Some(status) = previous.as_ref() {
         if status.state.is_terminal() {
             return Ok(CancelOutcome::AlreadyTerminal {
                 state: status.state,
             });
         }
     }
-    let attempts = load_status(store, ticket_id)?
-        .map(|s| s.attempts)
-        .unwrap_or(0);
-    write_status(
-        store,
-        &TicketStatus {
-            ticket_id: ticket_id.to_string(),
-            state: TicketState::Cancelled,
-            attempts,
-            last_error: Some(truncate(reason, 1_000)),
-            updated_at: jiff::Timestamp::now().to_string(),
-            expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
-                .to_string(),
-        },
-    )?;
+    let status = TicketStatus {
+        ticket_id: ticket_id.to_string(),
+        state: TicketState::Cancelled,
+        attempts: previous.map(|s| s.attempts).unwrap_or(0),
+        last_error: Some(truncate(reason, 1_000)),
+        updated_at: jiff::Timestamp::now().to_string(),
+        expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
+            .to_string(),
+    };
+    let value =
+        serde_json::to_string(&status).map_err(|e| format!("serialize ticket status: {e}"))?;
+    tx.set_state(STATUS_NS, ticket_id, &value)
+        .map_err(|e| format!("write ticket status {ticket_id}: {e}"))?;
     Ok(CancelOutcome::Cancelled)
 }
 

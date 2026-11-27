@@ -107,8 +107,22 @@ expand the writable mount boundary. A bounded probe must succeed; an installed
 binary alone is insufficient.
 
 On macOS, sandbox-exec denies filesystem writes except the canonical runtime and
-the optional managed worktree, and denies process-group control escape. Before
-exec the runner closes inheritance of non-stdio descriptors after applying its
+the optional managed worktree, and denies process-group control escape. It also
+refuses every host service except four a native adapter was measured to need:
+account lookups (`com.apple.system.opendirectoryd.libinfo`, without which codex
+cannot synchronize its managed preferences), directory change notifications
+(`com.apple.FSEvents`, without which opencode cannot start its file watcher),
+and the keychain and certificate evaluators behind HTTPS
+(`com.apple.SecurityServer`, `com.apple.trustd.agent`). cfprefsd, LaunchServices
+and launchd stay refused: through them a confined child had a preference plist
+written under the user's Library and started an unconfined helper through `open`.
+So do the pasteboard and the notification services, which carry the owner's
+desktop state. Apple Events are refused by a rule of their own, because denying
+their service lookup leaves the send itself allowed; a sent event leaves the
+sandbox and is held back only by the host's consent for the calling app. The two
+keychain evaluators still act for the user as they do for any process of that
+user; the confinement is not a secrets boundary.
+Before exec the runner closes inheritance of non-stdio descriptors after applying its
 anchored-directory hooks. Linux uses close_range with CLOEXEC where supported,
 or enumerates the actual descriptors through procfs on older kernels. macOS
 uses a bounded proc_pidinfo descriptor snapshot and refuses a full 4096-entry

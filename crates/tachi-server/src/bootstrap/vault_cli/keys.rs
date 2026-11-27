@@ -174,7 +174,8 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
         .into());
     }
     let is_new = existing.is_none();
-    if is_new && memcore::is_lane_config_url_name(name) {
+    // New or replacing: a lane URL never takes a credential in the endpoint.
+    if memcore::is_lane_config_url_name(name) {
         if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&secret_value) {
             return Err(format!(
                 "Vault name '{name}' value embeds a credential in the endpoint ({leak}); refusing write"

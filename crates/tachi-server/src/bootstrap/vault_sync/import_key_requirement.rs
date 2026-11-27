@@ -8,7 +8,7 @@ use std::path::Path;
 ///
 /// The lower import path remains authoritative. This preflight only avoids an
 /// unnecessary password/Keychain read for untracked opaque entries while
-/// preserving the key requirement for lane bindings, new lane URLs, and
+/// preserving the key requirement for lane bindings, lane URLs, and
 /// entries that currently own durable account custody.
 pub(in crate::bootstrap) fn unsigned_import_requires_vault_key(
     global_db_path: &Path,
@@ -28,15 +28,16 @@ pub(in crate::bootstrap) fn unsigned_import_requires_vault_key(
         return Ok(true);
     }
 
-    // A new lane URL is checked for embedded credentials by the validating
-    // import path, so it needs the key even when it is not account-bound. A
-    // missing target DB means every incoming URL is new; no store open is
-    // needed for the common fresh-target case.
-    if !global_db_path.exists() {
-        return Ok(bundle
-            .entries
-            .iter()
-            .any(|entry| memcore::is_lane_config_url_name(&entry.name)));
+    // Every lane URL is checked for embedded credentials by the validating
+    // import path, the ones that replace a local entry included, so each needs
+    // the key. A missing target DB has nothing to replace and no tracked
+    // account: no store open is needed for the common fresh-target case.
+    let carries_lane_url = bundle
+        .entries
+        .iter()
+        .any(|entry| memcore::is_lane_config_url_name(&entry.name));
+    if carries_lane_url || !global_db_path.exists() {
+        return Ok(carries_lane_url);
     }
 
     let store = open_cli_store_read_only(&global_db_path.to_path_buf())?;
@@ -44,13 +45,6 @@ pub(in crate::bootstrap) fn unsigned_import_requires_vault_key(
         .begin_vault_read_transaction_shared()
         .map_err(|e| format!("begin vault import classification snapshot: {e}"))?;
     for entry in &bundle.entries {
-        if memcore::is_lane_config_url_name(&entry.name)
-            && !transaction
-                .vault_entry_exists(&entry.name)
-                .map_err(|e| format!("read imported lane URL metadata: {e}"))?
-        {
-            return Ok(true);
-        }
         if transaction
             .vault_account_entry_is_tracked(&entry.name)
             .map_err(|e| format!("read imported account custody: {e}"))?

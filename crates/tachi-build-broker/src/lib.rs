@@ -71,12 +71,13 @@ mod tests;
 use std::path::PathBuf;
 
 use memcore::{MemoryStore, ResourceKind, ResourceState};
+use rusqlite::TransactionBehavior;
 use serde::{Deserialize, Serialize};
 
 use crate::runner::{BuildOutcome, BuildRunner};
-use crate::slot::SlotOutcome;
+use crate::slot::Claim;
 use crate::target::{LineageOracle, TargetGeneration, TargetPlan, TargetSlotState};
-use crate::ticket::{BuildTicket, CancelOutcome, TicketState, TicketStatus};
+use crate::ticket::{BuildTicket, CancelOutcome, StateReader, TicketState, TicketStatus};
 
 /// `hard_state` namespace for build receipts; key = ticket id.
 pub const RECEIPT_NS: &str = "build_receipt";
@@ -130,11 +131,11 @@ pub struct BuildReceipt {
 
 /// Read a ticket's receipt, if the build has already run.
 pub(crate) fn load_receipt(
-    store: &MemoryStore,
+    source: &impl StateReader,
     ticket_id: &str,
 ) -> Result<Option<BuildReceipt>, String> {
-    let row = store
-        .get_state_kv(RECEIPT_NS, ticket_id)
+    let row = source
+        .state(RECEIPT_NS, ticket_id)
         .map_err(|e| format!("load receipt {ticket_id}: {e}"))?;
     match row {
         None => Ok(None),
@@ -214,7 +215,8 @@ impl DrainStep {
 /// build on the machine ever ran again.
 ///
 /// `slot_busy` is not a failure and is never booked against a ticket: nothing
-/// was attempted, and the caller simply comes back later.
+/// was attempted, and the caller simply comes back later. A ticket that left
+/// the queue after the list was taken is not booked either.
 pub fn run_next(
     store: &mut MemoryStore,
     seat: &ExecutorSeat,
@@ -245,6 +247,11 @@ pub fn run_next(
                 tracing::debug!(error = %err, "build broker: executor slot busy, deferring");
                 step.slot_busy = true;
                 return Ok(step);
+            }
+            // Nothing was attempted, and the terminal row keeps `pending_tickets`
+            // from listing the ticket again.
+            Err(err) if err.starts_with(LEFT_QUEUE) => {
+                tracing::debug!(error = %err, "build broker: ticket left the queue; skipping");
             }
             Err(err) => {
                 let status = ticket::record_failed_attempt(store, &t.ticket_id, &err)?;
@@ -282,18 +289,25 @@ pub fn run_next(
 ///   now. Cancelling the queue entry would not stop it, and would let the next
 ///   ticket into a target dir a live compiler is writing to. Killing that build
 ///   is `build abandon`'s job, and only once the process is actually dead.
+///
+/// Both checks and the cancellation are one write transaction, so they hold the
+/// executor to the same two orders it can see: cancel first and the claim
+/// refuses, claim first and the cancel refuses.
 pub fn cancel_queued_ticket(
-    store: &MemoryStore,
+    store: &mut MemoryStore,
     ticket_id: &str,
     reason: &str,
 ) -> Result<CancelOutcome, String> {
-    if load_receipt(store, ticket_id)?.is_some() {
+    let tx = store
+        .begin_state_transaction(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin ticket cancellation: {e}"))?;
+    if load_receipt(&tx, ticket_id)?.is_some() {
         return Err(format!(
             "build ticket '{ticket_id}' already has a receipt: the build ran, so there is nothing \
              to cancel (#894 S2c)"
         ));
     }
-    if let Some(holder) = slot::current_holder(store)? {
+    if let Some(holder) = slot::holder_in(&tx)? {
         if holder.ticket_id == ticket_id {
             return Err(format!(
                 "build ticket '{ticket_id}' is holding the executor slot (pid {}): its cargo may \
@@ -304,15 +318,21 @@ pub fn cancel_queued_ticket(
             ));
         }
     }
-    ticket::cancel_ticket(store, ticket_id, reason)
+    let outcome = ticket::cancel_ticket(&tx, ticket_id, reason)?;
+    tx.commit()
+        .map_err(|e| format!("commit ticket cancellation: {e}"))?;
+    Ok(outcome)
 }
 
 const SLOT_BUSY: &str = "executor slot busy";
+/// A ticket that became terminal between the queue read and the claim.
+pub(crate) const LEFT_QUEUE: &str = "ticket left the queue";
 
 /// Run one ticket through the seat.
 ///
 /// Order is load-bearing:
-/// 1. take the machine's single executor slot (or bail — never a second cargo);
+/// 1. claim the machine's single executor slot for this ticket (or bail — never
+///    a second cargo, never a ticket that was cancelled meanwhile);
 /// 2. plan the target dir against its generation (the poisoning defense);
 /// 3. clear/release-quarantine the target if the plan says so;
 /// 4. put the seat's fixed checkout on the ticket's source;
@@ -330,21 +350,22 @@ pub(crate) fn execute_ticket(
     runner: &dyn BuildRunner,
     lineage: &dyn LineageOracle,
 ) -> Result<BuildReceipt, String> {
-    if let Some(existing) = load_receipt(store, &ticket.ticket_id)? {
-        // Already built. Receipts are write-once, so re-running would produce a
-        // result nobody can record — and would burn the seat on a done ticket.
-        return Ok(existing);
-    }
-
-    match slot::acquire_slot(store, &ticket.ticket_id)? {
-        SlotOutcome::Acquired => {}
-        SlotOutcome::Busy { holder } => {
+    match slot::claim_for_execution(store, &ticket.ticket_id)? {
+        Claim::AlreadyBuilt(existing) => return Ok(existing),
+        Claim::LeftQueue(state) => {
+            return Err(format!(
+                "{LEFT_QUEUE}: ticket '{}' was {state:?} before its build was claimed (#894 S2c)",
+                ticket.ticket_id
+            ));
+        }
+        Claim::Busy { holder } => {
             return Err(format!(
                 "{SLOT_BUSY}: held by ticket '{}' (pid {}) since {}. This machine runs exactly \
                  one cargo at a time (#894 S2c)",
                 holder.ticket_id, holder.pid, holder.acquired_at
             ));
         }
+        Claim::Held => {}
     }
 
     let result = execute_holding_slot(store, seat, ticket, runner, lineage);

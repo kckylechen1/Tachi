@@ -157,7 +157,7 @@ pub(crate) fn resolve_route_evidence(
     let window_days = window_days.clamp(1, rules::MAX_WINDOW_DAYS);
     let since = rules::window_since(&now, window_days)
         .ok_or_else(|| format!("route_projection: cannot derive a window start from {now}"))?;
-    let gates = eligible_candidate_set(risk, available_profiles);
+    let mut gates = eligible_candidate_set(risk, available_profiles);
 
     let (observations, route_policy_rows) = server.with_global_store_read(|store| {
         let observations =
@@ -200,14 +200,48 @@ pub(crate) fn resolve_route_evidence(
         })
         .collect::<Vec<_>>();
 
-    let staff_config =
-        tachi_dispatch::load_staff_config(&server.tachi_home_dir()).unwrap_or_default();
+    // The staff seat configuration decides which model an OpenCode native seat
+    // runs. When it cannot be trusted (ownership or mode, unparsable content,
+    // an unknown seat) those seats must not fall back to their built-in model:
+    // the projection would score, and a recommendation could then name, a
+    // model the operator replaced. They leave the eligible set with the reason
+    // recorded; every other seat is unaffected.
+    let staff_config = match tachi_dispatch::load_staff_config(&server.tachi_home_dir()) {
+        Ok(config) => Some(config),
+        Err(error) => {
+            let untrusted: Vec<String> = gates
+                .eligible
+                .iter()
+                .filter(|name| seat_model_comes_from_staff_config(name))
+                .cloned()
+                .collect();
+            gates.eligible.retain(|name| !untrusted.contains(name));
+            if !untrusted.is_empty() {
+                gates.excluded.extend(
+                    untrusted
+                        .into_iter()
+                        .map(|name| (name, REASON_STAFF_CONFIG_NOT_TRUSTED)),
+                );
+                gates.notes.push(format!(
+                    "staff configuration is not trusted ({error}); the seats it configures are \
+                     excluded instead of being scored under their built-in models"
+                ));
+            }
+            None
+        }
+    };
     let mut current_models = std::collections::BTreeMap::new();
     for profile_name in &gates.eligible {
         if let Some(profile_def) = tachi_dispatch::resolve_dispatch_profile(profile_name) {
-            if let Some(model) =
-                tachi_dispatch::resolved_profile_model_with_config(profile_def, &staff_config)
-            {
+            // Without a trusted configuration only seats whose model it never
+            // decides are left here.
+            let model = match &staff_config {
+                Some(config) => {
+                    tachi_dispatch::resolved_profile_model_with_config(profile_def, config)
+                }
+                None => tachi_dispatch::profile_resolved_model(profile_def),
+            };
+            if let Some(model) = model {
                 current_models.insert(profile_name.clone(), model);
             }
         }
@@ -354,6 +388,14 @@ pub(crate) struct EligibleCandidates {
 
 const REASON_BLOCKED: &str = "blocked_by_risk_classifier";
 const REASON_NOT_REQUIRED: &str = "not_required_for_risk_class";
+pub(crate) const REASON_STAFF_CONFIG_NOT_TRUSTED: &str = "staff_configuration_not_trusted";
+
+/// Whether the staff seat configuration, not the profile alone, decides which
+/// model this seat runs.
+fn seat_model_comes_from_staff_config(profile_name: &str) -> bool {
+    tachi_dispatch::resolve_dispatch_profile(profile_name)
+        .is_some_and(tachi_dispatch::seat_model_comes_from_staff_config)
+}
 
 /// Prune the candidate set with the EXISTING admission/required/blocked
 /// logic, before any scoring touches it (design D6: "historical score can

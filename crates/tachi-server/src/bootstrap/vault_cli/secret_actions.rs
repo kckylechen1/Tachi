@@ -160,7 +160,10 @@ pub(crate) async fn run_secret_action_with_reader(
                 ensure_direct_cli_entry_unrestricted(existing)?;
             }
             let is_new = existing_entry.is_none();
-            if is_new && memcore::is_lane_config_url_name(&name) {
+            // New or replacing: a lane URL never takes a credential in the
+            // endpoint. Leaving one in the Vault only defers the refusal to the
+            // next provider refresh.
+            if memcore::is_lane_config_url_name(&name) {
                 if let Some(leak) =
                     memcore::catalog::endpoint::endpoint_credential_leak(&secret_value)
                 {
@@ -924,9 +927,12 @@ mod tests {
         );
     }
 
+    /// A lane URL is refused when it is replaced, not only when it is
+    /// created: a credential in the endpoint would otherwise sit in the Vault
+    /// until the next provider refresh refused it.
     #[cfg(unix)]
     #[tokio::test]
-    async fn direct_cli_existing_lane_url_uses_the_frozen_publication_boundary() {
+    async fn direct_cli_overwriting_a_lane_url_refuses_a_credential_in_the_endpoint() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -970,14 +976,21 @@ mod tests {
             value_stdin: true,
             rebind: false,
         };
-        run_secret_action_with_reader(
+        let error = run_secret_action_with_reader(
             &db_path,
             temp.path(),
             action,
             &mut Cursor::new(b"https://user:pass@proxy.example.test/v1/chat\n".to_vec()),
         )
         .await
-        .expect("existing URL update is stored for the publication boundary to reject");
+        .expect_err("a lane URL with a credential in its endpoint must be refused")
+        .to_string();
+        assert!(
+            error.contains("embeds a credential in the endpoint")
+                && error.contains("refusing write"),
+            "{error}"
+        );
+        assert!(!error.contains("user:pass"), "{error}");
 
         let retained = open_cli_store_read_only(&db_path)
             .expect("open fixture read-only")
@@ -986,10 +999,10 @@ mod tests {
             .expect("URL remains");
         let decrypted =
             crate::vault_crypto::decrypt(key.bytes(), &retained.encrypted_value, &retained.nonce)
-                .expect("decrypt updated URL");
+                .expect("decrypt retained URL");
         assert_eq!(
             String::from_utf8(decrypted).expect("UTF-8 URL"),
-            "https://user:pass@proxy.example.test/v1/chat"
+            "https://api.example.test/v1/chat"
         );
     }
 

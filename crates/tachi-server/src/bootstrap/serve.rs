@@ -97,6 +97,33 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
     Ok(runtime)
 }
 
+fn load_project_env_file(path: &Path, override_existing: bool) {
+    // Directories (e.g. `.env/`) can be opened read-only on Unix and repeatedly
+    // yield EISDIR from dotenvy's iterator; require a regular file and abort on
+    // iterator errors to match `dotenvy::from_path`.
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return;
+    }
+    let Ok(iter) = dotenvy::from_path_iter(path) else {
+        return;
+    };
+    for item in iter {
+        let Ok((key, value)) = item else {
+            break;
+        };
+        if crate::utils::is_execution_environment_name(&key) {
+            tracing::warn!(
+                "[startup] ignored execution-environment variable '{key}' from {}",
+                path.display()
+            );
+            continue;
+        }
+        if override_existing || std::env::var_os(&key).is_none() {
+            std::env::set_var(&key, &value);
+        }
+    }
+}
+
 fn load_env_files(
     home: &Path,
     app_home: &Path,
@@ -114,14 +141,14 @@ fn load_env_files(
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
 
     if load_project_local_env {
-        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
-        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+        load_project_env_file(&PathBuf::from(".tachi/config.env"), true);
+        load_project_env_file(&PathBuf::from(".sigil/config.env"), true);
 
         if let Ok(cwd) = std::env::current_dir() {
-            let _ = dotenvy::from_path(cwd.join(".env"));
+            load_project_env_file(&cwd.join(".env"), false);
             if let Some(root) = git_root {
                 if root != cwd.as_path() {
-                    let _ = dotenvy::from_path(root.join(".env"));
+                    load_project_env_file(&root.join(".env"), false);
                 }
             }
         }

@@ -540,3 +540,118 @@ fn invalid_staff_json_isolates_opencode_without_breaking_codex_or_catalog() {
         .unwrap_err();
     assert!(err.contains("opencode.providers"), "{err}");
 }
+
+/// The route projection scores every seat under its effective model. An
+/// OpenCode native seat takes that model from `staff.json`; when the file
+/// cannot be trusted the seat has none, and it used to fall back to the
+/// built-in one and stay recommendable.
+#[cfg(unix)]
+#[test]
+fn untrusted_staff_json_removes_opencode_native_seats_from_the_route_projection() {
+    use crate::test_support::EnvRestore;
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let available = ["opencode_review", "codex_sol_review"].map(String::from);
+    let risk = tachi_dispatch::DispatchRisk {
+        task_type: "review_request".to_string(),
+        risk: "medium".to_string(),
+        reasons: Vec::new(),
+        required_profiles: Vec::new(),
+        blocked_profiles: Vec::new(),
+    };
+    let codex = tachi_dispatch::resolve_dispatch_profile("codex_sol_review").unwrap();
+    let project = |server: &crate::MemoryServer| {
+        crate::agent_eval::projection::resolve_route_evidence(server, &risk, &available, 50, 7)
+            .unwrap()
+    };
+    let write_staff_json = |server: &crate::MemoryServer, body: &str, mode: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        let path = server.tachi_home_dir().join("staff.json");
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+
+    for (label, body, mode, expected_error) in [
+        // A permission violation.
+        (
+            "group-writable file",
+            r#"{"seats":{"opencode_review":{"default_model":"deepseek/deepseek-flash"}}}"#,
+            0o660,
+            "group- or world-writable",
+        ),
+        // A trusted file whose content is refused.
+        (
+            "provider outside the allowlist",
+            r#"{"opencode":{"providers":["openai"]},"seats":{"opencode_review":{"default_model":"deepseek/deepseek-flash"}}}"#,
+            0o600,
+            "opencode.providers",
+        ),
+    ] {
+        let temp_home = tempfile::tempdir().unwrap();
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let server = crate::staffing_ops::tests::test_server();
+        assert_eq!(server.tachi_home_dir(), temp_home.path());
+        write_staff_json(&server, body, mode);
+
+        let evidence = project(&server);
+        assert!(
+            evidence
+                .gates
+                .eligible
+                .contains(&"codex_sol_review".to_string()),
+            "{label}: a seat the staff configuration does not decide stays eligible"
+        );
+        assert!(
+            !evidence
+                .gates
+                .eligible
+                .iter()
+                .any(|name| name == "opencode_review"),
+            "{label}: the OpenCode native seat is not scored under a built-in model"
+        );
+        assert!(
+            evidence.gates.excluded.contains(&(
+                "opencode_review".to_string(),
+                crate::agent_eval::projection::REASON_STAFF_CONFIG_NOT_TRUSTED
+            )),
+            "{label}: the exclusion names its reason: {:?}",
+            evidence.gates.excluded
+        );
+        assert!(
+            evidence
+                .gates
+                .notes
+                .iter()
+                .any(|note| note.contains(expected_error)),
+            "{label}: the load error is reported: {:?}",
+            evidence.gates.notes
+        );
+        assert!(!evidence.current_models.contains_key("opencode_review"));
+        assert_eq!(
+            evidence.current_models.get("codex_sol_review"),
+            tachi_dispatch::profile_resolved_model(codex).as_ref(),
+            "{label}: the Codex seat keeps its own model"
+        );
+    }
+
+    // A trusted file keeps the seat, under the configured model.
+    let temp_home = tempfile::tempdir().unwrap();
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let server = crate::staffing_ops::tests::test_server();
+    write_staff_json(
+        &server,
+        r#"{"opencode":{"providers":["deepseek"]},"seats":{"opencode_review":{"default_model":"deepseek/deepseek-flash"}}}"#,
+        0o600,
+    );
+    let evidence = project(&server);
+    assert!(evidence
+        .gates
+        .eligible
+        .contains(&"opencode_review".to_string()));
+    assert_eq!(
+        evidence.current_models.get("opencode_review").unwrap(),
+        "deepseek/deepseek-flash"
+    );
+}

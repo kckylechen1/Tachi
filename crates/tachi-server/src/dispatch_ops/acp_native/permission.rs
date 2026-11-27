@@ -228,7 +228,6 @@ fn interactive_deny_option(params: &Value) -> Option<String> {
     unique_option_id(options, option)
 }
 
-#[cfg(any(unix, windows))]
 fn unique_option_id(options: &[Value], option: &Value) -> Option<String> {
     let id = option["optionId"]
         .as_str()
@@ -275,21 +274,20 @@ fn cancelled_outcome() -> Value {
 /// ACP-legal way to positively approve, so the caller falls back to the
 /// `cancelled` outcome — the same legal-refusal shape DENY uses when it has
 /// nothing to select either.
+///
+/// The response carries only the option's ID, so an ID that another option
+/// also answers to is skipped for the next candidate, exactly as the
+/// interactive path does: a denial could otherwise be read as the approval
+/// sharing its ID.
 fn select_allow_option(params: &Value) -> Option<String> {
     let options = params.get("options").and_then(Value::as_array)?;
     for wanted_kind in ["allow_once", "allow_always"] {
-        for option in options {
-            let Some(kind) = option.get("kind").and_then(Value::as_str) else {
-                continue;
-            };
-            if kind == wanted_kind {
-                if let Some(id) = option
-                    .get("optionId")
-                    .or_else(|| option.get("id"))
-                    .and_then(Value::as_str)
-                {
-                    return Some(id.to_string());
-                }
+        for option in options
+            .iter()
+            .filter(|option| option.get("kind").and_then(Value::as_str) == Some(wanted_kind))
+        {
+            if let Some(id) = unique_option_id(options, option) {
+                return Some(id);
             }
         }
     }
@@ -305,18 +303,14 @@ fn select_allow_option(params: &Value) -> Option<String> {
 /// response that does not require a reject-kind option to exist.
 fn select_deny_option(params: &Value) -> Option<String> {
     let options = params.get("options").and_then(Value::as_array)?;
-    for option in options {
-        let Some(kind) = option.get("kind").and_then(Value::as_str) else {
-            continue;
-        };
-        if matches!(kind, "reject_once" | "reject_always") {
-            if let Some(id) = option
-                .get("optionId")
-                .or_else(|| option.get("id"))
-                .and_then(Value::as_str)
-            {
-                return Some(id.to_string());
-            }
+    for option in options.iter().filter(|option| {
+        matches!(
+            option.get("kind").and_then(Value::as_str),
+            Some("reject_once" | "reject_always")
+        )
+    }) {
+        if let Some(id) = unique_option_id(options, option) {
+            return Some(id);
         }
     }
     None

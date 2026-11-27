@@ -1238,3 +1238,17 @@ fn emit_mcp_tool_audit_logs_structured_fields_without_arguments() {
     assert!(output.contains("action=briefing"), "{output}");
     assert!(output.contains("ok=true"), "{output}");
 }
+
+#[test]
+fn session_identity_debug_never_shows_the_proxy_token() {
+    let mut identity = HttpSessionIdentity::default();
+    identity.internal_proxy_token = Some("owner-proxy-capability".to_string());
+    identity.project = Some("tachi".to_string());
+    let rendered = format!("{identity:?}");
+    assert!(!rendered.contains("owner-proxy-capability"), "{rendered}");
+    assert!(
+        rendered.contains("internal_proxy_token: Some([REDACTED])"),
+        "{rendered}"
+    );
+    assert!(rendered.contains(r#""tachi""#), "{rendered}");
+}

@@ -1,6 +1,4 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
+use super::cleanup::{inspect_target_file, TargetInspection};
 use super::managed::{managed_materialization_content_hash, read_managed_materialization};
 use super::plan::{materializer_has_file_target, plan_credential_materialization_with_run_dir};
 use super::safety::is_high_risk_credential_target;
@@ -8,8 +6,9 @@ use super::types::{
     CredentialDoctorIssue, CredentialDoctorReport, CredentialDoctorSummary, CredentialProfile,
 };
 use memcore::MemoryStore;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+const MAX_DOCTOR_TARGET_BYTES: usize = 4 * 1024 * 1024;
 
 fn is_secretish_config_key(key: &str) -> bool {
     let normalized = key
@@ -57,10 +56,10 @@ fn config_contains_plaintext_secret(value: &serde_json::Value) -> bool {
     }
 }
 
-fn target_json_contains_plaintext_secret(target: &Path) -> Result<bool, String> {
-    let raw = fs::read_to_string(target)
+fn target_json_bytes_contain_plaintext_secret(target: &Path, bytes: &[u8]) -> Result<bool, String> {
+    let raw = std::str::from_utf8(bytes)
         .map_err(|e| format!("read credential config target '{}': {e}", target.display()))?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
+    let parsed: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| format!("parse credential config target '{}': {e}", target.display()))?;
     Ok(config_contains_plaintext_secret(&parsed))
 }
@@ -170,59 +169,73 @@ pub fn doctor_credential_profile(
                     target: Some(step.target.clone()),
                 });
             }
-            let target_metadata = fs::metadata(&target).ok();
-            if target_metadata.is_none() {
-                if managed
-                    .as_ref()
-                    .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
-                {
+            match inspect_target_file(&target, run_dir, MAX_DOCTOR_TARGET_BYTES) {
+                TargetInspection::Missing => {
+                    if managed
+                        .as_ref()
+                        .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                    {
+                        issues.push(CredentialDoctorIssue {
+                            severity: "high".to_string(),
+                            code: "managed_target_missing".to_string(),
+                            message: format!(
+                                "target '{}' was previously materialized by Tachi but no longer exists",
+                                target.display()
+                            ),
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        });
+                    }
+                    continue;
+                }
+                TargetInspection::UntrustedEntry { reason } => {
                     issues.push(CredentialDoctorIssue {
                         severity: "high".to_string(),
-                        code: "managed_target_missing".to_string(),
+                        code: "managed_target_untrusted_entry".to_string(),
                         message: format!(
-                            "target '{}' was previously materialized by Tachi but no longer exists",
+                            "refusing to inspect credential target '{}': {reason}",
                             target.display()
                         ),
                         source: Some(step.resolved_secret.clone()),
                         target: Some(step.target.clone()),
                     });
+                    continue;
                 }
-                continue;
-            }
-            if let Some(meta) = target_metadata {
-                let mut managed_target_readable = true;
-                if let Some(managed) = managed
-                    .as_ref()
-                    .filter(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
-                {
-                    match fs::read_to_string(&target) {
-                        Ok(current) => {
-                            let current_hash = managed_materialization_content_hash(
-                                profile_name,
-                                consumer,
-                                &step.target,
-                                &current,
-                            );
-                            if current_hash != managed.content_hash {
-                                issues.push(CredentialDoctorIssue {
-                                    severity: "high".to_string(),
-                                    code: "managed_target_hash_mismatch".to_string(),
-                                    message: format!(
-                                        "target '{}' differs from the last Tachi-managed materialization",
-                                        target.display()
-                                    ),
-                                    source: Some(step.resolved_secret.clone()),
-                                    target: Some(step.target.clone()),
-                                });
-                            }
-                        }
-                        Err(err) => {
-                            managed_target_readable = false;
+                TargetInspection::Unreadable { reason } => {
+                    if managed
+                        .as_ref()
+                        .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                    {
+                        issues.push(CredentialDoctorIssue {
+                            severity: "medium".to_string(),
+                            code: "managed_target_unreadable".to_string(),
+                            message: format!(
+                                "read managed credential target '{}': {reason}",
+                                target.display()
+                            ),
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        });
+                    } else {
+                        issues.push(CredentialDoctorIssue {
+                            severity: "medium".to_string(),
+                            code: "existing_target".to_string(),
+                            message: format!(
+                                "target '{}' already exists without active managed metadata; persistent writes are retired and temporary replacement requires an explicit run_dir grant",
+                                target.display()
+                            ),
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        });
+                        if matches!(
+                            step.materializer_type.as_str(),
+                            "config_overlay" | "config_patch"
+                        ) {
                             issues.push(CredentialDoctorIssue {
                                 severity: "medium".to_string(),
-                                code: "managed_target_unreadable".to_string(),
+                                code: "target_config_unreadable".to_string(),
                                 message: format!(
-                                    "read managed credential target '{}': {err}",
+                                    "read credential config target '{}': {reason}",
                                     target.display()
                                 ),
                                 source: Some(step.resolved_secret.clone()),
@@ -230,59 +243,106 @@ pub fn doctor_credential_profile(
                             });
                         }
                     }
-                } else {
-                    issues.push(CredentialDoctorIssue {
-                        severity: "medium".to_string(),
-                        code: "existing_target".to_string(),
-                        message: format!(
-                            "target '{}' already exists without active managed metadata; persistent writes are retired and temporary replacement requires an explicit run_dir grant",
-                            target.display()
-                        ),
-                        source: Some(step.resolved_secret.clone()),
-                        target: Some(step.target.clone()),
-                    });
+                    continue;
                 }
-                #[cfg(unix)]
-                {
-                    let mode = meta.permissions().mode() & 0o777;
-                    if mode & 0o077 != 0 {
+                TargetInspection::RegularFile {
+                    #[cfg(unix)]
+                    mode,
+                    bytes,
+                } => {
+                    let mut managed_target_readable = true;
+                    if let Some(managed) = managed
+                        .as_ref()
+                        .filter(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                    {
+                        match std::str::from_utf8(&bytes) {
+                            Ok(current) => {
+                                let current_hash = managed_materialization_content_hash(
+                                    profile_name,
+                                    consumer,
+                                    &step.target,
+                                    current,
+                                );
+                                if current_hash != managed.content_hash {
+                                    issues.push(CredentialDoctorIssue {
+                                        severity: "high".to_string(),
+                                        code: "managed_target_hash_mismatch".to_string(),
+                                        message: format!(
+                                            "target '{}' differs from the last Tachi-managed materialization",
+                                            target.display()
+                                        ),
+                                        source: Some(step.resolved_secret.clone()),
+                                        target: Some(step.target.clone()),
+                                    });
+                                }
+                            }
+                            Err(err) => {
+                                managed_target_readable = false;
+                                issues.push(CredentialDoctorIssue {
+                                    severity: "medium".to_string(),
+                                    code: "managed_target_unreadable".to_string(),
+                                    message: format!(
+                                        "read managed credential target '{}': {err}",
+                                        target.display()
+                                    ),
+                                    source: Some(step.resolved_secret.clone()),
+                                    target: Some(step.target.clone()),
+                                });
+                            }
+                        }
+                    } else {
                         issues.push(CredentialDoctorIssue {
-                            severity: "high".to_string(),
-                            code: "target_permissions_too_broad".to_string(),
+                            severity: "medium".to_string(),
+                            code: "existing_target".to_string(),
                             message: format!(
-                                "target '{}' permissions are {:o}; credential files should be 0600",
-                                target.display(),
-                                mode
+                                "target '{}' already exists without active managed metadata; persistent writes are retired and temporary replacement requires an explicit run_dir grant",
+                                target.display()
                             ),
                             source: Some(step.resolved_secret.clone()),
                             target: Some(step.target.clone()),
                         });
                     }
-                }
-                if matches!(
-                    step.materializer_type.as_str(),
-                    "config_overlay" | "config_patch"
-                ) && managed_target_readable
-                {
-                    match target_json_contains_plaintext_secret(&target) {
-                        Ok(true) => issues.push(CredentialDoctorIssue {
-                            severity: "high".to_string(),
-                            code: "plaintext_config_secret".to_string(),
-                            message: format!(
-                                "target '{}' appears to contain a plaintext secret; prefer env or vault references in generated configs",
-                                target.display()
-                            ),
-                            source: Some(step.resolved_secret.clone()),
-                            target: Some(step.target.clone()),
-                        }),
-                        Ok(false) => {}
-                        Err(err) => issues.push(CredentialDoctorIssue {
-                            severity: "medium".to_string(),
-                            code: "target_config_unreadable".to_string(),
-                            message: err,
-                            source: Some(step.resolved_secret.clone()),
-                            target: Some(step.target.clone()),
-                        }),
+                    #[cfg(unix)]
+                    {
+                        if mode & 0o077 != 0 {
+                            issues.push(CredentialDoctorIssue {
+                                severity: "high".to_string(),
+                                code: "target_permissions_too_broad".to_string(),
+                                message: format!(
+                                    "target '{}' permissions are {:o}; credential files should be 0600",
+                                    target.display(),
+                                    mode
+                                ),
+                                source: Some(step.resolved_secret.clone()),
+                                target: Some(step.target.clone()),
+                            });
+                        }
+                    }
+                    if matches!(
+                        step.materializer_type.as_str(),
+                        "config_overlay" | "config_patch"
+                    ) && managed_target_readable
+                    {
+                        match target_json_bytes_contain_plaintext_secret(&target, &bytes) {
+                            Ok(true) => issues.push(CredentialDoctorIssue {
+                                severity: "high".to_string(),
+                                code: "plaintext_config_secret".to_string(),
+                                message: format!(
+                                    "target '{}' appears to contain a plaintext secret; prefer env or vault references in generated configs",
+                                    target.display()
+                                ),
+                                source: Some(step.resolved_secret.clone()),
+                                target: Some(step.target.clone()),
+                            }),
+                            Ok(false) => {}
+                            Err(err) => issues.push(CredentialDoctorIssue {
+                                severity: "medium".to_string(),
+                                code: "target_config_unreadable".to_string(),
+                                message: err,
+                                source: Some(step.resolved_secret.clone()),
+                                target: Some(step.target.clone()),
+                            }),
+                        }
                     }
                 }
             }

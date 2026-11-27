@@ -31,6 +31,16 @@ mod imp {
         Exists,
     }
 
+    /// What the directory entry itself is; a symlink is reported, never followed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntryKind {
+        Missing,
+        RegularFile,
+        Symlink,
+        Directory,
+        Other,
+    }
+
     impl AnchoredDirectory {
         pub fn open_absolute(path: &Path) -> io::Result<Self> {
             if !path.is_absolute() {
@@ -152,7 +162,24 @@ mod imp {
             }
         }
 
+        /// Remove `name` only while its bytes still equal `expected`.
+        /// `false` when nothing by that name exists or the bytes differ.
         pub fn remove_file_if_exact(&self, name: &OsStr, expected: &[u8]) -> io::Result<bool> {
+            self.remove_file_if(name, |observed| observed == expected)
+                .map(|removed| removed.unwrap_or(false))
+        }
+
+        /// Capture the entry `name` under a private sibling name, then remove it
+        /// only when `accept` approves the captured bytes of a regular file.
+        ///
+        /// `Ok(None)` when nothing by that name exists; `Ok(Some(false))` when
+        /// the captured entry was not a regular file or `accept` declined it, in
+        /// which case it is restored under its original name.
+        pub fn remove_file_if(
+            &self,
+            name: &OsStr,
+            accept: impl FnOnce(&[u8]) -> bool,
+        ) -> io::Result<Option<bool>> {
             let name = c_name(name)?;
             let captured = CString::new(format!(
                 ".tachi-rollback-{}",
@@ -161,12 +188,14 @@ mod imp {
             .expect("generated rollback name has no interior NUL");
             match rename_noreplace_at(self.fd.as_ref(), &name, &captured) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
             }
 
-            let matches = self.captured_file_matches(&captured, expected);
-            match matches {
+            let verdict = self
+                .captured_file_contents(&captured)
+                .map(|contents| contents.is_some_and(|contents| accept(&contents)));
+            match verdict {
                 Ok(true) => {
                     // SAFETY: captured is one component under the anchored directory;
                     // unlinkat removes the captured entry and never follows a symlink.
@@ -176,50 +205,146 @@ mod imp {
                         return Err(io::Error::last_os_error());
                     }
                     self.sync()?;
-                    Ok(true)
+                    Ok(Some(true))
                 }
-                Ok(false) => {
-                    rename_noreplace_at(self.fd.as_ref(), &captured, &name)?;
-                    self.sync()?;
-                    Ok(false)
-                }
-                Err(inspect_error) => {
-                    match rename_noreplace_at(self.fd.as_ref(), &captured, &name) {
+                Ok(false) => self.restore(&captured, &name, None).map(|()| Some(false)),
+                Err(inspect_error) => match self.restore(&captured, &name, Some(&inspect_error)) {
                     Ok(()) => Err(inspect_error),
-                    Err(restore_error) => Err(io::Error::other(format!(
-                        "inspect captured file failed ({inspect_error}); restoring its original name also failed ({restore_error}); preserved as {}",
-                        captured.to_string_lossy()
-                    ))),
-                    }
-                }
+                    Err(error) => Err(error),
+                },
             }
         }
 
-        fn captured_file_matches(&self, name: &CString, expected: &[u8]) -> io::Result<bool> {
-            // SAFETY: name is one component under a live descriptor; O_NOFOLLOW
-            // refuses a captured symlink.
+        /// Classify the directory entry `name` without following it.
+        pub fn entry_kind(&self, name: &OsStr) -> io::Result<EntryKind> {
+            let name = c_name(name)?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: the directory descriptor is live, name is one component
+            // and stat points to writable storage.
+            let result = unsafe {
+                libc::fstatat(
+                    self.fd.as_ref().as_raw_fd(),
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                return if error.kind() == io::ErrorKind::NotFound {
+                    Ok(EntryKind::Missing)
+                } else {
+                    Err(error)
+                };
+            }
+            // SAFETY: fstatat succeeded and initialized stat.
+            let stat = unsafe { stat.assume_init() };
+            Ok(match stat.st_mode & libc::S_IFMT {
+                libc::S_IFREG => EntryKind::RegularFile,
+                libc::S_IFLNK => EntryKind::Symlink,
+                libc::S_IFDIR => EntryKind::Directory,
+                _ => EntryKind::Other,
+            })
+        }
+
+        /// Remove the directory entry `name` itself; whatever it points at is
+        /// never followed. `false` when nothing by that name exists.
+        pub fn remove_entry(&self, name: &OsStr) -> io::Result<bool> {
+            match self.unlink(&c_name(name)?) {
+                Ok(()) => {
+                    self.sync()?;
+                    Ok(true)
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+
+        /// Read `name` only when it is a regular file (never following a
+        /// symlink, never blocking on a FIFO), bounded to `max_bytes`.
+        /// `Ok(None)` when missing or not a regular file.
+        pub fn read_regular_file(
+            &self,
+            name: &OsStr,
+            max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
+            self.read_regular_file_c(&c_name(name)?, max_bytes)
+        }
+
+        /// `Ok(None)` when the captured entry is not a regular file.
+        fn captured_file_contents(&self, name: &CString) -> io::Result<Option<Vec<u8>>> {
+            const MAX_CAPTURED_FILE_BYTES: usize = 4 * 1024 * 1024;
+            self.read_regular_file_c(name, MAX_CAPTURED_FILE_BYTES)
+                .map(|result| result.map(|(_, bytes)| bytes))
+        }
+
+        fn read_regular_file_c(
+            &self,
+            name: &CString,
+            max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
+            // SAFETY: name is one component under a live descriptor. O_NOFOLLOW
+            // refuses a symlink; O_NONBLOCK keeps a FIFO or device from waiting
+            // for a writer.
             let fd = unsafe {
                 libc::openat(
                     self.fd.as_ref().as_raw_fd(),
                     name.as_ptr(),
-                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
             };
             if fd < 0 {
                 let error = io::Error::last_os_error();
-                if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
-                    return Ok(false);
+                if error.kind() == io::ErrorKind::NotFound
+                    || matches!(error.raw_os_error(), Some(libc::ELOOP))
+                {
+                    return Ok(None);
                 }
                 return Err(error);
             }
             // SAFETY: fd is fresh and exclusively owned.
             let mut file = unsafe { File::from_raw_fd(fd) };
-            if !file.metadata()?.is_file() {
-                return Ok(false);
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Ok(None);
             }
+            let limit = u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
             let mut observed = Vec::new();
-            file.read_to_end(&mut observed)?;
-            Ok(observed == expected)
+            Read::by_ref(&mut file)
+                .take(limit)
+                .read_to_end(&mut observed)?;
+            if observed.len() > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("file exceeds maximum size of {max_bytes} bytes"),
+                ));
+            }
+            Ok(Some((metadata, observed)))
+        }
+
+        /// Put a captured entry back under its original name. `cause` names the
+        /// inspection failure that triggered the restore, if any.
+        fn restore(
+            &self,
+            captured: &CString,
+            name: &CString,
+            cause: Option<&io::Error>,
+        ) -> io::Result<()> {
+            match rename_noreplace_at(self.fd.as_ref(), captured, name) {
+                Ok(()) => self.sync(),
+                Err(restore_error) => Err(io::Error::other(match cause {
+                    Some(inspect_error) => format!(
+                        "inspect captured file failed ({inspect_error}); restoring its original name also failed ({restore_error}); preserved as {}",
+                        captured.to_string_lossy()
+                    ),
+                    None => format!(
+                        "captured file was left untouched; restoring its original name failed ({restore_error}); preserved as {}",
+                        captured.to_string_lossy()
+                    ),
+                })),
+            }
         }
 
         fn sync(&self) -> io::Result<()> {
@@ -400,6 +525,15 @@ mod imp {
         Exists,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntryKind {
+        Missing,
+        RegularFile,
+        Symlink,
+        Directory,
+        Other,
+    }
+
     impl AnchoredDirectory {
         pub fn open_absolute(_path: &Path) -> io::Result<Self> {
             unsupported()
@@ -436,6 +570,30 @@ mod imp {
         pub fn remove_file_if_exact(&self, _name: &OsStr, _expected: &[u8]) -> io::Result<bool> {
             unsupported()
         }
+
+        pub fn remove_file_if(
+            &self,
+            _name: &OsStr,
+            _accept: impl FnOnce(&[u8]) -> bool,
+        ) -> io::Result<Option<bool>> {
+            unsupported()
+        }
+
+        pub fn entry_kind(&self, _name: &OsStr) -> io::Result<EntryKind> {
+            unsupported()
+        }
+
+        pub fn remove_entry(&self, _name: &OsStr) -> io::Result<bool> {
+            unsupported()
+        }
+
+        pub fn read_regular_file(
+            &self,
+            _name: &OsStr,
+            _max_bytes: usize,
+        ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
+            unsupported()
+        }
     }
 
     fn unsupported<T>() -> io::Result<T> {
@@ -446,12 +604,13 @@ mod imp {
     }
 }
 
-pub use imp::{AnchoredDirectory, CreateFileOutcome, DirectoryIdentity};
+pub use imp::{AnchoredDirectory, CreateFileOutcome, DirectoryIdentity, EntryKind};
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::AnchoredDirectory;
-    use std::ffi::OsStr;
+    use super::{AnchoredDirectory, EntryKind};
+    use std::ffi::{CString, OsStr};
+    use std::os::unix::fs::FileTypeExt;
 
     #[test]
     fn anchored_children_reject_empty_dot_dotdot_and_slash() {
@@ -464,6 +623,111 @@ mod tests {
                 .expect_err("invalid component must be refused");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
+    }
+
+    fn entry_names(directory: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn remove_file_if_removes_only_the_regular_file_it_was_shown() {
+        let root = tempfile::tempdir().unwrap();
+        let anchored =
+            AnchoredDirectory::open_absolute(&root.path().canonicalize().unwrap()).unwrap();
+        std::fs::write(root.path().join("managed"), b"managed").unwrap();
+        std::fs::write(root.path().join("replaced"), b"replaced").unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("managed"), root.path().join("link")).unwrap();
+        let is_managed = |captured: &[u8]| captured == b"managed";
+
+        assert_eq!(
+            anchored
+                .remove_file_if(OsStr::new("managed"), is_managed)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            anchored
+                .remove_file_if(OsStr::new("replaced"), is_managed)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            anchored
+                .remove_file_if(OsStr::new("absent"), is_managed)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            anchored
+                .remove_file_if(OsStr::new("link"), |_| true)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            anchored
+                .remove_file_if(OsStr::new("nested"), |_| true)
+                .unwrap(),
+            Some(false)
+        );
+
+        assert!(!root.path().join("managed").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("replaced")).unwrap(),
+            b"replaced"
+        );
+        assert!(root
+            .path()
+            .join("link")
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink());
+        assert!(root.path().join("nested").is_dir());
+        assert_eq!(
+            entry_names(root.path()),
+            ["link", "nested", "replaced"].map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn remove_file_if_declines_a_captured_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let anchored =
+            AnchoredDirectory::open_absolute(&root.path().canonicalize().unwrap()).unwrap();
+        let fifo = root.path().join("auth.json");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_c is a valid terminated path and mkfifo consumes the mode.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            anchored.entry_kind(OsStr::new("auth.json")).unwrap(),
+            EntryKind::Other
+        );
+
+        // A blocking open would strand this thread forever; the channel keeps
+        // that outcome visible as a failure instead of a hung test binary.
+        let (sent, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(anchored.remove_file_if(OsStr::new("auth.json"), |_| true));
+        });
+        let verdict = seen
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("a captured FIFO must not block the removal")
+            .unwrap();
+        assert_eq!(verdict, Some(false));
+
+        let kind = fifo.symlink_metadata().unwrap().file_type();
+        assert!(kind.is_fifo(), "{kind:?}");
+        assert_eq!(
+            entry_names(root.path()),
+            [std::ffi::OsString::from("auth.json")]
+        );
     }
 
     #[test]

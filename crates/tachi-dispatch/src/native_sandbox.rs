@@ -1,5 +1,6 @@
-//! Server-owned filesystem write confinement for native ACP children.
-//! This is not network isolation or a claim that all host files are unreadable.
+//! Server-owned filesystem write confinement for native ACP children; on
+//! macOS the host services a confined child may reach as well. This is not
+//! network isolation or a claim that all host files are unreadable.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -271,11 +272,10 @@ fn probe_native_sandbox() -> bool {
         }
         "macos" => {
             let mut command = Command::new("/usr/bin/sandbox-exec");
-            command.args([
-                "-p",
-                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol)",
-                "/usr/bin/true",
-            ]);
+            let policy = format!(
+                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}{MACOS_IPC_BROKERS}"
+            );
+            command.args(["-p", &policy, "/usr/bin/true"]);
             command
         }
         _ => return false,
@@ -464,7 +464,10 @@ pub fn native_sandbox_command(
         }
         "macos" => {
             invocation.program = "/usr/bin/sandbox-exec".into();
-            let mut policy = format!("(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}(allow file-write* (subpath {}))", sbpl_path(&runtime)?);
+            let mut policy = format!(
+                "(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}{MACOS_IPC_BROKERS}(allow file-write* (subpath {}))",
+                sbpl_path(&runtime)?
+            );
             if writable {
                 policy.push_str(&format!(
                     "(allow file-write* (subpath {}))",
@@ -484,6 +487,14 @@ pub fn native_sandbox_command(
 /// Standard device sinks: `/dev/fd` reopens an already-held descriptor with its
 /// existing access mode, so none of these widens file-system writes.
 const MACOS_DEVICE_SINKS: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (subpath \"/dev/fd\"))";
+
+/// Host services are refused unless a native adapter needs one: account
+/// lookups, directory change notifications, and the keychain and certificate
+/// evaluators behind HTTPS. cfprefsd, LaunchServices and launchd write or
+/// launch on a process's behalf; the pasteboard and notification services
+/// carry the owner's desktop state. Apple Events are refused by name:
+/// denying their service lookup leaves the send itself allowed.
+const MACOS_IPC_BROKERS: &str = r#"(deny appleevent-send)(deny mach-lookup)(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.FSEvents") (global-name "com.apple.SecurityServer") (global-name "com.apple.trustd.agent"))"#;
 
 fn sbpl_path(path: &Path) -> Result<String, String> {
     let path = path
@@ -613,6 +624,313 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(f.runtime.join("home/allowed")).unwrap(),
             "ok"
+        );
+    }
+
+    /// A background-only application that records one line when launched and
+    /// exits at once.
+    #[cfg(target_os = "macos")]
+    fn launch_probe_app(root: &Path, marker: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let contents = root.join("Launch Probe.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Probe</string>
+<key>CFBundleIdentifier</key><string>local.tachi.sandbox-launch-probe</string>
+<key>CFBundleName</key><string>TachiSandboxLaunchProbe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+"#,
+        )
+        .unwrap();
+        let executable = contents.join("MacOS/Probe");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\n/bin/echo launched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        root.join("Launch Probe.app")
+    }
+
+    // `open` hands a launch to LaunchServices, which starts the application
+    // outside Seatbelt. A confined child could use it to write where the
+    // profile denies.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_launch_an_unconfined_helper() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let marker = f.root.join("launched-outside");
+        let app = launch_probe_app(&f.root, &marker);
+        // Control: the same launch reaches the helper without the profile. A
+        // host without a GUI session cannot run this probe.
+        let control = Command::new("/usr/bin/open")
+            .args(["-n", "-W", "-g"])
+            .arg(&app)
+            .status()
+            .unwrap();
+        if std::fs::remove_file(&marker).is_err() {
+            eprintln!("open launched nothing on this host ({control:?}); probe skipped");
+            return;
+        }
+
+        let args = ["-n", "-W", "-g"].map(OsString::from);
+        let wrapper = native_sandbox_command(
+            OsStr::new("/usr/bin/open"),
+            &[args.as_slice(), &[app.into_os_string()]].concat(),
+            &f.cwd,
+            &f.runtime,
+            true,
+        )
+        .unwrap();
+        let status = Command::new(wrapper.program)
+            .args(wrapper.args)
+            .envs(wrapper.env)
+            .current_dir(&f.cwd)
+            .status()
+            .unwrap();
+        let launched = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            !launched,
+            "a confined child launched an unconfined helper ({status:?})"
+        );
+    }
+
+    // cfprefsd writes preference plists for its client under the user's
+    // Library, wherever that client is allowed to write.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_write_preferences_outside_the_runtime() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let domain = format!(
+            "local.tachi.sandbox-probe.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let plist =
+            PathBuf::from(std::env::var_os("HOME").expect("HOME locates the user's preferences"))
+                .join("Library/Preferences")
+                .join(format!("{domain}.plist"));
+        let status = f
+            .command(
+                true,
+                &format!("/usr/bin/defaults write {domain} probe -string from-sandbox"),
+            )
+            .status()
+            .unwrap();
+        let written = plist.exists();
+        let _ = std::fs::remove_file(&plist);
+        assert!(
+            !written,
+            "a confined child wrote {plist:?} through cfprefsd ({status:?})"
+        );
+    }
+
+    /// A JavaScript for Automation script, built the way the runner builds a
+    /// confined child when a fixture is given.
+    #[cfg(target_os = "macos")]
+    fn automation(fixture: Option<&Fixture>, script: &str) -> std::process::Output {
+        let mut command = match fixture {
+            None => {
+                let mut command = Command::new("/usr/bin/osascript");
+                command.args(["-l", "JavaScript", "-e", script]);
+                command
+            }
+            Some(f) => {
+                let args = ["-l", "JavaScript", "-e", script].map(OsString::from);
+                let wrapper = native_sandbox_command(
+                    OsStr::new("/usr/bin/osascript"),
+                    &args,
+                    &f.cwd,
+                    &f.runtime,
+                    true,
+                )
+                .unwrap();
+                let mut command = Command::new(wrapper.program);
+                command
+                    .args(wrapper.args)
+                    .envs(wrapper.env)
+                    .current_dir(&f.cwd);
+                command
+            }
+        };
+        command.output().unwrap()
+    }
+
+    // AppKit reads the pasteboard through a host service, outside the
+    // filesystem rules: a confined child could read what the owner copied.
+    // The canary sits on a board of its own, so the owner's is not touched.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_read_the_pasteboard() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let board = format!(
+            "local.tachi.sandbox-probe.{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        const CANARY: &str = "TACHI-PASTEBOARD-CANARY";
+        const FILL: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.clearContents; board.setStringForType($('CANARY'), $.NSPasteboardTypeString);";
+        const READ: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.stringForType($.NSPasteboardTypeString).js";
+        const CLEAR: &str = "ObjC.import('AppKit'); var board = $.NSPasteboard.pasteboardWithName('BOARD'); board.clearContents;";
+        let on_board = |script: &str| {
+            script
+                .replace("BOARD", &board)
+                .replace("CANARY'", &format!("{CANARY}'"))
+        };
+        assert!(automation(None, &on_board(FILL)).status.success());
+        // Control: the same reader reaches the board without the profile. A
+        // host without a GUI session has no pasteboard server.
+        let control = String::from_utf8_lossy(&automation(None, &on_board(READ)).stdout)
+            .trim()
+            .to_string();
+        if control != CANARY {
+            eprintln!("no pasteboard on this host ({control:?}); probe skipped");
+            return;
+        }
+
+        let confined = automation(Some(&f), &on_board(READ));
+        let read = String::from_utf8_lossy(&confined.stdout).trim().to_string();
+        let _ = automation(None, &on_board(CLEAR));
+        assert!(
+            read != CANARY,
+            "a confined child read the pasteboard ({:?}): {read:?}",
+            confined.status
+        );
+    }
+
+    // Denying the lookup of the Apple Events service does not make the kernel
+    // refuse the send, and a sent event leaves the sandbox, held back only by
+    // the host's consent for the calling app. The child asks the kernel for
+    // its own decision, so no consent dialog is involved.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_send_apple_events() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        const ASK: &str = "ObjC.bindFunction('getpid', ['int', []]); ObjC.bindFunction('sandbox_check', ['int', ['int', 'char *', 'int', 'void *']]); $.sandbox_check($.getpid(), 'appleevent-send', 0, null)";
+        // An unconfined child is allowed the send.
+        assert_eq!(
+            String::from_utf8_lossy(&automation(None, ASK).stdout).trim(),
+            "0"
+        );
+        // 1 is a refusal; -1 would mean the kernel does not know the operation.
+        let confined = automation(Some(&f), ASK);
+        assert_eq!(
+            String::from_utf8_lossy(&confined.stdout).trim(),
+            "1",
+            "{confined:?}"
+        );
+    }
+
+    /// Services a confined child must not reach. None is one a native adapter
+    /// was measured to need, and a denylist leaves each of them open.
+    const UNREACHABLE_SERVICES: [&str; 4] = [
+        "com.apple.tccd.system",
+        "com.apple.system.notification_center",
+        "com.apple.windowserver.active",
+        "com.apple.dock.server",
+    ];
+    const SERVICE_PROBE: &str = "TACHI_NATIVE_SANDBOX_SERVICE_PROBE";
+
+    /// Two roles. Started by the test below with `SERVICE_PROBE` set, this is
+    /// a confined child that asks the kernel which host services it may reach
+    /// and prints one `<service>=<decision>` line per service. Started on its
+    /// own, it does nothing.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn host_service_decisions() {
+        use std::io::Write;
+        if std::env::var_os(SERVICE_PROBE).is_none() {
+            return;
+        }
+        extern "C" {
+            // Variadic: the kernel's own declaration, and on this ABI the
+            // fourth argument only arrives through the variadic call.
+            fn sandbox_check(
+                pid: libc::pid_t,
+                operation: *const libc::c_char,
+                filter: libc::c_int,
+                ...
+            ) -> libc::c_int;
+        }
+        let operation = c"mach-lookup";
+        for service in UNREACHABLE_SERVICES {
+            let name = std::ffi::CString::new(service).expect("a service name");
+            // 2 is the kernel's name filter: the decision for that one service.
+            let decision =
+                unsafe { sandbox_check(libc::getpid(), operation.as_ptr(), 2, name.as_ptr()) };
+            writeln!(std::io::stdout(), "{service}={decision}").expect("report");
+        }
+    }
+
+    /// The profile rests on its default refusal: a service is reachable only
+    /// when it is named. The child asks the kernel, so no desktop service has
+    /// to be running for the answer.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_reaches_no_host_service_that_is_not_named() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let executable = std::env::current_exe().expect("the test binary");
+        let args = [
+            "--exact".into(),
+            "native_sandbox::tests::host_service_decisions".into(),
+            "--nocapture".into(),
+        ];
+        let wrapper =
+            native_sandbox_command(executable.as_os_str(), &args, &f.cwd, &f.runtime, true)
+                .unwrap();
+        let output = Command::new(wrapper.program)
+            .args(wrapper.args)
+            .envs(wrapper.env)
+            .env(SERVICE_PROBE, "1")
+            .current_dir(&f.cwd)
+            .output()
+            .expect("start the probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        for service in UNREACHABLE_SERVICES {
+            let refused = format!("{service}=1");
+            assert!(
+                stdout.lines().any(|line| line == refused),
+                "the kernel lets a confined child reach {service}: {stdout}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn confined_child_cannot_access_host_pasteboard() {
+        if !sandbox_for_test() {
+            return;
+        }
+        let f = Fixture::new();
+        let status = f
+            .command(false, "/usr/bin/pbpaste >/dev/null 2>&1")
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "confined child must not read host pasteboard ({status:?})"
         );
     }
 

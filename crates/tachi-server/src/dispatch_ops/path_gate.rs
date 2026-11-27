@@ -85,7 +85,17 @@ fn open_regular_file_within(
     })?;
     let canonical_candidate = match candidate.canonicalize() {
         Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(format!(
+                    "refusing descriptor-bound read: {} is a dangling symlink",
+                    candidate.display()
+                ));
+            }
+            return Ok(None);
+        }
         Err(error) => {
             return Err(format!(
                 "refusing descriptor-bound read: {} cannot be resolved: {error}",
@@ -250,10 +260,16 @@ fn open_regular_file_relative(root: &Path, relative: &Path) -> Result<std::fs::F
     fn openat_owned(parent: &OwnedFd, name: &OsStr, directory: bool) -> Result<OwnedFd, String> {
         let name = CString::new(name.as_bytes())
             .map_err(|error| format!("path component contains an interior NUL: {error}"))?;
+        // The final open is non-blocking so a FIFO substituted there is
+        // refused by the regular-file check below instead of waited on.
         let flags = libc::O_RDONLY
             | libc::O_CLOEXEC
             | libc::O_NOFOLLOW
-            | if directory { libc::O_DIRECTORY } else { 0 };
+            | if directory {
+                libc::O_DIRECTORY
+            } else {
+                libc::O_NONBLOCK
+            };
         // SAFETY: `parent` is a live directory descriptor, `name` is a valid
         // NUL-terminated component, and no O_CREAT flag means no mode argument
         // is consumed. A successful descriptor is transferred into OwnedFd.
@@ -479,6 +495,36 @@ mod tests {
             .expect("present");
         assert_eq!(raw, "inside bytes");
         assert_ne!(raw, "outside bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_read_refuses_a_fifo_instead_of_waiting_for_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().expect("root");
+        let candidate = root.path().join("bindings.env");
+        let path = CString::new(candidate.as_os_str().as_bytes()).expect("path has no NUL");
+        // SAFETY: path is a valid terminated path and mkfifo consumes the mode.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+        // A blocking open would strand this thread forever; the channel keeps
+        // that outcome visible as a failure instead of a hung test binary.
+        let (sent, seen) = std::sync::mpsc::channel();
+        let root_path = root.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = sent.send(read_text_file_within(
+                &root_path,
+                &candidate,
+                TEST_DESCRIPTOR_TEXT_MAX_BYTES,
+            ));
+        });
+        let error = seen
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("a FIFO candidate must not block the read")
+            .expect_err("a FIFO is not a regular file");
+        assert!(error.contains("not a regular file"), "{error}");
     }
 
     #[cfg(unix)]

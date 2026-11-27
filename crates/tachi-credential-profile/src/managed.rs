@@ -2,7 +2,6 @@ use super::types::CredentialMaterializeStepReport;
 use super::CREDENTIAL_MATERIALIZATION_NAMESPACE;
 use memcore::MemoryStore;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
 use tachi_params::util::stable_hash;
 
@@ -150,18 +149,4 @@ pub(super) fn mark_metadata_cleaned(
         .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, row_key, &value)
         .map_err(|e| format!("mark credential target cleaned: {e}"))?;
     Ok(())
-}
-
-pub(super) fn managed_target_current_hash(
-    metadata: &ManagedCredentialMaterialization,
-    target: &Path,
-) -> Result<String, String> {
-    let current = fs::read_to_string(target)
-        .map_err(|e| format!("read managed credential target '{}': {e}", target.display()))?;
-    Ok(managed_materialization_content_hash(
-        &metadata.profile,
-        &metadata.consumer,
-        &metadata.target,
-        &current,
-    ))
 }

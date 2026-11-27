@@ -344,7 +344,7 @@ pub(super) fn import_validated_vault_bundle(
         vault_key,
         &health_rows,
     )?;
-    validate_new_imported_lane_urls(&entries, &local_entries, vault_key)?;
+    validate_imported_lane_urls(&entries, vault_key)?;
     record_imported_account_updates(&transaction, &entries, vault_key)?;
 
     transaction
@@ -380,18 +380,20 @@ pub(super) fn import_validated_vault_bundle(
     Ok(initialized_vault)
 }
 
-fn validate_new_imported_lane_urls(
+/// Refuse an imported lane URL that carries a credential in its endpoint,
+/// whether the import creates it or replaces the local one. Decrypting takes
+/// the Vault key, so an unsigned import cannot carry a lane URL at all.
+fn validate_imported_lane_urls(
     incoming: &[VaultEntry],
-    local: &[VaultEntry],
     verification_key: Option<&[u8; 32]>,
 ) -> Result<(), String> {
-    for entry in incoming.iter().filter(|entry| {
-        memcore::is_lane_config_url_name(&entry.name)
-            && !local.iter().any(|local| local.name == entry.name)
-    }) {
+    for entry in incoming
+        .iter()
+        .filter(|entry| memcore::is_lane_config_url_name(&entry.name))
+    {
         let key = verification_key.ok_or_else(|| {
             format!(
-                "Unsigned Vault sync import cannot validate new lane URL '{}'; verify the bundle signature first",
+                "Unsigned Vault sync import cannot validate lane URL '{}'; verify the bundle signature first",
                 entry.name
             )
         })?;
@@ -403,7 +405,7 @@ fn validate_new_imported_lane_urls(
             )?);
         if let Some(leak) = memcore::catalog::endpoint::endpoint_credential_leak(&value) {
             return Err(format!(
-                "Imported new lane URL '{}' embeds a credential in the endpoint ({leak}); refusing import",
+                "Imported lane URL '{}' embeds a credential in the endpoint ({leak}); refusing import",
                 entry.name
             ));
         }
@@ -970,6 +972,135 @@ mod tests {
             .expect("read entries")
             .is_empty());
         let _ = std::fs::remove_file(target_db);
+    }
+
+    /// A lane URL that replaces a local one is checked like a new one.
+    #[test]
+    fn vault_sync_import_rejects_a_credential_bearing_lane_url_that_replaces_a_local_one() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let clean = "https://api.example.test/v1/chat/completions";
+        let mut local = encrypted_entry("EXTRACT_BASE_URL", clean, &key);
+        local.secret_type = "config".to_string();
+        import_validated_vault_bundle(&target_db, &sample_config(), &[local], &[], Some(&key))
+            .expect("the clean lane URL imports");
+
+        let mut lane_url = encrypted_entry(
+            "EXTRACT_BASE_URL",
+            "https://user:pass@proxy.example.test/v1/chat",
+            &key,
+        );
+        lane_url.secret_type = "config".to_string();
+        let error = import_validated_vault_bundle(
+            &target_db,
+            &sample_config(),
+            &[lane_url.clone()],
+            &[],
+            Some(&key),
+        )
+        .expect_err("a replacing lane URL with a credential must fail closed")
+        .to_string();
+        assert!(
+            error.contains("EXTRACT_BASE_URL") && error.contains("credential"),
+            "{error}"
+        );
+        assert!(!error.contains("user:pass"), "{error}");
+
+        let unsigned =
+            import_validated_vault_bundle(&target_db, &sample_config(), &[lane_url], &[], None)
+                .expect_err("an unsigned import cannot check a replacing lane URL")
+                .to_string();
+        assert!(
+            unsigned.contains("cannot validate lane URL 'EXTRACT_BASE_URL'"),
+            "{unsigned}"
+        );
+
+        let store = open_cli_store_read_only(&target_db).expect("target store");
+        let entry = store
+            .vault_get_entry("EXTRACT_BASE_URL")
+            .expect("read entries")
+            .expect("the local lane URL is kept");
+        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)
+            .expect("decrypt the kept lane URL");
+        assert_eq!(String::from_utf8(decrypted).expect("utf8"), clean);
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    /// The unsigned-import preflight asks for the key whenever the bundle
+    /// carries a lane URL: the import path checks it, new or replacing.
+    #[test]
+    fn unsigned_import_with_a_replacing_lane_url_requires_the_vault_key() {
+        let target_db = temp_db_path();
+        let key = [7u8; 32];
+        let local = encrypted_entry("EXTRACT_BASE_URL", "https://api.example.test/v1", &key);
+        import_validated_vault_bundle(&target_db, &sample_config(), &[local], &[], Some(&key))
+            .expect("seed the local lane URL");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+        let bundle = VaultSyncBundle {
+            bundle_type: BUNDLE_TYPE.to_string(),
+            version: BUNDLE_VERSION,
+            exported_at: "2026-01-01T00:00:00Z".to_string(),
+            vault_config: Some(sample_config()),
+            entries: vec![encrypted_entry(
+                "EXTRACT_BASE_URL",
+                "https://example.net/v1",
+                &key,
+            )],
+            rotations: Vec::new(),
+            signature: None,
+        };
+        std::fs::write(
+            &bundle_path,
+            serde_json::to_string_pretty(&bundle).expect("serialize unsigned bundle"),
+        )
+        .expect("write unsigned bundle");
+
+        assert!(
+            unsigned_import_requires_vault_key(&target_db, &bundle_path)
+                .expect("preflight reads the bundle"),
+            "a bundle that replaces a lane URL needs the key"
+        );
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    /// A target that does not exist yet is not opened: the answer comes
+    /// from the bundle alone.
+    #[test]
+    fn unsigned_import_preflight_needs_no_target_store_for_a_fresh_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_target = dir.path().join("missing-target.db");
+        let key = [7u8; 32];
+        for (name, expected) in [
+            ("UNTRACKED_OPAQUE_PAYLOAD", false),
+            ("EXTRACT_BASE_URL", true),
+        ] {
+            let bundle = VaultSyncBundle {
+                bundle_type: BUNDLE_TYPE.to_string(),
+                version: BUNDLE_VERSION,
+                exported_at: "2026-01-01T00:00:00Z".to_string(),
+                vault_config: Some(sample_config()),
+                entries: vec![encrypted_entry(name, "fixture-bytes", &key)],
+                rotations: Vec::new(),
+                signature: None,
+            };
+            let bundle_path = dir
+                .path()
+                .join(format!("{}.bundle.json", name.to_ascii_lowercase()));
+            std::fs::write(
+                &bundle_path,
+                serde_json::to_vec_pretty(&bundle).expect("serialize unsigned bundle"),
+            )
+            .expect("write unsigned bundle");
+
+            assert_eq!(
+                unsigned_import_requires_vault_key(&missing_target, &bundle_path)
+                    .expect("the fresh target is not opened"),
+                expected,
+                "{name}"
+            );
+        }
+        assert!(!missing_target.exists());
     }
 
     #[test]

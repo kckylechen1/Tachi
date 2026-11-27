@@ -14,7 +14,7 @@ use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
-use super::ticket::{BuildTicket, SourceIdentity};
+use super::ticket::{BuildCommand, BuildTicket, SourceIdentity};
 
 /// How a build ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,25 @@ pub trait BuildRunner {
     /// Wipe a target dir. Returns the bytes freed. Must be idempotent (wiping an
     /// already-empty/absent dir frees 0 and is not an error).
     fn clear_target(&self, target_dir: &Path) -> Result<i64, String>;
+}
+
+/// The build runs the ticket's source. That code is not trusted with this
+/// process's credentials, and it must not mistake itself for the daemon.
+fn build_command(
+    command: &BuildCommand,
+    checkout: &Path,
+    target_dir: &Path,
+) -> std::process::Command {
+    let mut build = std::process::Command::new(&command.program);
+    build
+        .args(&command.args)
+        .current_dir(checkout)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    memcore::child_env::withhold_inherited_credentials(&mut build);
+    build
 }
 
 /// The real seat: git + a subprocess + `remove_dir_all`.
@@ -134,13 +153,7 @@ impl BuildRunner for ProcessBuildRunner {
                 })
                 .map_err(|e| format!("start stderr reader: {e}"))?;
 
-            let mut child = std::process::Command::new(&ticket.command.program)
-                .args(&ticket.command.args)
-                .current_dir(checkout)
-                .env("CARGO_TARGET_DIR", target_dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+            let mut child = build_command(&ticket.command, checkout, target_dir)
                 .spawn()
                 .map_err(|e| format!("spawn {}: {e}", ticket.command.program))?;
 
@@ -316,6 +329,42 @@ mod tests {
             self.remaining = &self.remaining[len..];
             Ok(len)
         }
+    }
+
+    #[test]
+    fn build_command_withholds_credentials_but_keeps_the_toolchain() {
+        let command = build_command(
+            &BuildCommand {
+                program: "cargo".into(),
+                args: vec!["test".into()],
+                features: Vec::new(),
+            },
+            Path::new("/checkout"),
+            Path::new("/target"),
+        );
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            removed.iter().any(|name| name == "TACHI_DAEMON"),
+            "{removed:?}"
+        );
+        assert!(
+            removed
+                .iter()
+                .all(|name| name == "TACHI_DAEMON"
+                    || memcore::child_env::is_credential_env_name(name)),
+            "{removed:?}"
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == std::ffi::OsStr::new("CARGO_TARGET_DIR"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("/target")))
+        );
     }
 
     #[test]

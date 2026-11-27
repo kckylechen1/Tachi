@@ -68,45 +68,94 @@ fn is_sensitive_key(key: &str) -> bool {
     .any(|needle| key.contains(needle))
 }
 
-fn redact_sensitive_string(input: &str) -> String {
-    let Some(query_start) = input.find('?') else {
-        return redact_inline_secret_markers(input);
-    };
-    let (prefix, rest) = input.split_at(query_start + 1);
-    let (query, suffix) = match rest.find('#') {
-        Some(fragment_start) => rest.split_at(fragment_start),
-        None => (rest, ""),
-    };
-    let redacted_query = query
-        .split('&')
-        .map(|part| {
-            let Some((name, _value)) = part.split_once('=') else {
-                return part.to_string();
-            };
-            if is_sensitive_key(name) {
-                format!("{name}=[REDACTED]")
-            } else {
-                part.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("&");
-    redact_inline_secret_markers(&format!("{prefix}{redacted_query}{suffix}"))
+/// What a redacted field renders as. A unit struct rather than a string
+/// literal, so `{:?}` prints it bare instead of quoting it like a value that
+/// could be mistaken for the real one.
+pub(crate) struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
 }
 
-fn redact_inline_secret_markers(input: &str) -> String {
-    let mut out = input.to_string();
-    for marker in ["Bearer ", "bearer "] {
-        if let Some(start) = out.find(marker) {
-            let value_start = start + marker.len();
-            let value_end = out[value_start..]
-                .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&'))
-                .map(|idx| value_start + idx)
-                .unwrap_or(out.len());
-            out.replace_range(value_start..value_end, "[REDACTED]");
-        }
+fn redact_sensitive_string(input: &str) -> String {
+    // A URL holds no whitespace, so every `?` inside one word opens a query of
+    // its own. An earlier URL's query or fragment never hides a later one.
+    let mut out = String::with_capacity(input.len());
+    for piece in input.split_inclusive(char::is_whitespace) {
+        let (word, gap) = piece.split_at(piece.trim_end_matches(char::is_whitespace).len());
+        out.push_str(&redact_queries(word));
+        out.push_str(gap);
     }
+    redact_inline_secret_markers(&out)
+}
+
+/// Every `?` in a whitespace-free token opens a query that runs to its `#`,
+/// and any `?` inside the fragment (e.g. SPA callback routes) is also redacted.
+fn redact_queries(word: &str) -> String {
+    let Some(query_start) = word.find('?') else {
+        return word.to_string();
+    };
+    let (head, tail) = word.split_at(query_start + 1);
+    let (query, fragment) = match tail.find('#') {
+        Some(fragment_start) => tail.split_at(fragment_start),
+        None => (tail, ""),
+    };
+    let redacted_fragment = if let Some(frag_query_start) = fragment.find('?') {
+        let (frag_head, frag_query) = fragment.split_at(frag_query_start + 1);
+        format!("{frag_head}{}", redact_parameters(frag_query))
+    } else {
+        fragment.to_string()
+    };
+    format!("{head}{}{redacted_fragment}", redact_parameters(query))
+}
+
+/// Parameters are separated by `&`; a `?` inside a query opens a nested URL.
+fn redact_parameters(query: &str) -> String {
+    query
+        .split_inclusive(['&', '?'])
+        .map(|parameter| {
+            let Some((name, _)) = parameter.split_once('=') else {
+                return parameter.to_string();
+            };
+            if !is_sensitive_key(name) {
+                return parameter.to_string();
+            }
+            let separator = parameter
+                .chars()
+                .next_back()
+                .filter(|last| matches!(last, '&' | '?'))
+                .map(String::from)
+                .unwrap_or_default();
+            format!("{name}=[REDACTED]{separator}")
+        })
+        .collect()
+}
+
+/// Every `Bearer` value is redacted, not only the first one in the text.
+fn redact_inline_secret_markers(input: &str) -> String {
+    const MARKER: &[u8] = b"bearer ";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = find_ignore_ascii_case(rest, MARKER) {
+        let value_start = start + MARKER.len();
+        let value_end = rest[value_start..]
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&'))
+            .map_or(rest.len(), |index| value_start + index);
+        out.push_str(&rest[..value_start]);
+        out.push_str("[REDACTED]");
+        rest = &rest[value_end..];
+    }
+    out.push_str(rest);
     out
+}
+
+/// Byte position of an ASCII `needle` in `text`, ignoring ASCII case.
+fn find_ignore_ascii_case(text: &str, needle: &[u8]) -> Option<usize> {
+    let last_start = text.len().checked_sub(needle.len())?;
+    (0..=last_start)
+        .find(|&index| text.as_bytes()[index..index + needle.len()].eq_ignore_ascii_case(needle))
 }
 
 pub(crate) fn append_warning(

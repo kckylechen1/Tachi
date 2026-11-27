@@ -1862,4 +1862,50 @@ fn opened_daemon_wal_paths_resolves_symlinked_global_db_to_canonical_target() {
     assert_eq!(opened_daemon_wal_paths(&server), vec![canonical_real]);
 }
 
+#[test]
+fn load_env_files_filters_execution_environment_variables_from_project_files() {
+    let fixture = HostProfileEnvFixture::new();
+    let _guard_safe = EnvRestore::remove("TACHI_TEST_PROJECT_SAFE_VAR");
+    let _guard_preload = EnvRestore::remove("LD_PRELOAD");
+    let _guard_dyld = EnvRestore::remove("DYLD_INSERT_LIBRARIES");
+    let _guard_node = EnvRestore::remove("NODE_OPTIONS");
+    let _guard_git = EnvRestore::remove("GIT_SSH_COMMAND");
+    let _guard_lower = EnvRestore::remove("ld_preload");
+
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "TACHI_HOST_PROFILE=development\nLD_PRELOAD=/tmp/evil.so\nDYLD_INSERT_LIBRARIES=/tmp/evil.dylib\nTACHI_TEST_PROJECT_SAFE_VAR=loaded\n",
+    );
+    fixture.write_env(
+        fixture.repo.path().join(".env"),
+        "NODE_OPTIONS=--require=/tmp/evil.js\nGIT_SSH_COMMAND=evil\nld_preload=/tmp/lower.so\n",
+    );
+
+    fixture.load();
+
+    assert_eq!(
+        std::env::var("TACHI_TEST_PROJECT_SAFE_VAR").as_deref(),
+        Ok("loaded")
+    );
+    for forbidden in [
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "NODE_OPTIONS",
+        "GIT_SSH_COMMAND",
+        "ld_preload",
+    ] {
+        assert!(
+            std::env::var_os(forbidden).is_none(),
+            "project env file must not inject {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn load_env_files_skips_directory_at_project_dotenv_path_without_hanging() {
+    let fixture = HostProfileEnvFixture::new();
+    std::fs::create_dir_all(fixture.repo.path().join(".env")).expect("create .env directory");
+    fixture.load();
+}
+
 mod legacy_copy;

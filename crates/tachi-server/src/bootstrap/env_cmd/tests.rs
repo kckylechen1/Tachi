@@ -592,6 +592,57 @@ fn env_set_replaces_a_whole_multi_line_value_and_keeps_file_format() {
 }
 
 #[test]
+fn env_set_refuses_a_credential_bearing_lane_url_when_it_replaces_one() {
+    let (_temp, db_path, pw_file, project, key) = vault_fixture();
+    let clean = "https://api.example.test/v1/chat/completions";
+    super::super::vault_cli::vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_BASE_URL",
+        "config",
+        "",
+        clean.to_string(),
+    )
+    .expect("write the clean lane URL");
+
+    let mut input = std::io::Cursor::new(b"https://user:pass@proxy.example.test/v1/chat\n");
+    let error = super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "EXTRACT_BASE_URL",
+            secret: None,
+            file: Some(std::path::Path::new(".env.credentials")),
+            secret_type: Some("config"),
+            description: None,
+            value_stdin: true,
+            replace: true,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut input,
+    )
+    .expect_err("a lane URL with a credential in its endpoint must be refused")
+    .to_string();
+    assert!(
+        error.contains("embeds a credential in the endpoint"),
+        "{error}"
+    );
+    assert!(!error.contains("user:pass"), "{error}");
+
+    let store = crate::bootstrap::open_cli_store_read_only(&db_path).expect("open store");
+    let entry = store
+        .vault_get_entry("EXTRACT_BASE_URL")
+        .expect("get entry")
+        .expect("entry exists");
+    let decrypted = crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+        .expect("decrypt");
+    assert_eq!(String::from_utf8(decrypted).expect("utf8"), clean);
+}
+
+#[test]
 fn env_seal_stores_a_multi_line_value_whole() {
     let (_temp, db_path, pw_file, project, key) = vault_fixture();
     let creds_path = project.join(".env.credentials");

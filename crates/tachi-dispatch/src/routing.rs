@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 
 use crate::eval::{CompletionStatus, EvalRow};
 use crate::{
-    fallback_chain, profile_matches_agent, profile_resolved_model, recommendation_identity_receipt,
-    resolve_dispatch_profile, DispatchProfileDef, DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES,
-    ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    fallback_chain, profile_matches_agent, profile_resolved_model,
+    recommendation_identity_receipt_with_model, resolve_dispatch_profile, DispatchProfileDef,
+    DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES, ROUTE_POLICY_RULE_NS,
+    ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -700,6 +701,15 @@ pub fn build_dispatch_recommendation_response(
         }
     };
 
+    // One model for both fields. The candidate carries the seat's effective
+    // model, the staff seat configuration included; the receipt used to be
+    // built from the static profile and could name another model than the one
+    // recommended next to it.
+    let recommended_model = best
+        .model
+        .clone()
+        .or_else(|| profile_resolved_model(best_profile));
+
     Ok(json!({
         "task": task,
         "task_type": &risk.task_type,
@@ -709,8 +719,11 @@ pub fn build_dispatch_recommendation_response(
         "blocked_profiles": &risk.blocked_profiles,
         "recommended_profile": &best.profile,
         "recommended_agent": &best.agent,
-        "recommended_model": best.model.clone().or_else(|| profile_resolved_model(best_profile)),
-        "identity_receipt": recommendation_identity_receipt(best_profile),
+        "recommended_model": recommended_model.clone(),
+        "identity_receipt": recommendation_identity_receipt_with_model(
+            best_profile,
+            recommended_model,
+        ),
         "recommended_transport": profile_payload.recommended_transport,
         "transport_readiness": profile_payload.transport_readiness,
         "role": &best.role,
@@ -1346,5 +1359,72 @@ mod tests {
             .iter()
             .any(|reason| reason == "touches GitHub merge gate"));
         assert_eq!(risk.risk, "high");
+    }
+
+    /// The `identity_receipt` of a recommendation describes the model that is
+    /// recommended next to it. For an OpenCode native seat that model comes
+    /// from the staff seat configuration; the receipt used to be built from the
+    /// static profile and named the built-in model instead.
+    #[test]
+    fn recommendation_receipt_names_the_configured_model_it_recommends() {
+        let seat = resolve_dispatch_profile("opencode_review").expect("OpenCode review seat");
+        let configured = "deepseek/deepseek-flash";
+        assert_ne!(
+            profile_resolved_model(seat).as_deref(),
+            Some(configured),
+            "the built-in model must differ from the configured one, or this proves nothing"
+        );
+        let risk = DispatchRisk {
+            task_type: "review_request".to_string(),
+            risk: "medium".to_string(),
+            reasons: Vec::new(),
+            required_profiles: vec!["opencode_review".to_string()],
+            blocked_profiles: Vec::new(),
+        };
+        let loadout = RoutePolicyRuleLoadout {
+            namespace: ROUTE_POLICY_RULE_NS,
+            min_samples: MIN_ROUTE_POLICY_RULE_SAMPLES,
+            applied: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let candidates = recommend_dispatch_profile_candidates_with_models(
+            &["opencode_review".to_string()],
+            &risk,
+            &[],
+            &[],
+            &[],
+            &loadout,
+            RouteEvidenceSource::DecisionFactLedger,
+            &BTreeMap::from([("opencode_review".to_string(), configured.to_string())]),
+            |_| Ok(Vec::new()),
+        )
+        .expect("candidates");
+        let response = build_dispatch_recommendation_response(
+            "review this change",
+            &risk,
+            seat,
+            &candidates,
+            &loadout,
+            0,
+            RouteEvidenceSource::DecisionFactLedger,
+            RecommendationProfilePayload {
+                recommended_transport: String::new(),
+                transport_readiness: json!({}),
+                evidence_required: json!([]),
+                evidence_contract: json!({}),
+                resolved_skills: Vec::new(),
+                resolved_skill_loadout: json!({}),
+            },
+        )
+        .expect("recommendation");
+
+        assert_eq!(response["recommended_model"], json!(configured));
+        let receipt = &response["identity_receipt"];
+        assert_eq!(receipt["planned"]["model"], json!(configured));
+        assert_eq!(receipt["requested"]["model"], json!(configured));
+        assert_eq!(
+            receipt["planned"]["model_lineage_id"],
+            json!("deepseek/deepseek")
+        );
     }
 }

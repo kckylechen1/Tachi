@@ -1,5 +1,5 @@
 use super::types::{ProjectEnvBindingStatus, ProjectEnvPlan};
-use crate::vault_ops::{find_project_vault_env_file, parse_project_vault_env_bindings_detailed};
+use crate::vault_ops::{load_project_vault_env, parse_project_vault_env_bindings_detailed};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -7,7 +7,7 @@ pub(in crate::bootstrap) fn build_project_env_plan(
     store: &memcore::MemoryStore,
     cwd: &Path,
 ) -> Result<ProjectEnvPlan, Box<dyn std::error::Error>> {
-    let Some(bindings_path) = find_project_vault_env_file(cwd) else {
+    let Some(project) = load_project_vault_env(cwd)? else {
         return Ok(ProjectEnvPlan {
             cwd: cwd.to_string_lossy().to_string(),
             bindings_path: None,
@@ -17,9 +17,7 @@ pub(in crate::bootstrap) fn build_project_env_plan(
             ignored_lines: Vec::new(),
         });
     };
-    let contents = std::fs::read_to_string(&bindings_path)
-        .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
-    let (bindings, ignored_lines) = parse_project_vault_env_bindings_detailed(&contents);
+    let (bindings, ignored_lines) = parse_project_vault_env_bindings_detailed(&project.contents);
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("Failed to list vault entries: {e}"))?;
@@ -52,7 +50,7 @@ pub(in crate::bootstrap) fn build_project_env_plan(
     }
     Ok(ProjectEnvPlan {
         cwd: cwd.to_string_lossy().to_string(),
-        bindings_path: Some(bindings_path.to_string_lossy().to_string()),
+        bindings_path: Some(project.path.to_string_lossy().to_string()),
         binding_count: statuses.len(),
         missing_count,
         bindings: statuses,

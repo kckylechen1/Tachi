@@ -229,6 +229,49 @@ fn setup_keys_init_and_upsert_roundtrip() {
 }
 
 #[test]
+fn vault_upsert_refuses_a_credential_bearing_lane_url_when_it_replaces_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+        .expect("init vault");
+    let clean = "https://api.example.test/v1/chat/completions";
+    vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_BASE_URL",
+        "config",
+        "",
+        clean.to_string(),
+    )
+    .expect("write the clean lane URL");
+
+    let error = vault_upsert_secret_with_key(
+        &db_path,
+        &key,
+        "EXTRACT_BASE_URL",
+        "config",
+        "",
+        "https://user:pass@proxy.example.test/v1/chat".to_string(),
+    )
+    .expect_err("a lane URL with a credential in its endpoint must be refused")
+    .to_string();
+    assert!(
+        error.contains("embeds a credential in the endpoint"),
+        "{error}"
+    );
+    assert!(!error.contains("user:pass"), "{error}");
+
+    let store = open_cli_store_read_only(&db_path).expect("open store");
+    let entry = store
+        .vault_get_entry("EXTRACT_BASE_URL")
+        .expect("get entry")
+        .expect("entry exists");
+    let decrypted = crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+        .expect("decrypt");
+    assert_eq!(String::from_utf8(decrypted).expect("utf8"), clean);
+}
+
+#[test]
 fn legacy_vault_upsert_rejects_agent_restricted_existing_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
