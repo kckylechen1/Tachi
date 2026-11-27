@@ -18,12 +18,14 @@ SCRIPT = ROOT / "scripts/install.sh"
 LABEL = "com.kckylechen.tachi.daemon"
 
 STATUS_FUNCTIONS = [
+    "json_complete_object",
     "daemon_status_for_scope",
     "daemon_status_text",
     "daemon_status_number",
 ]
 STOP_FUNCTIONS = STATUS_FUNCTIONS + [
     "daemon_status_is_running",
+    "daemon_scope_verdict",
     "stop_existing_daemon_for_scope",
 ]
 SERVICE_FUNCTIONS = STOP_FUNCTIONS + [
@@ -35,8 +37,9 @@ SERVICE_FUNCTIONS = STOP_FUNCTIONS + [
     "install_daemon_service",
 ]
 
-# Answers `daemon status` from a file, and reports `none` once a kill or a
-# bootstrap has happened.
+# Answers `daemon status` from a file and then exits with STATUS_EXIT. After a
+# kill it answers STATUS_AFTER_KILL if that is set, else `none`. After a
+# bootstrap it answers `running`.
 FAKE_TACHI = """#!/bin/sh
 case "$*" in
   *"daemon status"*)
@@ -45,10 +48,15 @@ case "$*" in
     else
       cat "$STATUS_FILE"
     fi
+    exit "${STATUS_EXIT:-0}"
     ;;
   *"daemon kill"*)
     printf 'daemon kill\\n' >> "$CALLS"
-    printf '{\\n  "state": "none"\\n}\\n' > "$STATUS_FILE"
+    if [ -n "${STATUS_AFTER_KILL+set}" ]; then
+      printf '%b\\n' "$STATUS_AFTER_KILL" > "$STATUS_FILE"
+    else
+      printf '{\\n  "state": "none"\\n}\\n' > "$STATUS_FILE"
+    fi
     ;;
 esac
 """
@@ -234,6 +242,108 @@ sleep() { :; }
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(plist.read_text(encoding="utf-8"), "previous plist\n")
         self.assertEqual([entry.name for entry in directory.iterdir()], [plist.name])
+
+    def test_a_refused_scope_is_refused_before_anything_is_replaced(self) -> None:
+        directory = self.launch_agents()
+        plist = directory / f"{LABEL}.plist"
+        for previous in ("previous plist\n", None):
+            with self.subTest(previous=previous):
+                for entry in directory.iterdir():
+                    entry.unlink()
+                if previous is not None:
+                    plist.write_text(previous, encoding="utf-8")
+                self.status.write_text(
+                    foreign(
+                        "daemon global_db /elsewhere/tachi-memory.db does not match /tmp/tachi-memory.db"
+                    ),
+                    encoding="utf-8",
+                )
+                result = self.run_bash(self.service_driver(), {})
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("foreign Tachi daemon holds this DB scope", result.stdout)
+                expected = [plist.name] if previous is not None else []
+                self.assertEqual([entry.name for entry in directory.iterdir()], expected)
+                if previous is not None:
+                    self.assertEqual(plist.read_text(encoding="utf-8"), previous)
+                self.assertFalse(
+                    (self.root / "launchctl").exists(),
+                    "launchd was asked to change the service before the scope was checked",
+                )
+
+    # ── what counts as an answer ───────────────────────────────────────────
+
+    def test_only_a_complete_json_object_is_an_answer(self) -> None:
+        whole = (
+            '{\n  "state": "none",\n  "nested": {"a": [1, "}"]},\n'
+            '  "q": "say \\"hi\\""\n}\n'
+        )
+
+        def answer_is(text: str) -> subprocess.CompletedProcess[str]:
+            body = (
+                function("json_complete_object")
+                + "\ncat <<'ANSWER' | json_complete_object\n" + text + "\nANSWER\n"
+            )
+            return self.run_bash(body, {})
+
+        # Text before the object is not part of it.
+        for text, expected in ((whole, whole), ("a warning line first\n" + whole, whole)):
+            with self.subTest(text=text):
+                result = answer_is(text)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+        for text in (
+            "",
+            "not json\n",
+            '{\n  "state": "none"\n',  # the closing brace never came
+            '{\n  "state": "non\n',  # cut inside a string
+            '{\n  "nested": {"a": 1}\n',  # the inner one closed, the outer did not
+            '{\n  "state": "none"\n} {"state": "none"\n',
+            '{\n  "state": "none"\n} and then this\n',
+        ):
+            with self.subTest(text=text):
+                result = answer_is(text)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_a_cut_short_answer_is_not_read_as_free(self) -> None:
+        for status in (
+            '{"state": "none"',
+            '{\n  "state": "none"\n',
+            '{\n  "state": "stale_pid", "pid": 4242\n',
+        ):
+            with self.subTest(status=status):
+                self.status.write_text(status, encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("cannot tell what holds this DB scope", result.stdout)
+                self.assertEqual(self.call_log(), [], "nothing was signalled")
+
+    def test_a_failing_binary_has_not_answered(self) -> None:
+        self.status.write_text('{\n  "state": "none"\n}\n', encoding="utf-8")
+        result = self.run_bash(
+            self.stop_driver(),
+            {"TACHI_FAKE": str(self.fake_bin / "tachi"), "STATUS_EXIT": "3"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("cannot tell what holds this DB scope", result.stdout)
+        self.assertEqual(self.call_log(), [], "nothing was signalled")
+
+    def test_an_answer_that_breaks_while_waiting_for_the_stop_ends_the_install(self) -> None:
+        self.status.write_text('{\n  "state": "running",\n  "pid": 7\n}\n', encoding="utf-8")
+        # The daemon was asked to stop, and the next answer is cut short right
+        # after its state field. That does not say the scope is free.
+        result = self.run_bash(
+            self.stop_driver(),
+            {
+                "TACHI_FAKE": str(self.fake_bin / "tachi"),
+                "STATUS_AFTER_KILL": '{"state": "none"',
+            },
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(self.call_log(), ["daemon kill"])
+        self.assertIn("became unreadable while waiting", result.stdout)
 
 
 if __name__ == "__main__":

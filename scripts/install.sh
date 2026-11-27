@@ -144,11 +144,59 @@ launchctl_bootstrap_plist() {
   fi
 }
 
+# The status of whatever holds this DB scope, or nothing. Nothing means the
+# binary did not answer: it failed, or its answer was cut short.
 daemon_status_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
-  TACHI_DISABLE_AUTO_DAEMON=1 \
-    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null || true
+  local status
+
+  status=$(TACHI_DISABLE_AUTO_DAEMON=1 \
+    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null) || status=""
+  printf '%s\n' "$status" | json_complete_object
+}
+
+# Print the first JSON object of the input, only when it is complete: every
+# brace and bracket closed, no string left open, nothing after it. A missing
+# closing brace is all that tells a cut-short `{"state": "none"` from a real
+# one, and the first says nothing about the scope.
+json_complete_object() {
+  awk '
+    {
+      if (failed) next
+      line = $0
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (!started) {
+          if (c == "{") { started = 1; depth = 1; text = "{" }
+          continue
+        }
+        if (done) {
+          if (index(" \t\r", c) == 0) failed = 1
+          continue
+        }
+        text = text c
+        if (in_string) {
+          if (escaped) { escaped = 0; continue }
+          if (c == "\\") { escaped = 1; continue }
+          if (c == "\"") in_string = 0
+          continue
+        }
+        if (c == "\"") in_string = 1
+        else if (c == "{" || c == "[") depth++
+        else if (c == "}" || c == "]") {
+          depth--
+          if (depth < 0) failed = 1
+          else if (depth == 0) done = 1
+        }
+      }
+      if (started && !done) text = text "\n"
+    }
+    END {
+      if (started && done && !failed) print text
+    }
+  '
 }
 
 daemon_status_is_running() {
@@ -165,42 +213,65 @@ daemon_status_number() {
   sed -n "s/.*\"$1\": \([0-9][0-9]*\).*/\1/p" | head -n 1
 }
 
-stop_existing_daemon_for_scope() {
+# What may be done about whatever holds this DB scope, from one read-only
+# look: `free`, `stop` (this scope's daemon, stopped through the CLI) or
+# `stop-previous <pid>` (the previous version's daemon, see below). Anything
+# else is refused with the status that was read, and returns 1.
+daemon_scope_verdict() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status
+  local status state reason pid
 
   status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
   state=$(printf '%s\n' "$status" | daemon_status_text state)
   case "$state" in
-    running)
-      echo ">> Stopping existing Tachi daemon for this DB scope..."
-      TACHI_DISABLE_AUTO_DAEMON=1 \
-        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
-      ;;
+    none|stale_pid) echo free ;;
+    running) echo stop ;;
     foreign)
       # After an upgrade the previous version's daemon is reported as
       # foreign, and `daemon kill` refuses it. It holds the lock and the port
       # of this scope until it exits, so the upgrade has to stop it the way
       # launchd does. Any other foreign daemon is left alone and reported.
+      reason=$(printf '%s\n' "$status" | daemon_status_text reason)
       pid=$(printf '%s\n' "$status" | daemon_status_number pid)
-      if [[ "$(printf '%s\n' "$status" | daemon_status_text reason)" == "daemon version "* &&
-        "$pid" =~ ^[0-9]+$ ]]; then
-        echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
-        kill -TERM "$pid" 2>/dev/null || true
+      if [[ "$reason" == "daemon version "* && "$pid" =~ ^[0-9]+$ ]]; then
+        echo "stop-previous $pid"
       else
         echo "❌ a foreign Tachi daemon holds this DB scope and was not stopped"
         printf '%s\n' "$status"
         return 1
       fi
       ;;
-    none|stale_pid) ;;
     *)
       # `unavailable` is a live pid whose state could not be read; an empty
       # state means the binary did not answer. Neither says the scope is free.
       echo "❌ cannot tell what holds this DB scope (daemon status: ${state:-unreadable}); not installing over it"
       printf '%s\n' "$status"
       return 1
+      ;;
+  esac
+}
+
+stop_existing_daemon_for_scope() {
+  local tachi_bin="$1"
+  local global_db="$2"
+  local verdict status state pid
+
+  verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
+    printf '%s\n' "$verdict"
+    return 1
+  }
+  case "$verdict" in
+    free) ;;
+    stop)
+      echo ">> Stopping existing Tachi daemon for this DB scope..."
+      TACHI_DISABLE_AUTO_DAEMON=1 \
+        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
+      ;;
+    "stop-previous "*)
+      pid=${verdict#stop-previous }
+      echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
       ;;
   esac
 
@@ -282,6 +353,14 @@ install_daemon_service() {
   echo "   Label: $label"
   echo "   Binary: $tachi_bin"
   echo "   Global DB: $global_db"
+
+  # Asked before anything is replaced or unloaded, so a refusal leaves the
+  # installed plist and the loaded service as they are.
+  local verdict
+  verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
+    printf '%s\n' "$verdict"
+    exit 1
+  }
 
   # Written beside the target and renamed over it: launchd and the next run
   # of this script never see a half-written plist, and a failed write leaves

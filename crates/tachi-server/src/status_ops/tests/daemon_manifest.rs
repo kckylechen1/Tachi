@@ -233,6 +233,109 @@ fn two_live_records_that_disagree_are_a_conflict() {
     }
 }
 
+/// Both files name the same live process. The legacy record answers for it as
+/// before, and a running one either way is this scope's daemon. Two records
+/// that claim the process for different databases are a conflict: nothing may
+/// stop it on the word of either.
+#[test]
+fn the_same_process_claimed_for_two_databases_is_a_conflict() {
+    use crate::status_ops::daemon::prefer_live_record;
+    use crate::status_ops::DaemonStatus;
+    let ours = "/tachi/tachi-memory.db";
+    let theirs = "/openclaw/memory.db";
+    let claimed = |lock: &str, reason: &str, db: &str| DaemonStatus::Foreign {
+        pid: 7,
+        lock_path: PathBuf::from(lock),
+        reason: reason.to_string(),
+        version: None,
+        port: None,
+        global_db: Some(db.to_string()),
+    };
+    let old_version = "daemon version 1.3.0 does not match binary x";
+    let other_scope = "daemon global_db /openclaw/memory.db does not match /tachi/tachi-memory.db";
+
+    for (scoped, legacy) in [
+        (
+            claimed("/scoped.lock", old_version, ours),
+            claimed("/legacy.lock", other_scope, theirs),
+        ),
+        (
+            claimed("/scoped.lock", other_scope, theirs),
+            claimed("/legacy.lock", old_version, ours),
+        ),
+    ] {
+        let status =
+            prefer_live_record(Some(scoped), Some(legacy)).expect("a conflict is reported");
+        match status {
+            DaemonStatus::Foreign {
+                pid,
+                lock_path,
+                reason,
+                ..
+            } => {
+                assert_eq!(pid, 7);
+                assert_eq!(lock_path, PathBuf::from("/legacy.lock"));
+                assert!(
+                    !reason.starts_with("daemon version "),
+                    "the installer must not stop it: {reason}"
+                );
+                assert!(
+                    reason.contains(old_version) && reason.contains(other_scope),
+                    "both claims are named: {reason}"
+                );
+            }
+            other => panic!("expected a foreign conflict, got {other:?}"),
+        }
+    }
+
+    // Records that agree keep the old answer, the legacy one.
+    let legacy_lock = PathBuf::from("/legacy.lock");
+    let agrees = prefer_live_record(
+        Some(claimed("/scoped.lock", old_version, ours)),
+        Some(claimed("/legacy.lock", old_version, ours)),
+    );
+    assert!(matches!(
+        agrees,
+        Some(DaemonStatus::Foreign {
+            ref lock_path,
+            ..
+        }) if *lock_path == legacy_lock
+    ));
+    // So does a record that says nothing about the database.
+    let silent = DaemonStatus::Foreign {
+        pid: 7,
+        lock_path: PathBuf::from("/scoped.lock"),
+        reason: "daemon scope unknown: daemon.pid records no global_db".to_string(),
+        version: None,
+        port: None,
+        global_db: None,
+    };
+    let answered = prefer_live_record(
+        Some(silent),
+        Some(claimed("/legacy.lock", old_version, ours)),
+    );
+    assert!(matches!(
+        answered,
+        Some(DaemonStatus::Foreign {
+            ref lock_path,
+            ..
+        }) if *lock_path == legacy_lock
+    ));
+    // A running legacy record says the process is this scope's daemon: the
+    // installer stops it through the CLI, it does not signal the pid.
+    let running = prefer_live_record(
+        Some(foreign_record(7, "/scoped.lock")),
+        Some(record("running", 7, "/legacy.lock")),
+    );
+    assert!(matches!(
+        running,
+        Some(DaemonStatus::Running {
+            pid: 7,
+            ref lock_path
+        }) if *lock_path == legacy_lock
+    ));
+}
+
 #[test]
 fn collect_daemon_status_prefers_scoped_match_over_legacy_foreign() {
     let app_home = tempfile::tempdir().expect("temp app home");
