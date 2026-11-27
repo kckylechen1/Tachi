@@ -12,11 +12,24 @@ use std::path::{Path, PathBuf};
 
 /// Without descriptor anchoring the run directory is only a prefix: nothing
 /// here can tell a link from a directory, and no file is removed through the
-/// target name itself (see `locate`).
+/// target name itself (see `locate`). Records are selected by the path as
+/// given and by its canonical form, as before.
 pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
-    Ok(RunRoot::Open {
-        as_given: run_dir.to_path_buf(),
-        resolved: run_dir.to_path_buf(),
+    let cwd = std::env::current_dir().map_err(|err| {
+        format!(
+            "resolve the current directory for run_dir '{}': {err}",
+            run_dir.display()
+        )
+    })?;
+    let as_given = if run_dir.is_absolute() {
+        run_dir.to_path_buf()
+    } else {
+        cwd.join(run_dir)
+    };
+    Ok(RunRoot {
+        resolved: fs::canonicalize(&as_given).unwrap_or_else(|_| as_given.clone()),
+        as_given,
+        cwd,
     })
 }
 

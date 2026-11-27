@@ -80,10 +80,12 @@ pub fn doctor_credential_profile(
     )?;
     let mut issues = Vec::new();
     // The run directory is resolved once for every target. A run directory
-    // that cannot be opened without following a link is reported on its own;
-    // targets are then inspected by their recorded path only.
+    // that cannot be opened without following a link is reported on its own
+    // and its targets are not inspected at all: reading them by their
+    // recorded path would go through the link the cleanup refuses.
     let run_root = run_dir.map(crate::cleanup::open_run_root);
-    if let Some(Err(reason)) = run_root.as_ref() {
+    let refused_root = run_root.as_ref().and_then(|root| root.as_ref().err());
+    if let Some(reason) = refused_root {
         issues.push(CredentialDoctorIssue {
             severity: "high".to_string(),
             code: "run_dir_link_unverifiable".to_string(),
@@ -182,6 +184,9 @@ pub fn doctor_credential_profile(
                     source: Some(step.resolved_secret.clone()),
                     target: Some(step.target.clone()),
                 });
+            }
+            if refused_root.is_some() {
+                continue;
             }
             match inspect_target_file(&target, inspect_root, MAX_DOCTOR_TARGET_BYTES) {
                 TargetInspection::Missing => {

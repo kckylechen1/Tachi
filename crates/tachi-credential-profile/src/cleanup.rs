@@ -52,18 +52,18 @@ enum Removal {
 
 /// The run directory of a scoped cleanup, resolved once so that selecting
 /// records and removing files share one view of it.
-pub(crate) enum RunRoot {
-    /// The run directory is gone, and so are its targets.
-    Missing,
-    /// `as_given` is the path the caller named; `resolved` is the same path
-    /// with the platform's own top-level aliases expanded. Either spelling
-    /// selects records. Removal walks from the opened handle.
-    Open {
-        as_given: PathBuf,
-        resolved: PathBuf,
-        #[cfg(unix)]
-        directory: AnchoredDirectory,
-    },
+pub(crate) struct RunRoot {
+    /// The path the caller named, made absolute.
+    pub(super) as_given: PathBuf,
+    /// The same path with the platform's own top-level aliases expanded.
+    pub(super) resolved: PathBuf,
+    /// The working directory when the run directory was resolved. A target
+    /// recorded by a relative path is read against it, here and in `locate`
+    /// alike.
+    pub(super) cwd: PathBuf,
+    /// `None` once the run directory is gone, and so are its targets.
+    #[cfg(unix)]
+    pub(super) directory: Option<AnchoredDirectory>,
 }
 
 /// Resolve the run directory for a cleanup or an inspection. `Err` means the
@@ -131,25 +131,27 @@ fn metadata_matches_cleanup_scope(
             return false;
         }
     }
-    if options.run_dir.is_some() {
-        let target = PathBuf::from(&metadata.target);
+    if let Some(root) = run_root {
+        // A target recorded by a relative path belongs to the working
+        // directory of this cleanup, the same one `locate` reads it against.
+        let target = Path::new(&metadata.target);
         if target
             .components()
             .any(|component| matches!(component, Component::ParentDir))
         {
             return false;
         }
+        let target = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            root.cwd.join(target)
+        };
         // Temporary materializations record their canonical physical path,
         // older ones the path they were given. Both spellings of the run
-        // directory select records. They were resolved once for this
-        // cleanup, so what is selected here is what is removed below.
-        let RunRoot::Open {
-            as_given, resolved, ..
-        } = run_root.expect("a run-scoped cleanup resolves its run directory first")
-        else {
-            return true;
-        };
-        if !target.starts_with(as_given) && !target.starts_with(resolved) {
+        // directory select records, whether or not the directory still
+        // exists: a cleanup for a run directory that is gone must still be
+        // limited to that run directory's records.
+        if !target.starts_with(&root.as_given) && !target.starts_with(&root.resolved) {
             return false;
         }
     }

@@ -29,7 +29,29 @@ pub(super) fn locate(
 /// directory: it sits where a worker may write, and where it points now says
 /// nothing about where it pointed when the credentials were recorded.
 pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
-    let as_given = spelled_in_full(run_dir)?;
+    let cwd = std::env::current_dir().map_err(|err| {
+        format!(
+            "resolve the current directory for run_dir '{}': {err}",
+            run_dir.display()
+        )
+    })?;
+    let as_given = if run_dir.is_absolute() {
+        run_dir.to_path_buf()
+    } else {
+        cwd.join(run_dir)
+    };
+    // `..` is not resolved by name here: that would skip whatever sits
+    // before it, a link included, and a run directory is exactly where a
+    // link must not go unchecked.
+    if as_given
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "run directory '{}' cannot be opened as written: name it without '..'",
+            run_dir.display()
+        ));
+    }
     let resolved = expand_platform_aliases(&as_given);
     let mut directory = AnchoredDirectory::open_absolute(Path::new("/"))
         .map_err(|err| format!("open '/': {err}"))?;
@@ -62,46 +84,12 @@ pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
             }
         }
     }
-    Ok(if missing {
-        RunRoot::Missing
-    } else {
-        RunRoot::Open {
-            as_given,
-            resolved,
-            directory,
-        }
+    Ok(RunRoot {
+        as_given,
+        resolved,
+        cwd,
+        directory: if missing { None } else { Some(directory) },
     })
-}
-
-/// `run_dir` as an absolute path with every `.` and `..` resolved by name.
-fn spelled_in_full(run_dir: &Path) -> Result<PathBuf, String> {
-    let mut full = if run_dir.is_absolute() {
-        PathBuf::new()
-    } else {
-        std::env::current_dir().map_err(|err| {
-            format!(
-                "resolve the current directory for run_dir '{}': {err}",
-                run_dir.display()
-            )
-        })?
-    };
-    for component in run_dir.components() {
-        match component {
-            Component::RootDir => full = PathBuf::from("/"),
-            Component::CurDir => {}
-            Component::Normal(name) => full.push(name),
-            Component::ParentDir => {
-                if !full.pop() {
-                    return Err(format!(
-                        "run directory '{}' does not name a directory: it goes above '/'",
-                        run_dir.display()
-                    ));
-                }
-            }
-            Component::Prefix(_) => {}
-        }
-    }
-    Ok(full)
 }
 
 /// macOS keeps `/var`, `/tmp` and `/etc` as links into `/private`. They belong
@@ -141,32 +129,25 @@ fn expand_platform_aliases(path: &Path) -> PathBuf {
 }
 
 fn locate_path(target: &Path, run_root: Option<&RunRoot>) -> TargetLocation {
-    let (as_given, resolved, directory) = match run_root {
-        None => return locate_for_operator(target),
-        Some(RunRoot::Missing) => return TargetLocation::Missing,
-        Some(RunRoot::Open {
-            as_given,
-            resolved,
-            directory,
-        }) => (as_given, resolved, directory),
+    let Some(root) = run_root else {
+        return locate_for_operator(target);
     };
     let resolved_target = if target.is_absolute() {
         target.to_path_buf()
     } else {
-        // A relative target was recorded against the daemon's own cwd.
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(target),
-            Err(err) => {
-                return TargetLocation::Unremovable(format!("resolve the current directory: {err}"))
-            }
-        }
+        // The working directory of this cleanup, the same one selection read
+        // the target against.
+        root.cwd.join(target)
     };
-    let Some(rel) = relative_under(&resolved_target, as_given, resolved) else {
+    let Some(directory) = root.directory.as_ref() else {
+        return TargetLocation::Missing;
+    };
+    let Some(rel) = relative_under(&resolved_target, &root.as_given, &root.resolved) else {
         return TargetLocation::Unremovable(
             "it is not under the run directory this cleanup resolved".into(),
         );
     };
-    locate_in_run_dir(directory.clone(), resolved.clone(), &rel)
+    locate_in_run_dir(directory.clone(), root.resolved.clone(), &rel)
 }
 
 /// Where `target` sits under the run directory, by either spelling of it.
