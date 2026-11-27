@@ -386,10 +386,31 @@ fn a_run_directory_written_with_dot_dot_is_refused() {
     }
 }
 
-/// An older record spells its target relative to the working directory. It is
-/// selected and removed like an absolute one.
+/// Puts the test in a working directory and puts the previous one back on
+/// every exit, a panic included.
+struct WorkingDirectory(std::path::PathBuf);
+
+impl WorkingDirectory {
+    fn enter(directory: &std::path::Path) -> Self {
+        let previous = Self(std::env::current_dir().expect("cwd"));
+        std::env::set_current_dir(directory).expect("change the working directory");
+        previous
+    }
+}
+
+impl Drop for WorkingDirectory {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// An older record spells its target relative to a working directory that the
+/// record does not keep. Read from any other directory, the daemon's own
+/// included, that path names another run's file. So it belongs to no run
+/// directory: a run-scoped cleanup neither closes the record nor touches a
+/// file under that name.
 #[test]
-fn a_record_spelled_relative_to_the_working_directory_is_cleaned() {
+fn a_record_spelled_by_a_relative_path_belongs_to_no_run_directory() {
     let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-cleanup-relative-record-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -400,35 +421,116 @@ fn a_record_spelled_relative_to_the_working_directory_is_cleaned() {
         .expect("insert auth json metadata");
 
     let root = tempfile::tempdir().expect("temp root");
-    std::fs::create_dir_all(root.path().join("run/credentials")).expect("run dir");
+    let written_from = root.path().join("first");
+    let cleaned_from = root.path().join("second");
     let target = std::path::PathBuf::from("run/credentials/auth.json");
-    // Restored on every exit, a panic included.
-    struct Restore(std::path::PathBuf);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
-        }
-    }
-    let _restore = Restore(std::env::current_dir().expect("cwd"));
-    std::env::set_current_dir(root.path()).expect("work from the run root");
 
+    std::fs::create_dir_all(&written_from).expect("first run root");
+    let _guard = WorkingDirectory::enter(&written_from);
     seed_legacy_auth_file(&store, &legacy_auth_file_profile(&target));
+    // The same path, read from where the next cleanup runs, is another run's
+    // file.
+    let other_file = cleaned_from.join(&target);
+    std::fs::create_dir_all(other_file.parent().expect("parent")).expect("second run dir");
+    std::fs::write(&other_file, "another run's credential file").expect("other run's file");
+
+    std::env::set_current_dir(&cleaned_from).expect("work from the second run's root");
     let report = crate::cleanup_ephemeral_credential_materializations(
         &store,
-        std::path::Path::new("run"),
+        &cleaned_from.join("run"),
         false,
     )
-    .expect("a relative record is cleaned");
+    .expect("the cleanup runs");
+    assert!(
+        report.removed.is_empty() && report.missing.is_empty(),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.starts_with("run/credentials/auth.json (")),
+        "{report:?}"
+    );
 
+    // Nor from the directory it was written in, with the other run's
+    // directory gone.
+    std::fs::remove_dir_all(cleaned_from.join("run")).expect("drop the second run directory");
+    std::env::set_current_dir(&written_from).expect("work from the first run's root");
+    let report = crate::cleanup_ephemeral_credential_materializations(
+        &store,
+        &written_from.join("run"),
+        false,
+    )
+    .expect("the cleanup runs");
+    assert!(
+        report.removed.is_empty() && report.missing.is_empty(),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|entry| entry.starts_with("run/credentials/auth.json (")),
+        "{report:?}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(written_from.join(&target))
+            .ok()
+            .as_deref(),
+        Some(r#"{"token":"secret-token"}"#),
+        "the recorded file was removed"
+    );
+    let rows = store
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .expect("list managed credential metadata");
+    assert_eq!(rows.len(), 1);
+    assert_ne!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].value_json).expect("metadata JSON")
+            ["cleanup_status"],
+        serde_json::json!("cleaned"),
+        "the record was closed"
+    );
+}
+
+/// A daemon whose working directory has been deleted still cleans the
+/// absolute run directories it is given. Nothing about them needs the working
+/// directory.
+#[test]
+fn an_absolute_run_directory_is_cleaned_from_a_deleted_working_directory() {
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
+        "credential-cleanup-deleted-cwd-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let root = tempfile::tempdir().expect("temp root");
+    let run_dir = std::fs::canonicalize(root.path())
+        .expect("canonical root")
+        .join("run");
+    let target = run_dir.join("credentials/auth.json");
+    seed_legacy_auth_file(&store, &legacy_auth_file_profile(&target));
+
+    let gone = tempfile::tempdir().expect("a directory to work from");
+    let _guard = WorkingDirectory::enter(gone.path());
+    std::fs::remove_dir_all(gone.path()).expect("delete the working directory");
+    assert!(
+        std::env::current_dir().is_err(),
+        "premise: the working directory is gone"
+    );
+
+    let report = crate::cleanup_ephemeral_credential_materializations(&store, &run_dir, false)
+        .expect("an absolute run directory needs no working directory");
     assert_eq!(
         report.removed,
         vec![target.to_string_lossy().to_string()],
         "{report:?}"
     );
-    assert!(
-        !root.path().join(&target).exists(),
-        "the credential file is still there"
-    );
+    assert!(!target.exists(), "the credential file is still there");
 }
 
 /// `doctor` refuses a run directory reached through a link and inspects none
@@ -539,6 +641,83 @@ fn doctor_reports_a_refused_run_directory_and_reads_nothing_behind_it() {
             .issues
             .iter()
             .any(|issue| issue.code == "target_permissions_too_broad"),
+        "{:#?}",
+        through_real.issues
+    );
+}
+
+/// `doctor` opens the run directory before it plans anything. Planning a file
+/// target looks at what is there, so through a refused link the report is the
+/// refusal alone, whatever sits behind the link.
+#[test]
+fn doctor_plans_nothing_behind_a_refused_run_directory() {
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
+        "credential-doctor-alias-plan-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let root = tempfile::tempdir().expect("temp root");
+    let real_run_dir = root.path().join("job");
+    // A directory holding the target's name: a plan that looks behind the
+    // link has something to report about it.
+    std::fs::create_dir_all(real_run_dir.join("credentials/auth.json"))
+        .expect("a directory holding the target's name");
+    let alias = root.path().join("current");
+    std::os::unix::fs::symlink(&real_run_dir, &alias).expect("run dir alias");
+    let alias_text = alias.display().to_string();
+    let profile = crate::CredentialProfile {
+        provider: None,
+        description: None,
+        entries: [("auth_json".to_string(), "CODEX_AUTH_JSON".to_string())]
+            .into_iter()
+            .collect(),
+        allowed_consumers: crate::AllowedConsumers::default(),
+        materializers: vec![crate::CredentialMaterializer {
+            kind: "config_overlay".to_string(),
+            source: "auth_json".to_string(),
+            target: "{credentials_dir}/auth.json".to_string(),
+            chmod: None,
+            template: None,
+        }],
+    };
+
+    let report = crate::doctor_credential_profile(
+        "codex_shared",
+        &profile,
+        "codex_cli",
+        &store,
+        Some(&alias),
+    )
+    .expect("doctor report");
+
+    assert_eq!(report.issues.len(), 1, "{:#?}", report.issues);
+    let [issue] = &report.issues[..] else {
+        unreachable!("one issue was just asserted")
+    };
+    assert_eq!(issue.code, "run_dir_link_unverifiable");
+    assert_eq!(issue.severity, "high");
+    assert_eq!(issue.target.as_deref(), Some(alias_text.as_str()));
+    assert_eq!(report.summary.issue_count, 1);
+
+    // Planned against the real directory, the same profile does look, and
+    // reports the directory that holds the target's name.
+    let through_real = crate::doctor_credential_profile(
+        "codex_shared",
+        &profile,
+        "codex_cli",
+        &store,
+        Some(&real_run_dir),
+    )
+    .expect("doctor report");
+    assert!(
+        through_real
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_materializer_target"),
         "{:#?}",
         through_real.issues
     );

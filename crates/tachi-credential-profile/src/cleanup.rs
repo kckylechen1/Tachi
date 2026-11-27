@@ -57,21 +57,44 @@ pub(crate) struct RunRoot {
     pub(super) as_given: PathBuf,
     /// The same path with the platform's own top-level aliases expanded.
     pub(super) resolved: PathBuf,
-    /// The working directory when the run directory was resolved. A target
-    /// recorded by a relative path is read against it, here and in `locate`
-    /// alike.
-    pub(super) cwd: PathBuf,
     /// `None` once the run directory is gone, and so are its targets.
     #[cfg(unix)]
     pub(super) directory: Option<AnchoredDirectory>,
 }
 
+/// The run directory as an absolute path. The working directory is read only
+/// for a relative one: a daemon whose working directory is gone still cleans
+/// the absolute run directories it is given.
+pub(super) fn absolute_run_dir(run_dir: &Path) -> Result<PathBuf, String> {
+    if run_dir.is_absolute() {
+        return Ok(run_dir.to_path_buf());
+    }
+    let cwd = std::env::current_dir().map_err(|err| {
+        format!(
+            "resolve the current directory for run_dir '{}': {err}",
+            run_dir.display()
+        )
+    })?;
+    Ok(cwd.join(run_dir))
+}
+
 /// Resolve the run directory for a cleanup or an inspection. `Err` means the
 /// directory cannot be opened without following a link its caller cannot
-/// vouch for. A cleanup must then leave the run directory alone, records
-/// included: a link where a worker may write can be repointed, and where it
-/// points now says nothing about where the credentials were recorded.
+/// vouch for, or is written with `..`: resolving that by name skips whatever
+/// sits in front of it, a link included. A cleanup must then leave the run
+/// directory alone, records included: a link where a worker may write can be
+/// repointed, and where it points now says nothing about where the
+/// credentials were recorded.
 pub(crate) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
+    if run_dir
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "run directory '{}' cannot be opened as written: name it without '..'",
+            run_dir.display()
+        ));
+    }
     target_fs::open_run_root(run_dir)
 }
 
@@ -132,8 +155,6 @@ fn metadata_matches_cleanup_scope(
         }
     }
     if let Some(root) = run_root {
-        // A target recorded by a relative path belongs to the working
-        // directory of this cleanup, the same one `locate` reads it against.
         let target = Path::new(&metadata.target);
         if target
             .components()
@@ -141,16 +162,12 @@ fn metadata_matches_cleanup_scope(
         {
             return false;
         }
-        let target = if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            root.cwd.join(target)
-        };
         // Temporary materializations record their canonical physical path,
         // older ones the path they were given. Both spellings of the run
         // directory select records, whether or not the directory still
         // exists: a cleanup for a run directory that is gone must still be
-        // limited to that run directory's records.
+        // limited to that run directory's records. A relative path selects
+        // nothing here; the cleanup says so where it skips the record.
         if !target.starts_with(&root.as_given) && !target.starts_with(&root.resolved) {
             return false;
         }
@@ -208,6 +225,16 @@ pub fn cleanup_managed_credential_materializations(
             };
         if metadata.cleanup_status.as_deref() == Some("cleaned") {
             report.skipped.push(metadata.target);
+            continue;
+        }
+        if run_root.is_some() && !Path::new(&metadata.target).is_absolute() {
+            // The record does not keep the working directory its path was
+            // written against. Read from any other one, this daemon's
+            // included, it names another run's file.
+            report.skipped.push(format!(
+                "{} (recorded by a relative path, which names no run directory)",
+                metadata.target
+            ));
             continue;
         }
         if !metadata_matches_cleanup_scope(&metadata, options, run_root.as_ref()) {

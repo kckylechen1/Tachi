@@ -71,6 +71,30 @@ pub fn doctor_credential_profile(
     store: &MemoryStore,
     run_dir: Option<&Path>,
 ) -> Result<CredentialDoctorReport, String> {
+    // The run directory is opened before anything is planned. Planning a file
+    // target looks at what is there, and through a link the cleanup refuses
+    // that is exactly what must not be read. A refused run directory is then
+    // the whole report: nothing behind it is planned or inspected.
+    let run_root = run_dir.map(crate::cleanup::open_run_root);
+    let refused_root = run_root.as_ref().and_then(|root| root.as_ref().err());
+    if let Some(reason) = refused_root {
+        return Ok(CredentialDoctorReport {
+            profile: profile_name.to_string(),
+            consumer: consumer.to_string(),
+            summary: CredentialDoctorSummary {
+                issue_count: 1,
+                high_count: 1,
+                medium_count: 0,
+            },
+            issues: vec![CredentialDoctorIssue {
+                severity: "high".to_string(),
+                code: "run_dir_link_unverifiable".to_string(),
+                message: reason.clone(),
+                source: None,
+                target: run_dir.map(|dir| dir.display().to_string()),
+            }],
+        });
+    }
     let plan = plan_credential_materialization_with_run_dir(
         profile_name,
         profile,
@@ -79,21 +103,6 @@ pub fn doctor_credential_profile(
         run_dir,
     )?;
     let mut issues = Vec::new();
-    // The run directory is resolved once for every target. A run directory
-    // that cannot be opened without following a link is reported on its own
-    // and its targets are not inspected at all: reading them by their
-    // recorded path would go through the link the cleanup refuses.
-    let run_root = run_dir.map(crate::cleanup::open_run_root);
-    let refused_root = run_root.as_ref().and_then(|root| root.as_ref().err());
-    if let Some(reason) = refused_root {
-        issues.push(CredentialDoctorIssue {
-            severity: "high".to_string(),
-            code: "run_dir_link_unverifiable".to_string(),
-            message: reason.clone(),
-            source: None,
-            target: run_dir.map(|dir| dir.display().to_string()),
-        });
-    }
     let inspect_root = run_root.as_ref().and_then(|root| root.as_ref().ok());
 
     if !plan.allowed {
@@ -182,11 +191,8 @@ pub fn doctor_credential_profile(
                         target.display()
                     ),
                     source: Some(step.resolved_secret.clone()),
-                    target: Some(step.target.clone()),
-                });
-            }
-            if refused_root.is_some() {
-                continue;
+                target: Some(step.target.clone()),
+            });
             }
             match inspect_target_file(&target, inspect_root, MAX_DOCTOR_TARGET_BYTES) {
                 TargetInspection::Missing => {

@@ -7,8 +7,8 @@
 //! but never a symlink that holds the target name itself.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot, TargetInspection,
-    TargetLocation,
+    absolute_run_dir, ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot,
+    TargetInspection, TargetLocation,
 };
 use memcore::anchored_fs::{AnchoredDirectory, EntryKind};
 use std::ffi::OsStr;
@@ -29,29 +29,7 @@ pub(super) fn locate(
 /// directory: it sits where a worker may write, and where it points now says
 /// nothing about where it pointed when the credentials were recorded.
 pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
-    let cwd = std::env::current_dir().map_err(|err| {
-        format!(
-            "resolve the current directory for run_dir '{}': {err}",
-            run_dir.display()
-        )
-    })?;
-    let as_given = if run_dir.is_absolute() {
-        run_dir.to_path_buf()
-    } else {
-        cwd.join(run_dir)
-    };
-    // `..` is not resolved by name here: that would skip whatever sits
-    // before it, a link included, and a run directory is exactly where a
-    // link must not go unchecked.
-    if as_given
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!(
-            "run directory '{}' cannot be opened as written: name it without '..'",
-            run_dir.display()
-        ));
-    }
+    let as_given = absolute_run_dir(run_dir)?;
     let resolved = expand_platform_aliases(&as_given);
     let mut directory = AnchoredDirectory::open_absolute(Path::new("/"))
         .map_err(|err| format!("open '/': {err}"))?;
@@ -87,7 +65,6 @@ pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
     Ok(RunRoot {
         as_given,
         resolved,
-        cwd,
         directory: if missing { None } else { Some(directory) },
     })
 }
@@ -132,17 +109,17 @@ fn locate_path(target: &Path, run_root: Option<&RunRoot>) -> TargetLocation {
     let Some(root) = run_root else {
         return locate_for_operator(target);
     };
-    let resolved_target = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        // The working directory of this cleanup, the same one selection read
-        // the target against.
-        root.cwd.join(target)
-    };
+    // The record does not keep the working directory a relative path was
+    // written against, so from here it names nothing this cleanup resolved.
+    if !target.is_absolute() {
+        return TargetLocation::Unremovable(
+            "it is recorded by a relative path, which names no run directory".into(),
+        );
+    }
     let Some(directory) = root.directory.as_ref() else {
         return TargetLocation::Missing;
     };
-    let Some(rel) = relative_under(&resolved_target, &root.as_given, &root.resolved) else {
+    let Some(rel) = relative_under(target, &root.as_given, &root.resolved) else {
         return TargetLocation::Unremovable(
             "it is not under the run directory this cleanup resolved".into(),
         );

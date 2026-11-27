@@ -22,9 +22,11 @@ platform's own top-level aliases (on macOS `/var`, `/tmp` and `/etc`), and
 refuses a run directory reached through any other link, records included.
 Where such a link points at cleanup time does not show where it pointed when
 the credentials were recorded. A run directory written with `..` is refused the
-same way, and `doctor` reports a refused run directory
-(`run_dir_link_unverifiable`) without reading any of its targets. A run
-directory that is gone is cleaned for its own records only.
+same way, and `doctor` answers a refused run directory with that alone
+(`run_dir_link_unverifiable`): it plans and reads nothing behind the link. A
+run directory that is gone is cleaned for its own records only. A record whose
+target is a relative path names no run directory, so a run-scoped cleanup
+leaves it open.
 File overlays are unavailable on non-Unix systems; env adapters remain usable.
 
 A manual file overlay must supply `--run-dir`. Dispatch supplies its own run

@@ -3,8 +3,8 @@
 //! is removed.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot, TargetInspection,
-    TargetLocation,
+    absolute_run_dir, ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot,
+    TargetInspection, TargetLocation,
 };
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -15,29 +15,26 @@ use std::path::{Path, PathBuf};
 /// target name itself (see `locate`). Records are selected by the path as
 /// given and by its canonical form, as before.
 pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
-    let cwd = std::env::current_dir().map_err(|err| {
-        format!(
-            "resolve the current directory for run_dir '{}': {err}",
-            run_dir.display()
-        )
-    })?;
-    let as_given = if run_dir.is_absolute() {
-        run_dir.to_path_buf()
-    } else {
-        cwd.join(run_dir)
-    };
+    let as_given = absolute_run_dir(run_dir)?;
     Ok(RunRoot {
         resolved: fs::canonicalize(&as_given).unwrap_or_else(|_| as_given.clone()),
         as_given,
-        cwd,
     })
 }
 
 pub(super) fn locate(
     metadata: &ManagedCredentialMaterialization,
-    _run_root: Option<&RunRoot>,
+    run_root: Option<&RunRoot>,
 ) -> TargetLocation {
     let target = PathBuf::from(&metadata.target);
+    // Selected by an absolute path, it is removed by that same path. A
+    // relative parent would be resolved against whatever the working
+    // directory is by now.
+    if run_root.is_some() && !target.is_absolute() {
+        return TargetLocation::Unremovable(
+            "it is recorded by a relative path, which names no run directory".into(),
+        );
+    }
     let Some(leaf) = target.file_name() else {
         return TargetLocation::Unremovable(format!("'{}' does not name a file", target.display()));
     };
