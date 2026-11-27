@@ -150,3 +150,36 @@ async fn claude_cli_disables_tools_mcp_and_project_settings_and_preserves_stderr
         "expected --setting-sources user in {args:?}"
     );
 }
+
+/// A CLI that fails early does not take its helpers with it: once it has
+/// closed the pipes the call only learns its exit status. The call owns the
+/// group until the CLI has answered, so the helpers do not outlive it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cli_that_fails_early_does_not_leave_its_helpers_behind() {
+    let (result, stand_in) = call_stand_in(
+        "sleep 600 >/dev/null 2>&1 &\n\
+         echo $! > \"$(dirname \"$0\")/helper.pid\"\n\
+         exit 23",
+        "prompt",
+        Duration::from_secs(10),
+    )
+    .await;
+    let err = result.expect_err("a non-zero exit fails the call");
+    assert!(
+        err.contains("claude cli exited 23"),
+        "expected the CLI's exit status, got: {err}"
+    );
+    let helper: i32 = std::fs::read_to_string(stand_in.helper_pid())
+        .expect("the stand-in records its helper")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let alive = process_stays_alive(helper, Duration::from_secs(10)).await;
+    if alive {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-9", &helper.to_string()])
+            .status();
+    }
+    assert!(!alive, "the CLI's helper {helper} outlived the call");
+}

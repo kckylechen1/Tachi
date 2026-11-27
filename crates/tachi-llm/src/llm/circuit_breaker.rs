@@ -150,17 +150,21 @@ impl CircuitBreaker {
         );
     }
 
+    /// Both record paths take `state` before `opened_at`; nesting them the
+    /// other way here could deadlock against a failure arriving at the
+    /// threshold. Closing under the state lock is what ends the half-open
+    /// phase, so the probe slot is not freed here: it may belong to a probe
+    /// still in flight, and that probe releases itself.
     fn record_success(&self) {
         self.inner.failure_count.store(0, Ordering::Relaxed);
-        self.inner.half_open_probe.store(0, Ordering::Release);
+        let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
+        *state = BreakerState::Closed;
         let mut opened_at = self
             .inner
             .opened_at
             .write()
             .unwrap_or_else(|e| e.into_inner());
         *opened_at = None;
-        let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
-        *state = BreakerState::Closed;
     }
 
     fn record_failure(&self) {
@@ -472,6 +476,95 @@ mod tests {
             registry.admit("probe").is_some(),
             "dropping the current probe frees the slot"
         );
+    }
+
+    /// `record_failure` nests `state` before `opened_at`. A success that
+    /// nested them the other way could deadlock against a failure arriving at
+    /// the threshold, so this pins the order: while another thread holds
+    /// `opened_at`, the success recorder must be the one holding `state`.
+    #[test]
+    fn record_success_takes_the_state_lock_before_the_opened_at_lock() {
+        let breaker = CircuitBreaker::new();
+        let opened_at = breaker
+            .inner
+            .opened_at
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let success = {
+            let breaker = breaker.clone();
+            std::thread::spawn(move || breaker.record_success())
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let holds_state = loop {
+            if breaker.inner.state.try_write().is_err() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        drop(opened_at);
+        success.join().expect("the success recorder finishes");
+        assert!(
+            holds_state,
+            "record_success waited for opened_at without holding state"
+        );
+        assert_eq!(breaker.state_name(), "closed");
+        assert!(breaker
+            .inner
+            .opened_at
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
+    }
+
+    /// A success does not free a half-open probe it does not own. Freeing it
+    /// here let a second probe be claimed before the breaker was closed.
+    #[test]
+    fn record_success_leaves_an_in_flight_probe_the_owner_of_its_slot() {
+        let registry = CircuitBreakerRegistry::new();
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("probe");
+        }
+        registry.expire_open_window("probe");
+        let in_flight = registry
+            .admit("probe")
+            .expect("the half-open probe is admitted");
+        let breaker = registry.get_or_create("probe");
+        let generation = breaker.inner.half_open_probe.load(Ordering::Acquire);
+        assert!(in_flight.probe.is_some() && generation != 0);
+
+        // A call admitted while the breaker was closed reports its success.
+        registry.record_success("probe");
+        assert_eq!(registry.state_name("probe"), "closed");
+        assert_eq!(
+            breaker.inner.half_open_probe.load(Ordering::Acquire),
+            generation,
+            "record_success freed a slot that the probe still in flight owns"
+        );
+
+        drop(in_flight);
+        assert_eq!(
+            breaker.inner.half_open_probe.load(Ordering::Acquire),
+            0,
+            "the probe frees its own slot when its call ends"
+        );
+
+        // The next half-open phase still admits exactly one probe.
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("probe");
+        }
+        registry.expire_open_window("probe");
+        let next = registry
+            .admit("probe")
+            .expect("the next half-open probe is admitted");
+        assert!(
+            !registry.allow("probe"),
+            "a second probe is refused while the first is in flight"
+        );
+        drop(next);
     }
 
     #[test]
