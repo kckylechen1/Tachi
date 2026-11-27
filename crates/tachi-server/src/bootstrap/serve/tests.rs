@@ -1375,22 +1375,26 @@ impl HostProfileEnvFixture {
     }
 
     fn load(&self) {
-        self.load_with(false);
-    }
-
-    /// The app home as `resolve_tachi_home` finds it inside a checkout.
-    fn load_with_app_home_in_checkout(&self) {
-        self.load_with(true);
-    }
-
-    fn load_with(&self, app_home_in_checkout: bool) {
         load_env_files(
             self.home.path(),
             self.app_home.path(),
-            app_home_in_checkout,
+            false,
             true,
             Some(self.repo.path()),
         );
+    }
+
+    /// The app home as startup resolves it, flagged the way startup flags it.
+    fn load_with_resolved_app_home(&self) -> crate::path_utils::TachiHomeSource {
+        let resolution = crate::path_utils::resolve_tachi_home();
+        load_env_files(
+            self.home.path(),
+            &resolution.path,
+            resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
+            true,
+            Some(self.repo.path()),
+        );
+        resolution.source
     }
 }
 
@@ -1426,12 +1430,18 @@ impl Drop for RestoreEnv {
 #[test]
 fn project_local_env_does_not_set_vault_authority() {
     let fixture = HostProfileEnvFixture::new();
-    let original_mode = std::env::var_os("TACHI_VAULT_CHILD_ENV");
-    let _restore_mode = RestoreEnv("TACHI_VAULT_CHILD_ENV", original_mode.clone());
+    // A known starting point: an operator who already set the mode must not
+    // make the refusal look satisfied.
+    let _restore_mode = RestoreEnv(
+        "TACHI_VAULT_CHILD_ENV",
+        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
+    );
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
     let _restore_probe = RestoreEnv(
         "TACHI_VAULT_PROBE_FIXTURE",
         std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
     );
+    std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
     fixture.write_env(
         fixture.repo.path().join(".tachi/config.env"),
         "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=repo\n",
@@ -1439,9 +1449,8 @@ fn project_local_env_does_not_set_vault_authority() {
 
     fixture.load();
 
-    assert_eq!(
-        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
-        original_mode,
+    assert!(
+        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
         "a project-local file must not choose what the Vault exports to dispatches"
     );
     // Only the export mode is refused. Other settings still load.
@@ -1452,36 +1461,60 @@ fn project_local_env_does_not_set_vault_authority() {
 }
 
 /// An app home that `resolve_tachi_home` finds inside a checkout is content a
-/// repository can hold too. Its env files take the same refusal.
+/// repository can hold too. Its env files take the same refusal, and keep
+/// loading the way a whole-file load does, byte order mark included.
 #[test]
 fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
     let fixture = HostProfileEnvFixture::new();
-    let original_mode = std::env::var_os("TACHI_VAULT_CHILD_ENV");
-    let _restore_mode = RestoreEnv("TACHI_VAULT_CHILD_ENV", original_mode.clone());
+    let _restore_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
+    std::env::remove_var("TACHI_HOME");
+    let _restore_mode = RestoreEnv(
+        "TACHI_VAULT_CHILD_ENV",
+        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
+    );
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
     let _restore_probe = RestoreEnv(
         "TACHI_VAULT_PROBE_FIXTURE",
         std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
     );
+    std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
+    // The layout `resolve_tachi_home` looks for above the cwd.
+    let app_home = fixture.repo.path().join("data").join("tachi");
     fixture.write_env(
-        fixture.app_home.path().join("secrets.env"),
+        app_home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        "",
+    );
+    fixture.write_env(
+        app_home.join("secrets.env"),
         "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=secrets\n",
     );
     fixture.write_env(
-        fixture.app_home.path().join("config.env"),
-        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=app_home\n",
+        app_home.join("config.env"),
+        "\u{feff}TACHI_HOST_PROFILE=home_data\n\
+         TACHI_VAULT_CHILD_ENV=all\n\
+         TACHI_VAULT_PROBE_FIXTURE=app_home\n",
     );
 
-    fixture.load_with_app_home_in_checkout();
+    let source = fixture.load_with_resolved_app_home();
 
     assert_eq!(
-        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
-        original_mode,
+        source,
+        crate::path_utils::TachiHomeSource::WorkspaceData,
+        "the fixture must be resolved the way a checkout-found app home is"
+    );
+    assert!(
+        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
         "an app home found in a checkout must not choose what the Vault exports"
     );
     // Both files still load; `config.env` still overrides `secrets.env`.
     assert_eq!(
         std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
         Ok("app_home")
+    );
+    // The mark on the first line disappears, as it does for a whole-file load.
+    assert_eq!(
+        std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+        Ok("home_data")
     );
 }
 
