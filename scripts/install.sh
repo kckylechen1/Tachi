@@ -150,19 +150,26 @@ launchctl_bootstrap_plist() {
 daemon_status_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status
 
-  status=$(TACHI_DISABLE_AUTO_DAEMON=1 \
-    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null) || return 0
-  printf '%s\n' "$status" | json_object_fields
+  # The output reaches the decoder as the binary wrote it. Kept in a shell
+  # variable first, it would lose a NUL byte, and a broken object could become
+  # a whole one. Here a NUL becomes a byte the decoder refuses.
+  TACHI_DISABLE_AUTO_DAEMON=1 \
+    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null |
+    tr '\000' '\001' | json_object_fields
 }
 
 # One `name<TAB>type<TAB>value` line for each top-level field of the input,
 # and nothing else unless the whole input is exactly one JSON object. Nothing
 # else may read the status: matched as text, a nested field passes for the
-# top-level one and a value of the wrong type for the right one. A string is
-# printed as it stands between its quotes, and a control character cannot
-# occur there, so a line holds one field.
+# top-level one and a value of the wrong type for the right one.
+#
+# A `\u` escape is refused, and so is a name with any escape in it. Two names
+# that differ only in an escape would then be one name written twice. A value
+# is printed as it stands between its quotes, and a control character cannot
+# occur there, so a line holds one field. The status reads a value only as
+# one of its plain words, and no short escape can spell one of them, so the
+# value as written decides exactly as the decoded one would.
 json_object_fields() {
   awk '
     function ws(c) {
@@ -180,10 +187,9 @@ json_object_fields() {
         if (c == "\"") { i++; return }
         if (c == "\\") {
           e = substr(s, i + 1, 1)
-          if (index("\"\\/bfnrt", e) > 0) { i += 2; continue }
-          if (e == "u" && substr(s, i + 2, 4) ~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/) { i += 6; continue }
-          bad = 1
-          return
+          if (index("\"\\/bfnrt", e) == 0) { bad = 1; return }
+          i += 2
+          continue
         }
         if (c < " ") { bad = 1; return }
         i++
@@ -219,6 +225,7 @@ json_object_fields() {
         string()
         if (bad) return ""
         key = substr(s, f + 1, i - f - 2)
+        if (index(key, "\\") > 0) { bad = 1; return "" }
         ws()
         if (substr(s, i, 1) != ":") { bad = 1; return "" }
         i++

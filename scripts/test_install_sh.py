@@ -323,11 +323,35 @@ sleep() { :; }
             '{"state": "none", "state": "running"}',  # the same name twice
             '{"state": "run\nning"}',  # a raw control character in a string
             '{"state": "a\\qb"}',  # not an escape
+            '{"state": "non\\u0065"}',  # a code point given as an escape
+            '{"state":"none","\\u0073tate":"unavailable"}',  # one name, written twice
+            '{"a\\"b": 1}',  # a name with an escape in it
         ):
             with self.subTest(text=text):
                 result = fields_of(text)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertEqual(result.stdout, "")
+
+    def test_an_escaped_or_nul_bearing_answer_is_not_an_answer(self) -> None:
+        # A name written through an escape is one name twice; a state spelled
+        # through one is not read; and a NUL byte anywhere is not whitespace.
+        for status in (
+            b'{"state":"none","\\u0073tate":"unavailable"}',
+            b'{"state":"n\\u006fne"}',
+            b'{"state":"no\x00ne"}',
+            b'{"state":"none"}\x00and then this',
+            b'\x00{"state":"none"}',
+            b'{"state":"none"}\x00',
+        ):
+            with self.subTest(status=status):
+                self.calls.unlink(missing_ok=True)
+                self.status.write_bytes(status)
+                result = self.run_bash(
+                    self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("cannot tell what holds this DB scope", result.stdout)
+                self.assertEqual(self.call_log(), [], "nothing was signalled")
 
     def test_a_cut_short_answer_is_not_read_as_free(self) -> None:
         for status in (
