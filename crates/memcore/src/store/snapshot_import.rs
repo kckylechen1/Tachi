@@ -517,6 +517,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn authorized_portable41_upgrade_preserves_imported_lifecycle() {
+        use crate::db::{migrations, DbOpenContext, StoreProfile};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project.db");
+        let open = |context: DbOpenContext| {
+            MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &context
+                    .with_exact_profile(StoreProfile::PortableKernel)
+                    .with_exact_role("project"),
+            )
+        };
+        let lifecycle =
+            |conn: &rusqlite::Connection| -> (String, String, i64, String, Option<String>) {
+                conn.query_row(
+                    "SELECT created_at, updated_at, revision, valid_from, valid_until
+                 FROM memories WHERE id='edge'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .unwrap()
+            };
+        let imported = (
+            String::new(),
+            String::new(),
+            0,
+            String::new(),
+            Some(String::new()),
+        );
+        // Catalogue E43 projected Portable41. Create the old store through
+        // its real migrations and snapshot API, without restamping newer DDL.
+        migrations::catalogue::test_support::with_prefix(43, || {
+            let mut store = open(DbOpenContext::create_fresh()).unwrap();
+            assert_eq!(
+                migrations::read_schema_version(store.connection()).unwrap(),
+                41
+            );
+            let mut row = snapshot_entry("edge", "imported memory");
+            row.created_at.clear();
+            row.updated_at.clear();
+            row.entry.revision = 0;
+            row.entry.valid_from.clear();
+            row.entry.valid_until = Some(String::new());
+            store.import_snapshot_batch(&[row]).unwrap();
+            assert_eq!(lifecycle(store.connection()), imported);
+        });
+        assert!(matches!(
+            open(DbOpenContext::open_existing_deny()),
+            Err(crate::MemoryError::SchemaMigrationOptInRequired { stored: 41, .. })
+        ));
+        let upgraded = open(DbOpenContext::open_existing_allow("test:owner")).unwrap();
+        assert_eq!(
+            migrations::read_schema_version(upgraded.connection()).unwrap(),
+            crate::db::PORTABLE_OUTPUT_STAMP
+        );
+        assert_eq!(lifecycle(upgraded.connection()), imported);
+    }
+
     /// The six row shapes tachi#1607's acceptance names, read back column by
     /// column. This is the test that discriminates snapshot import from
     /// `upsert_batch`: run this batch through `upsert_batch` and

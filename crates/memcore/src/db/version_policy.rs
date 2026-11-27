@@ -133,6 +133,14 @@ impl VersionHeader {
         (self.projection()..=migrations::supported_schema_version()).contains(&self.stored)
     }
 
+    /// Supported, stamped Portable stores may contain exact lifecycle values
+    /// from snapshot import. A schema upgrade has no authority to replace them.
+    pub fn needs_legacy_row_repair(self) -> bool {
+        !self.current()
+            && (self.probe != ProfileProbe::Portable
+                || self.stored < migrations::BASELINE_SCHEMA_VERSION)
+    }
+
     pub fn portable_band(self) -> bool {
         #[cfg(test)]
         if super::schema::pre_b_39::active_version().is_some() {

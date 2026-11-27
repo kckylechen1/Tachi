@@ -53,7 +53,8 @@ fn init_schema_for_profile(
     // Public in-memory stores retain the default Full profile and no identity
     // stamp (#1585 D3). Admission's private reference also uses this constructor
     // with Portable, without creating a file or an identity.
-    let repair_legacy_rows = !super::version_policy::VersionHeader::read(&tx)?.current();
+    let repair_legacy_rows =
+        super::version_policy::VersionHeader::read(&tx)?.needs_legacy_row_repair();
     init_schema_inner(&tx, profile, repair_legacy_rows)?;
     crate::db::migrations::run_data_migrations_in_tx(
         &tx,
@@ -1407,7 +1408,7 @@ fn init_schema_with_label_mut_inner(
     // tachi#1990: authoritative private-partition refusal on the in-transaction
     // state (a stamp committed in the window), before any DDL or stamp.
     funnel.admit_private_partition_stamp(&tx)?;
-    init_schema_inner(&tx, identity.profile, !header.current())?;
+    init_schema_inner(&tx, identity.profile, header.needs_legacy_row_repair())?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
     test_hooks::fail_after_legacy_work_before_stamp()?;
@@ -2061,8 +2062,8 @@ fn init_schema_inner(
         }
     }
 
-    // Repair historical rows during provisioning or an admitted upgrade.
-    // Current snapshots retain their raw lifecycle values on every reopen.
+    // Fresh provisioning and historical Full upgrades may repair old rows.
+    // A native Portable snapshot owns its raw lifecycle values through upgrade.
     if repair_legacy_rows {
         legacy_rows::normalize_legacy_memory_rows(conn, normalize_memory_validity_columns)?;
     }
