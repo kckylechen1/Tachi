@@ -173,7 +173,8 @@ pub(super) fn is_vault_initialized(server: &impl VaultCtx) -> Result<bool, Strin
 /// Unlock attempts take turns. An attempt is admitted, derives its key and
 /// records its failure while it holds the turn, so an attempt that queued up
 /// just before a lockout engaged meets that lockout instead of running a key
-/// derivation the limit no longer allows.
+/// derivation the limit no longer allows. The derivation task owns the turn,
+/// so a caller that goes away mid-derivation releases nothing early.
 pub(super) static UNLOCK_ADMISSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(super) fn ensure_vault_unlock_allowed(server: &impl VaultCtx) -> Result<(), String> {
@@ -189,16 +190,17 @@ pub(super) fn ensure_vault_unlock_allowed(server: &impl VaultCtx) -> Result<(), 
     Ok(())
 }
 
-/// Admit the attempt that holds the turn. A lockout that has ended starts
-/// the count over, so an owner who waited it out gets the whole budget again.
-/// The reset belongs here, where the attempts that queued up behind the first
-/// one share the new budget; the refusal is also checked before the turn, so
-/// that one stays a pure read.
-pub(super) fn admit_unlock_turn(server: &impl VaultCtx) -> Result<(), String> {
-    ensure_vault_unlock_allowed(server)?;
-    let mut v = server.vault_write();
-    if v.failed_attempts.1.is_some() {
-        v.failed_attempts = (0, None);
+/// Admit the attempt that holds the turn. A lockout that has ended grants
+/// nothing: the failed count stays until a password verifies, so the next
+/// miss relocks at once instead of handing out the budget again. A refused
+/// password was never tested; it is zeroed before it is dropped.
+pub(super) fn admit_unlock_turn(
+    server: &impl VaultCtx,
+    password: &mut String,
+) -> Result<(), String> {
+    if let Err(err) = ensure_vault_unlock_allowed(server) {
+        crypto::zero_string(password);
+        return Err(err);
     }
     Ok(())
 }
