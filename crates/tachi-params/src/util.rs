@@ -29,6 +29,10 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "NODE_OPTIONS",
     "NODE_PATH",
     "NPM_CONFIG_SCRIPT_SHELL",
+    "NPM_CONFIG_NODE_OPTIONS",
+    "NPM_CONFIG_NODE_GYP",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PYTHONHOME",
@@ -54,6 +58,12 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "RUSTDOC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
+    // `CARGO` is forwarded to whatever runs it. `RUSTUP_TOOLCHAIN` makes a
+    // rustup proxy pick a toolchain, and install a missing one; `RUSTUP_HOME`
+    // moves where toolchains and their settings are looked up.
+    "CARGO",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_HOME",
     "CARGO_BUILD_RUSTC",
     "CARGO_BUILD_RUSTDOC",
     "CARGO_BUILD_RUSTC_WRAPPER",
@@ -133,6 +143,18 @@ mod tests {
             "npm_config_script_shell",
             "GIT_CONFIG_PARAMETERS",
             "PERL5DB",
+            // Forwarded to whatever runs `cargo`; a rustup proxy picks the
+            // toolchain, and may install one; npm turns NODE_OPTIONS into
+            // what its scripts load, and reads its configuration from these.
+            "CARGO",
+            "cargo",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_HOME",
+            "NPM_CONFIG_NODE_OPTIONS",
+            "npm_config_node_options",
+            "NPM_CONFIG_NODE_GYP",
+            "NPM_CONFIG_USERCONFIG",
+            "NPM_CONFIG_GLOBALCONFIG",
         ] {
             assert!(is_execution_environment_name(name), "{name}");
         }
@@ -141,7 +163,7 @@ mod tests {
             "NPM_CONFIG_CACHE",
             "CARGO_TARGET_DIR",
             "CARGO_BUILD_JOBS",
-            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_IO_THREADS",
         ] {
             assert!(!is_execution_environment_name(name), "{name}");
         }
