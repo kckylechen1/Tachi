@@ -758,3 +758,85 @@ fn freelist_stats_tracks_freed_pages_until_vacuum() {
     assert_eq!(after.freelist_count, 0);
     assert_eq!(after.freelist_bytes(), 0);
 }
+
+/// A memory whose stored `query_diversity` already equals what `access_history`
+/// implies has nothing to reconcile; it is not reported as reconciled.
+#[test]
+fn automatic_gc_reconciles_only_memories_whose_query_diversity_drifted() {
+    let mut conn = make_conn();
+    for id in ["gc-qd-in-sync", "gc-qd-drifted"] {
+        upsert(&mut conn, &make_entry(id, "diversity target"), false).unwrap();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+                params![id, now_utc_iso(), format!("hash-{i}")],
+            )
+            .unwrap();
+        }
+    }
+    conn.execute(
+        "UPDATE memories SET query_diversity = 3 WHERE id = ?1",
+        params!["gc-qd-in-sync"],
+    )
+    .unwrap();
+
+    let summary = gc_tables(&mut conn, &GcConfig::default(), StoreProfile::TachiFull).unwrap();
+
+    assert_eq!(summary["query_diversity_reconciled"], json!(1));
+    for (id, expected) in [("gc-qd-in-sync", 3), ("gc-qd-drifted", 3)] {
+        let stored: i64 = conn
+            .query_row(
+                "SELECT query_diversity FROM memories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, expected, "{id}");
+    }
+}
+
+/// The automatic sweep used to plan outside its transaction. Any write that
+/// landed before the apply began changed the facts and refused the sweep, so
+/// GC never ran on a busy store.
+#[test]
+fn automatic_gc_plans_and_applies_under_one_write_lock() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let path = temp_dir.path().join("gc-race.sqlite");
+    let mut conn = crate::test_fixtures::file_backed_connection(&path);
+    upsert(
+        &mut conn,
+        &make_entry("gc-race", "racing writer target"),
+        false,
+    )
+    .unwrap();
+
+    let (outcome, landed) = crate::test_fixtures::with_racing_write(
+        &mut conn,
+        &path,
+        crate::test_fixtures::RacePoint::Transaction,
+        |other| {
+            other
+                .execute(
+                    "INSERT INTO access_history (memory_id, accessed_at, query_hash)
+                     VALUES (?1, ?2, ?3)",
+                    params!["gc-race", now_utc_iso(), "hash-from-the-other-connection"],
+                )
+                .is_ok()
+        },
+        |conn| gc_tables(conn, &GcConfig::default(), StoreProfile::TachiFull),
+    );
+
+    assert!(landed, "the other write commits before the sweep begins");
+    outcome.expect("the sweep decides on the facts it finds under its own lock");
+    let diversity: i64 = conn
+        .query_row(
+            "SELECT query_diversity FROM memories WHERE id = ?1",
+            params!["gc-race"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        diversity, 1,
+        "the sweep reconciled the row the racing write left"
+    );
+}

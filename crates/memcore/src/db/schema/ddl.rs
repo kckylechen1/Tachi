@@ -1769,7 +1769,7 @@ pub(super) const A2A_RECEIPT_ACTOR_ADMISSION_FK_CLAUSE: &str =
 pub(super) const A2A_BODY_SIZE_V32_CHECK_CLAUSE: &str =
     "CHECK (body IS NULL OR length(CAST(body AS BLOB)) BETWEEN 1 AND 4096)";
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) const A2A_MAILBOX_V31_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS a2a_envelopes (
             envelope_id                    TEXT PRIMARY KEY NOT NULL,

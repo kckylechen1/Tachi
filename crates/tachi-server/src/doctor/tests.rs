@@ -18,7 +18,9 @@ fn make_healthy_db(path: &Path) {
              INSERT INTO memories (id, text) VALUES ('a','hello');
              INSERT INTO memories (id, text, domain) VALUES ('b','world','trading');
              CREATE TABLE foundry_jobs (id TEXT, status TEXT);
-             INSERT INTO foundry_jobs VALUES ('j1','completed'),('j2','skipped'),('j3','pending');",
+             INSERT INTO foundry_jobs VALUES
+                ('j1','completed'),('j2','skipped'),
+                ('j3','planned'),('j4','queued'),('j5','running');",
         )
         .unwrap();
 }
@@ -48,10 +50,13 @@ fn classify_healthy() {
     let f = classify_one(&p);
     assert_eq!(f.classification, DbClassification::Healthy);
     assert_eq!(f.mem_count, Some(2));
-    assert_eq!(f.jobs.total, 3);
+    assert_eq!(f.jobs.total, 5);
     assert_eq!(f.jobs.completed, 1);
     assert_eq!(f.jobs.skipped, 1);
-    assert_eq!(f.jobs.pending, 1);
+    assert_eq!(f.jobs.failed, 0);
+    // A job that is planned, queued or running has not finished yet.
+    assert_eq!(f.jobs.pending, 3);
+    assert_eq!(f.jobs.other, 0);
     assert_eq!(f.none_domain_count, Some(1));
     assert_eq!(f.schema_kind, "tachi");
     // #1041 F7: a bare tempdir path has no `project:<name>` scope_hint, so it

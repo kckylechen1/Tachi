@@ -32,6 +32,16 @@ impl MemoryStore {
         }
     }
 
+    /// A handle opened read-only cannot write access history. Recording is
+    /// switched off for it rather than left to fail the whole search with
+    /// `attempt to write a readonly database`; the rows keep their stored
+    /// counters.
+    fn withhold_access_recording_on_read_only(&self, options: &mut SearchOptions) {
+        if options.record_access && self.conn.is_readonly("main").unwrap_or(false) {
+            options.record_access = false;
+        }
+    }
+
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
         &self,
@@ -46,6 +56,7 @@ impl MemoryStore {
         // request, is the authority on which database this is.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
         self.apply_kernel_policy_defaults(&mut options);
+        self.withhold_access_recording_on_read_only(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
@@ -67,6 +78,7 @@ impl MemoryStore {
         // instrumented path must not measure a differently-gated query.
         options.wiki_corpus_store = self.is_wiki_corpus_store();
         self.apply_kernel_policy_defaults(&mut options);
+        self.withhold_access_recording_on_read_only(&mut options);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let (results, mut receipt) = retry_search_locked(&self.db_label, || {
@@ -907,6 +919,43 @@ mod tests {
     /// store's internal rows — and the reason must be the store's identity,
     /// not the request's shape, which is what the identical query against an
     /// identically-seeded non-wiki store proves is *not* doing the work here.
+    /// A handle opened read-only cannot write access history. Recording used
+    /// to stay on by default there and fail the whole search with `attempt to
+    /// write a readonly database`.
+    #[test]
+    fn read_only_store_searches_with_default_options_instead_of_failing_to_record() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("read-only-search.sqlite");
+        let path = path.to_str().expect("utf8 path");
+        {
+            let mut writer = MemoryStore::open(path).expect("open writable store");
+            writer
+                .upsert(&store_identity_entry(
+                    "read-only-entry",
+                    "/probe/read-only",
+                    "zebra habitat in the savanna",
+                ))
+                .expect("seed entry");
+        }
+
+        let reader = MemoryStore::open_read_only_with_label(path, "probe").expect("open read-only");
+
+        let by_default = reader.search("zebra", None).expect("default options");
+        assert_eq!(by_default.len(), 1);
+        let requested = SearchOptions {
+            record_access: true,
+            ..SearchOptions::default()
+        };
+        let explicit = reader
+            .search("zebra", Some(requested))
+            .expect("recording requested");
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(
+            explicit[0].entry.access_count, 0,
+            "a read-only handle reports the stored counters"
+        );
+    }
+
     #[test]
     fn unscoped_search_of_the_wiki_store_excludes_internal_rows() {
         let (wiki_store, wiki_path) = store_with_internal_rows("wiki");

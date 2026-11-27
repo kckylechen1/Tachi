@@ -289,7 +289,9 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
     counts.completed = by_status("completed");
     counts.skipped = by_status("skipped");
     counts.failed = by_status("failed");
-    counts.pending = by_status("pending");
+    // A job is planned, queued or running until it reaches completed, skipped
+    // or failed; there is no `pending` status to count.
+    counts.pending = by_status("planned") + by_status("queued") + by_status("running");
     counts
 }
 

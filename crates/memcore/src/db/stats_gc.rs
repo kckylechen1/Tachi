@@ -38,9 +38,10 @@ fn gc_tables_at(
     // The operator preview and this historical store entrypoint intentionally
     // share one source-derived registry. This caller excludes the separate
     // CLI Kanban class; the canonical operator GC includes it explicitly.
-    let expected =
-        super::operator_maintenance::gc_candidate_facts(conn, cfg, profile, as_of, 0, false)?;
-    let outcome = super::operator_maintenance::apply_gc_candidate_facts(
+    // Nothing was planned ahead of this call: planning outside the
+    // transaction let any concurrent write change the facts and refuse the
+    // sweep, so the automatic GC never ran on a busy store.
+    let outcome = super::operator_maintenance::apply_unplanned_gc(
         conn,
         cfg,
         profile,
@@ -48,7 +49,6 @@ fn gc_tables_at(
         as_of,
         0,
         false,
-        &expected,
         |_tx, _source, _post| {
             #[cfg(test)]
             test_hooks::fail_after_a2a_body_scrub()?;

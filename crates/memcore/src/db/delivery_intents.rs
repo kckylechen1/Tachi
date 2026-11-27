@@ -72,7 +72,7 @@
 //! `event_id`; replays collide with `UNIQUE (delivery_id, event_id)` and are
 //! suppressed as idempotent receipts, never re-applied.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -448,8 +448,14 @@ pub fn mint_delivery_intent(
     }
 
     // Row + ledger events land atomically: a mint is never observable as a
-    // bare row without its receipts.
-    let tx = conn.unchecked_transaction()?;
+    // bare row without its receipts. The lookup is repeated under the write
+    // lock that covers the insert: two mints of one idempotency key otherwise
+    // both saw no intent, and the loser failed on the unique key instead of
+    // reconciling with the winner.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if let Some(existing) = find_intent_by_key(&tx, &new.idempotency_key)? {
+        return reconcile_mint_in_tx(tx, existing, new, &now);
+    }
     tx.execute(
         "INSERT INTO delivery_intents (
             delivery_id, idempotency_key, execution_source, execution_ref,
@@ -1239,12 +1245,13 @@ fn validate_mint(new: &NewDeliveryIntent) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn reconcile_mint(
-    conn: &Connection,
-    existing: DeliveryIntent,
-    new: &NewDeliveryIntent,
-    now: &str,
-) -> Result<DeliveryIntent, MemoryError> {
+enum ReconcilePlan {
+    ReturnExisting,
+    Conflict(String),
+    Supersede { next_result_revision: i64 },
+}
+
+fn plan_reconcile(existing: &DeliveryIntent, new: &NewDeliveryIntent) -> ReconcilePlan {
     // Content identity: the result ref and digest together decide whether a
     // mint carries new information. The execution identity is fixed by the
     // idempotency key, so it cannot differ on this path.
@@ -1254,7 +1261,7 @@ fn reconcile_mint(
     if new.result_revision < existing.result_revision && !new.correction {
         // STALE: a lower revision without correction authority is older
         // information and can never change the intent.
-        return Ok(existing);
+        return ReconcilePlan::ReturnExisting;
     }
     // (A correction-authoritative lower-revision mint falls through: the
     // terminal plane asserts the incoming receipt is the canonical latest,
@@ -1265,24 +1272,20 @@ fn reconcile_mint(
     // cannot slip through there.)
     if new.result_revision == existing.result_revision {
         if same_content {
-            return Ok(existing);
+            return ReconcilePlan::ReturnExisting;
         }
         if !new.correction {
-            return Err(MemoryError::DeliveryIdempotencyConflict(format!(
+            return ReconcilePlan::Conflict(format!(
                 "idempotency_key '{}' already mints intent {} at revision {} with different content",
                 new.idempotency_key, existing.delivery_id, existing.result_revision
-            )));
+            ));
         }
         // Terminal-plane correction at an equal wall-clock revision:
         // supersede strictly INSIDE the mint transaction, so two same-tick
         // corrections serialize and none is silently lost.
-        return supersede_intent(
-            conn,
-            existing.clone(),
-            new,
-            existing.result_revision + 1,
-            now,
-        );
+        return ReconcilePlan::Supersede {
+            next_result_revision: existing.result_revision + 1,
+        };
     }
 
     // Strictly higher revision (or a correction-authoritative fallthrough
@@ -1293,17 +1296,50 @@ fn reconcile_mint(
         // Unchanged content at a higher revision (a delayed replay of the
         // same terminal receipt) carries NO new information: it must not
         // re-arm a settled delivery.
-        return Ok(existing);
+        return ReconcilePlan::ReturnExisting;
     }
-    let next_result_revision = new.result_revision.max(existing.result_revision + 1);
-    supersede_intent(conn, existing, new, next_result_revision, now)
+    ReconcilePlan::Supersede {
+        next_result_revision: new.result_revision.max(existing.result_revision + 1),
+    }
 }
 
-/// Re-arm an intent with a corrected result. The whole rewrite + ledger
-/// receipts land atomically and the rewrite is CAS-guarded on the revision
-/// it reconciled against.
-fn supersede_intent(
+fn reconcile_mint(
     conn: &Connection,
+    existing: DeliveryIntent,
+    new: &NewDeliveryIntent,
+    now: &str,
+) -> Result<DeliveryIntent, MemoryError> {
+    match plan_reconcile(&existing, new) {
+        ReconcilePlan::ReturnExisting => Ok(existing),
+        ReconcilePlan::Conflict(msg) => Err(MemoryError::DeliveryIdempotencyConflict(msg)),
+        ReconcilePlan::Supersede { .. } => {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+            let current = find_intent_by_key(&tx, &new.idempotency_key)?.unwrap_or(existing);
+            reconcile_mint_in_tx(tx, current, new, now)
+        }
+    }
+}
+
+fn reconcile_mint_in_tx(
+    tx: Transaction<'_>,
+    existing: DeliveryIntent,
+    new: &NewDeliveryIntent,
+    now: &str,
+) -> Result<DeliveryIntent, MemoryError> {
+    match plan_reconcile(&existing, new) {
+        ReconcilePlan::ReturnExisting => Ok(existing),
+        ReconcilePlan::Conflict(msg) => Err(MemoryError::DeliveryIdempotencyConflict(msg)),
+        ReconcilePlan::Supersede {
+            next_result_revision,
+        } => supersede_intent_in_tx(tx, existing, new, next_result_revision, now),
+    }
+}
+
+/// Re-arm an intent with a corrected result while holding the enclosing write
+/// lock. The whole rewrite + ledger receipts land atomically and the rewrite
+/// is CAS-guarded on the revision it reconciled against.
+fn supersede_intent_in_tx(
+    tx: Transaction<'_>,
     existing: DeliveryIntent,
     new: &NewDeliveryIntent,
     next_result_revision: i64,
@@ -1311,7 +1347,6 @@ fn supersede_intent(
 ) -> Result<DeliveryIntent, MemoryError> {
     let reopens = existing.delivery_state != DeliveryState::Ready.as_str();
     let next_revision = existing.revision + 1;
-    let tx = conn.unchecked_transaction()?;
     let updated = tx.execute(
         "UPDATE delivery_intents
          SET result_ref = ?2, result_revision = ?3, payload_digest = ?4,
@@ -1370,9 +1405,10 @@ fn supersede_intent(
             now,
         )?;
     }
+    let updated_intent = find_intent_by_id(&tx, &existing.delivery_id)?
+        .ok_or_else(|| MemoryError::Internal("superseded delivery intent not found".to_string()))?;
     tx.commit()?;
-    find_intent_by_id(conn, &existing.delivery_id)?
-        .ok_or_else(|| MemoryError::Internal("superseded delivery intent not found".to_string()))
+    Ok(updated_intent)
 }
 
 fn lease_expiration(now: &str, seconds: i64) -> Result<String, MemoryError> {
@@ -1686,6 +1722,66 @@ mod tests {
             expires_at: None,
             correction: false,
         }
+    }
+
+    // Two mints of one idempotency key: the lookup that decides whether the
+    // row exists shares the write lock with the insert. Looked up outside it,
+    // the loser of the race saw no intent and then failed on the unique key
+    // instead of reconciling with the winner.
+    #[test]
+    fn a_mint_that_races_another_mint_of_its_key_reconciles_with_the_winner() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("delivery-intents.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        let winner = mint_new("shared-race-key");
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::Transaction,
+            move |other| mint_delivery_intent(other, &winner).is_ok(),
+            |conn| mint_delivery_intent(conn, &mint_new("shared-race-key")),
+        );
+
+        assert!(landed, "the other mint commits before this one begins");
+        let minted = outcome.expect("the racing mint reconciles with the winner");
+        assert_eq!(minted.idempotency_key, "shared-race-key");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_intents WHERE idempotency_key = ?1",
+                params!["shared-race-key"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "one idempotency key, one intent");
+    }
+
+    #[test]
+    fn a_racing_superseding_mint_keeps_its_write_lock_across_reconcile() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir
+            .path()
+            .join("delivery-intents-supersede-race.sqlite");
+        let mut conn = crate::test_fixtures::file_backed_connection(&path);
+        let winner = mint_new("shared-supersede-key");
+
+        let mut correction = mint_new("shared-supersede-key");
+        correction.result_revision = 2;
+        correction.payload_digest = "sha256-BBBB".to_string();
+        correction.result_ref = "artifact://runs/outcome-1/result-v2.json".to_string();
+
+        let (outcome, landed) = crate::test_fixtures::with_racing_write(
+            &mut conn,
+            &path,
+            crate::test_fixtures::RacePoint::Transaction,
+            move |other| mint_delivery_intent(other, &winner).is_ok(),
+            |conn| mint_delivery_intent(conn, &correction),
+        );
+
+        assert!(landed, "the winner mint commits before this one begins");
+        let minted = outcome.expect("superseding reconcile must keep the write lock and succeed");
+        assert_eq!(minted.result_revision, 2);
+        assert_eq!(minted.payload_digest, "sha256-BBBB");
     }
 
     /// Execution/adjudication fixture rows that must stay byte-identical

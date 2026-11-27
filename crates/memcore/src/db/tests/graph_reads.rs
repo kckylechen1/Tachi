@@ -187,6 +187,73 @@ fn graph_expand_bfs() {
     assert!(!r2.distances.contains_key("d")); // d is disconnected
 }
 
+fn add_chain_edge(conn: &Connection, source_id: &str, target_id: &str) {
+    add_edge(
+        conn,
+        &MemoryEdge {
+            source_id: source_id.into(),
+            target_id: target_id.into(),
+            relation: "follows".into(),
+            weight: 1.0,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+}
+
+/// The node ceiling counts what a traversal finds beyond its seeds. Counting
+/// the seeds themselves left nothing to expand once they reached the ceiling
+/// on their own, and a wide seed set came back with no edges at all.
+#[test]
+fn graph_expansion_from_many_seeds_still_finds_their_edges() {
+    let mut conn = make_conn();
+    let mut seed_ids = Vec::new();
+    for i in 0..55 {
+        let seed = format!("many-seed-{i:02}");
+        upsert(&mut conn, &make_entry(&seed, "seed"), false).unwrap();
+        seed_ids.push(seed);
+    }
+    for i in 0..3 {
+        let neighbor = format!("many-seed-neighbor-{i}");
+        upsert(&mut conn, &make_entry(&neighbor, "neighbor"), false).unwrap();
+        add_chain_edge(&conn, &format!("many-seed-{i:02}"), &neighbor);
+    }
+
+    let expanded = graph_expand(&conn, &seed_ids, 1, None, false).unwrap();
+
+    assert_eq!(expanded.edges.len(), 3);
+    assert_eq!(expanded.entries.len(), 3);
+    assert_eq!(expanded.distances.get("many-seed-neighbor-2"), Some(&1));
+}
+
+/// `graph_expand_limited` names its own bound: the edge limit. The node
+/// ceiling used to end the walk at fifty nodes, well short of `max_hops`.
+#[test]
+fn limited_graph_expansion_is_bounded_only_by_its_edge_limit() {
+    let mut conn = make_conn();
+    for i in 0..60 {
+        upsert(
+            &mut conn,
+            &make_entry(&format!("hop-{i:02}"), "chain node"),
+            false,
+        )
+        .unwrap();
+    }
+    for i in 1..60 {
+        add_chain_edge(&conn, &format!("hop-{:02}", i - 1), &format!("hop-{i:02}"));
+    }
+
+    let expanded =
+        graph_expand_limited(&conn, &["hop-00".into()], 59, None, usize::MAX, false).unwrap();
+
+    assert_eq!(expanded.distances.get("hop-59"), Some(&59));
+    assert_eq!(expanded.entries.len(), 59);
+    assert_eq!(expanded.edges.len(), 59);
+}
+
 #[test]
 fn graph_expand_limited_records_first_injection_edge_at_traversal_time() {
     let mut conn = make_conn();

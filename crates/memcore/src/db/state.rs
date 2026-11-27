@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::error::MemoryError;
 
-use super::common::now_utc_iso;
+use super::common::{escape_like_pattern, now_utc_iso};
 
 pub(crate) const OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE: &str = "operator_maintenance_receipt";
 pub(crate) const CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE: &str =
@@ -498,28 +498,41 @@ pub fn list_derived_by_source(
     path_prefix: &str,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, MemoryError> {
-    let like_pattern = format!("{}%", path_prefix);
+    // The prefix names a path: it matches itself and anything below it, never
+    // a sibling whose name merely starts with the same characters.
+    let like_pattern = format!(
+        "{}/%",
+        escape_like_pattern(path_prefix.trim_end_matches('/'))
+    );
     let mut stmt = conn.prepare(
         "SELECT id, text, path, summary, importance, source, scope, metadata, created_at
          FROM derived_items
-         WHERE source = ?1 AND path LIKE ?2
+         WHERE source = ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')
          ORDER BY created_at DESC
-         LIMIT ?3",
+         LIMIT ?4",
     )?;
 
-    let rows = stmt.query_map(params![source, like_pattern, limit as i64], |row| {
-        Ok(serde_json::json!({
-            "id": row.get::<_, String>(0)?,
-            "text": row.get::<_, String>(1)?,
-            "path": row.get::<_, String>(2)?,
-            "summary": row.get::<_, String>(3)?,
-            "importance": row.get::<_, f64>(4)?,
-            "source": row.get::<_, String>(5)?,
-            "scope": row.get::<_, String>(6)?,
-            "metadata": row.get::<_, String>(7)?,
-            "created_at": row.get::<_, String>(8)?,
-        }))
-    })?;
+    let rows = stmt.query_map(
+        params![
+            source,
+            path_prefix.trim_end_matches('/'),
+            like_pattern,
+            limit as i64
+        ],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "text": row.get::<_, String>(1)?,
+                "path": row.get::<_, String>(2)?,
+                "summary": row.get::<_, String>(3)?,
+                "importance": row.get::<_, f64>(4)?,
+                "source": row.get::<_, String>(5)?,
+                "scope": row.get::<_, String>(6)?,
+                "metadata": row.get::<_, String>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+            }))
+        },
+    )?;
 
     let mut out = Vec::new();
     for r in rows {

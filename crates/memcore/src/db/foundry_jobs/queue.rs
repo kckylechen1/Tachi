@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 use std::str::FromStr;
 
@@ -153,8 +153,10 @@ pub fn requeue_retryable_foundry_jobs(
     now: jiff::Timestamp,
 ) -> Result<RequeueOutcome, MemoryError> {
     // Batch all requeue/dead-letter writes into one transaction: a single
-    // commit/fsync instead of an implicit transaction per UPDATE.
-    let tx = conn.unchecked_transaction()?;
+    // commit/fsync instead of an implicit transaction per UPDATE. IMMEDIATE
+    // takes the write lock before the candidate read, so a writer that
+    // commits in between cannot make the upgrade fail as `database is locked`.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let rows = select_retry_candidates(&tx)?;
 
     let now_str = crate::time_compat::millis_z(now);

@@ -662,6 +662,10 @@ fn collect_gc_candidates(
             let desired = diversity_by_memory
                 .get(&id)
                 .map_or(0, |hashes| hashes.len() as i64);
+            // A row that already carries its count has nothing to reconcile.
+            if current == desired {
+                continue;
+            }
             let mut fingerprint = Vec::new();
             encode_value(ValueRef::Text(id.as_bytes()), &mut fingerprint);
             encode_value(ValueRef::Integer(current), &mut fingerprint);
@@ -922,6 +926,10 @@ fn apply_candidates(
     Ok(())
 }
 
+/// Apply a sweep that was planned ahead, without a receipt. The operator
+/// path writes its receipt through [`apply_operator_gc_candidate_facts`];
+/// this receipt-less form is the test seam for the same two-phase contract.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_gc_candidate_facts<F>(
     conn: &mut Connection,
@@ -932,6 +940,72 @@ pub(crate) fn apply_gc_candidate_facts<F>(
     kanban_max_age_days: u64,
     include_kanban: bool,
     expected: &[MaintenanceClassFact],
+    before_commit: F,
+) -> Result<GcMaintenanceOutcome, MemoryError>
+where
+    F: FnOnce(
+        &Connection,
+        &[MaintenanceClassFact],
+        &[MaintenanceClassFact],
+    ) -> Result<(), MemoryError>,
+{
+    apply_gc_within_transaction(
+        conn,
+        cfg,
+        profile,
+        vec_available,
+        as_of,
+        kanban_max_age_days,
+        include_kanban,
+        Some(expected),
+        before_commit,
+    )
+}
+
+/// Apply the automatic sweep. No plan precedes it, so the facts that decide
+/// it are read under the write lock that applies it; planning them outside
+/// let any concurrent write change them and refuse the sweep.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_unplanned_gc<F>(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+    vec_available: bool,
+    as_of: &str,
+    kanban_max_age_days: u64,
+    include_kanban: bool,
+    before_commit: F,
+) -> Result<GcMaintenanceOutcome, MemoryError>
+where
+    F: FnOnce(
+        &Connection,
+        &[MaintenanceClassFact],
+        &[MaintenanceClassFact],
+    ) -> Result<(), MemoryError>,
+{
+    apply_gc_within_transaction(
+        conn,
+        cfg,
+        profile,
+        vec_available,
+        as_of,
+        kanban_max_age_days,
+        include_kanban,
+        None,
+        before_commit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_gc_within_transaction<F>(
+    conn: &mut Connection,
+    cfg: &GcConfig,
+    profile: StoreProfile,
+    vec_available: bool,
+    as_of: &str,
+    kanban_max_age_days: u64,
+    include_kanban: bool,
+    planned: Option<&[MaintenanceClassFact]>,
     before_commit: F,
 ) -> Result<GcMaintenanceOutcome, MemoryError>
 where
@@ -954,20 +1028,24 @@ where
         .iter()
         .map(|candidate| candidate.fact.clone())
         .collect::<Vec<_>>();
-    if source != expected {
+    if planned.is_some_and(|planned| planned != source) {
         return Err(MemoryError::InvalidArg(
             "maintenance GC source facts changed after planning".to_string(),
         ));
     }
     apply_candidates(&tx, &source_candidates, vec_available, profile)?;
-    let post = gc_candidate_facts(
-        &tx,
-        cfg,
-        profile,
-        as_of,
-        kanban_max_age_days,
-        include_kanban,
-    )?;
+    let post = if planned.is_some() {
+        gc_candidate_facts(
+            &tx,
+            cfg,
+            profile,
+            as_of,
+            kanban_max_age_days,
+            include_kanban,
+        )?
+    } else {
+        Vec::new()
+    };
     before_commit(&tx, &source, &post)?;
     tx.commit()?;
     Ok(GcMaintenanceOutcome { source, post })

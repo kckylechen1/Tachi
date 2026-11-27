@@ -210,6 +210,42 @@ fn save_derived_with_id_upserts_existing_row() {
     assert_eq!(rows[0]["importance"], 0.9);
 }
 
+/// The prefix names a path: it matches itself and what lies below it, never a
+/// sibling whose name merely starts with the same characters.
+#[test]
+fn list_derived_by_source_matches_the_prefix_as_a_path_segment() {
+    let store = MemoryStore::open_in_memory().expect("open in-memory store");
+    for (id, path) in [
+        ("derived-at-prefix", "/derived"),
+        ("derived-below-prefix", "/derived/child"),
+        ("derived-sibling", "/derived-x/child"),
+    ] {
+        store
+            .save_derived_with_id(
+                id,
+                "text",
+                path,
+                "summary",
+                0.5,
+                "test_source",
+                "project",
+                &serde_json::json!({}),
+            )
+            .expect("save derived");
+    }
+
+    let rows = store
+        .list_derived_by_source("test_source", "/derived", 10)
+        .expect("list derived");
+    let mut ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row["id"].as_str().expect("id"))
+        .collect();
+    ids.sort();
+
+    assert_eq!(ids, vec!["derived-at-prefix", "derived-below-prefix"]);
+}
+
 #[test]
 fn metadata_stats_counts_total_and_coverage_in_one_query() {
     let mut store = MemoryStore::open_in_memory().expect("open in-memory store");

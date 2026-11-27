@@ -2,7 +2,7 @@
 //! DoD rows; zeroclaw #205 TB clause checks). Each test names the DoD/TB
 //! row it pins.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -1614,6 +1614,27 @@ fn non_owner_sees_nothing_and_binding_log_stays_untouched() {
 
 fn bridge_ignore<T, E>(_result: Result<T, E>) {}
 
+fn bridge_fact(
+    event_id: &str,
+    payload: TaskEventPayload,
+    value: serde_json::Value,
+    now: &str,
+) -> TaskEvent {
+    TaskEvent {
+        seq: 0,
+        event_id: event_id.to_string(),
+        source: EventSource::LifecycleOwner {
+            operation: "declare".to_string(),
+        },
+        source_revision: "1".to_string(),
+        occurred_at: now.to_string(),
+        recorded_at: now.to_string(),
+        payload_digest: memcore::canonical_digest::canonical_json_digest_hex(&value),
+        visibility: VisibilityClass::Internal,
+        payload,
+    }
+}
+
 fn bridge_facts_append(
     facts: &Arc<InMemoryTaskFacts>,
     task_ref: &TaskRef,
@@ -1623,22 +1644,7 @@ fn bridge_facts_append(
     now: &str,
 ) {
     facts
-        .append(
-            task_ref,
-            TaskEvent {
-                seq: 0,
-                event_id: event_id.to_string(),
-                source: EventSource::LifecycleOwner {
-                    operation: "declare".to_string(),
-                },
-                source_revision: "1".to_string(),
-                occurred_at: now.to_string(),
-                recorded_at: now.to_string(),
-                payload_digest: memcore::canonical_digest::canonical_json_digest_hex(&value),
-                visibility: VisibilityClass::Internal,
-                payload,
-            },
-        )
+        .append(task_ref, bridge_fact(event_id, payload, value, now))
         .expect("append");
 }
 
@@ -1932,4 +1938,326 @@ fn recorded_rejection_is_terminal_even_when_a_plan_later_admits() {
     // And no plan was sneaked onto the task.
     let snapshot = rig.bridge.get(&task_ref).expect("snapshot");
     assert!(snapshot.plan.is_none());
+}
+
+// ── op-lock linearization ─────────────────────────────────────────────────
+//
+// The bridge serializes its mutating operations with one lock. The races
+// above run separate bridge instances, which the binding store already
+// serializes. These run one instance, and fail when a lock is removed or
+// taken after the state was read.
+
+/// An in-memory fact log with two hold points for the races below.
+struct GatedFacts {
+    inner: InMemoryTaskFacts,
+    /// Count the reads of each task while set.
+    counting: AtomicBool,
+    /// Hold an append open until its task has been read twice while set.
+    holding: AtomicBool,
+    reads: (
+        Mutex<std::collections::HashMap<String, u32>>,
+        std::sync::Condvar,
+    ),
+}
+
+impl GatedFacts {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: InMemoryTaskFacts::new(),
+            counting: AtomicBool::new(false),
+            holding: AtomicBool::new(false),
+            reads: (
+                Mutex::new(std::collections::HashMap::new()),
+                std::sync::Condvar::new(),
+            ),
+        })
+    }
+
+    /// Hold an append until its task has been read twice, or 300 ms pass.
+    /// Under the op lock a second reader is still waiting for the lock, so
+    /// the time is what lets the first caller through.
+    fn hold_appends_until_a_second_read(&self) {
+        self.holding.store(true, Ordering::SeqCst);
+    }
+
+    fn wait_for_reads(&self, task_ref: &TaskRef, wanted: u32) {
+        let key = task_ref.as_wire().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let mut reads = self.reads.0.lock().expect("reads");
+        while reads.get(&key).copied().unwrap_or(0) < wanted {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (guarded, _) = self
+                .reads
+                .1
+                .wait_timeout(reads, deadline - now)
+                .expect("reads");
+            reads = guarded;
+        }
+    }
+}
+
+impl TaskFactSource for GatedFacts {
+    fn append(&self, task_ref: &TaskRef, event: TaskEvent) -> Result<(), UnavailableError> {
+        if self.holding.load(Ordering::SeqCst) {
+            self.wait_for_reads(task_ref, 2);
+        }
+        self.inner.append(task_ref, event)
+    }
+
+    fn facts(&self, task_ref: &TaskRef) -> Result<Vec<TaskEvent>, UnavailableError> {
+        let events = self.inner.facts(task_ref)?;
+        if self.counting.load(Ordering::SeqCst) || self.holding.load(Ordering::SeqCst) {
+            let mut reads = self.reads.0.lock().expect("reads");
+            *reads.entry(task_ref.as_wire().to_string()).or_default() += 1;
+            self.reads.1.notify_all();
+        }
+        Ok(events)
+    }
+}
+
+/// Plan admission that, while the fact log counts reads, holds an
+/// admission open until another caller has read the task, or 300 ms pass.
+struct GatedPlans {
+    inner: Arc<FakePlans>,
+    facts: Arc<GatedFacts>,
+}
+
+impl PlanAdmissionPort for GatedPlans {
+    fn admit_plan(
+        &self,
+        task_ref: &TaskRef,
+        preference: Option<&RoutingPreference>,
+    ) -> Result<ExecutionPlanProjection, PlanAdmissionError> {
+        if self.facts.counting.load(Ordering::SeqCst) {
+            self.facts.wait_for_reads(task_ref, 1);
+        }
+        self.inner.admit_plan(task_ref, preference)
+    }
+}
+
+/// A bridge over the gated fact log, with an owner that records what
+/// reaches it.
+fn gated_bridge(facts: &Arc<GatedFacts>, owners: Arc<FakeOwners>) -> TaskIntentBridge {
+    TaskIntentBridge::new(
+        Arc::new(InProcessRequestBindings::new()),
+        facts.clone(),
+        FakeAuthority::admitting(&[Capability::ReasoningReview]),
+        FakePlans::managed(),
+        owners,
+        Arc::new(SystemBridgeClock),
+    )
+}
+
+/// Run one call on each of two threads that are released together.
+fn race_two<T: Send + 'static>(
+    bridge: &TaskIntentBridge,
+    call: impl Fn(&TaskIntentBridge, &str) -> T + Send + Sync + 'static,
+) -> Vec<T> {
+    use std::thread;
+    let call = Arc::new(call);
+    let start = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|id| {
+            let bridge = bridge.clone();
+            let call = call.clone();
+            let start = start.clone();
+            thread::spawn(move || {
+                start.wait();
+                call(&bridge, id)
+            })
+        })
+        .collect();
+    handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread"))
+        .collect()
+}
+
+/// One instance, four concurrent copies of one tuple (TB-7 rule 2): the
+/// lock makes the later copies wait for the winner, so each replays a
+/// materialized task instead of landing in the ambiguous window.
+#[test]
+fn same_instance_duplicate_submits_replay_a_materialized_task() {
+    use std::thread;
+    let facts = GatedFacts::new();
+    let bridge = TaskIntentBridge::new(
+        Arc::new(InProcessRequestBindings::new()),
+        facts.clone(),
+        FakeAuthority::admitting(&[Capability::ReasoningReview]),
+        Arc::new(GatedPlans {
+            inner: FakePlans::managed(),
+            facts: facts.clone(),
+        }),
+        FakeOwners::forwarding(),
+        Arc::new(SystemBridgeClock),
+    );
+    let intent = golden_intent();
+    let request = RequestId::new("req-same-instance").expect("bounded");
+    facts.counting.store(true, Ordering::SeqCst);
+    let start = Arc::new(std::sync::Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let bridge = bridge.clone();
+            let intent = intent.clone();
+            let request = request.clone();
+            let start = start.clone();
+            thread::spawn(move || {
+                start.wait();
+                bridge.submit(&intent, &request)
+            })
+        })
+        .collect();
+    let mut receipts = Vec::new();
+    for handle in handles {
+        match handle.join().expect("thread") {
+            SubmitReceipt::Admitted { task_ref, replayed } => receipts.push((task_ref, replayed)),
+            other => panic!("a same-instance duplicate left the replay path: {other:?}"),
+        }
+    }
+    let first = &receipts[0].0;
+    assert!(
+        receipts.iter().all(|(task_ref, _)| task_ref == first),
+        "one TaskRef for every copy: {receipts:?}"
+    );
+    assert_eq!(
+        receipts.iter().filter(|(_, replayed)| !*replayed).count(),
+        1,
+        "one materialization"
+    );
+    let submits = facts
+        .facts(first)
+        .expect("facts")
+        .iter()
+        .filter(|f| matches!(f.payload, TaskEventPayload::TaskSubmitted { .. }))
+        .count();
+    assert_eq!(submits, 1, "never a second worker");
+}
+
+/// Two interventions pinned to one revision (TB-11 compare-and-apply):
+/// exactly one applies, and the other reads the revision the first one
+/// left behind.
+#[test]
+fn same_instance_interventions_pinned_to_one_revision_apply_once() {
+    let facts = GatedFacts::new();
+    let owners = FakeOwners::forwarding();
+    let bridge = gated_bridge(&facts, owners.clone());
+    let intent = golden_intent();
+    let request = RequestId::new("req-pinned-intervention").expect("bounded");
+    let SubmitReceipt::Admitted { task_ref, .. } = bridge.submit(&intent, &request) else {
+        panic!("expected admission");
+    };
+    let payload = TaskEventPayload::OwnerCapabilitiesDeclared {
+        operations: vec![InterventionV1Static::ProvideAdditionalContext],
+    };
+    let value = serde_json::to_value(&payload).expect("serializes");
+    facts
+        .append(
+            &task_ref,
+            bridge_fact("caps-pinned", payload, value, "2026-08-25T0003Z"),
+        )
+        .expect("append");
+    let revision = bridge.get(&task_ref).expect("snapshot").task_revision;
+    let intervention = InterventionV1::ProvideAdditionalContext {
+        note: BoundedText::new("note").expect("bounded"),
+    };
+    let requester = intent.requester.clone();
+    let task = task_ref.clone();
+    facts.hold_appends_until_a_second_read();
+
+    let mut applied = 0;
+    let mut conflicts = Vec::new();
+    for result in race_two(&bridge, move |bridge, id| {
+        let request = RequestId::new(id).expect("bounded");
+        bridge.intervene(&task, &intervention, &requester, &request, Some(revision))
+    }) {
+        match result {
+            Ok(_) => applied += 1,
+            Err(InterventionError::RevisionConflict { expected, actual }) => {
+                conflicts.push((expected, actual))
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+    assert_eq!(applied, 1, "one intervention applies");
+    assert_eq!(
+        conflicts,
+        [(revision, revision + 1)],
+        "the other read the revision the first one left behind"
+    );
+    assert_eq!(
+        owners.forwarded.lock().expect("forwarded").len(),
+        1,
+        "one forward reaches the owner"
+    );
+    let forwarded = facts
+        .facts(&task_ref)
+        .expect("facts")
+        .iter()
+        .filter(|f| matches!(f.payload, TaskEventPayload::InterventionForwarded { .. }))
+        .count();
+    assert_eq!(forwarded, 1);
+}
+
+/// Two stop requests pinned to one revision follow the same law.
+#[test]
+fn same_instance_stop_requests_pinned_to_one_revision_apply_once() {
+    let facts = GatedFacts::new();
+    let owners = FakeOwners::forwarding();
+    let bridge = gated_bridge(&facts, owners.clone());
+    let intent = golden_intent();
+    let request = RequestId::new("req-pinned-stop").expect("bounded");
+    let SubmitReceipt::Admitted { task_ref, .. } = bridge.submit(&intent, &request) else {
+        panic!("expected admission");
+    };
+    let revision = bridge.get(&task_ref).expect("snapshot").task_revision;
+    let requester = intent.requester.clone();
+    let task = task_ref.clone();
+    facts.hold_appends_until_a_second_read();
+
+    let mut receipts = 0;
+    let mut conflicts = Vec::new();
+    for result in race_two(&bridge, move |bridge, id| {
+        let request = RequestId::new(id).expect("bounded");
+        bridge.request_stop(
+            &task,
+            StopMode::Graceful,
+            &requester,
+            &request,
+            Some(revision),
+        )
+    }) {
+        match result {
+            Ok(StopReceipt {
+                stage: StopStage::Forwarded,
+                ..
+            }) => receipts += 1,
+            Err(InterventionError::RevisionConflict { expected, actual }) => {
+                conflicts.push((expected, actual))
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(other) => panic!("expected a forwarded stop, got {other:?}"),
+        }
+    }
+    assert_eq!(receipts, 1, "one stop applies");
+    assert_eq!(
+        conflicts,
+        [(revision, revision + 1)],
+        "the other read the revision the first one left behind"
+    );
+    assert_eq!(
+        owners.stop_reasons.lock().expect("stop reasons").len(),
+        1,
+        "one stop reaches the owner"
+    );
+    let requested = facts
+        .facts(&task_ref)
+        .expect("facts")
+        .iter()
+        .filter(|f| matches!(f.payload, TaskEventPayload::StopRequested { .. }))
+        .count();
+    assert_eq!(requested, 1);
 }

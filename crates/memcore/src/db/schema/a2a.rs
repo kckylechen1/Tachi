@@ -46,15 +46,10 @@ pub(crate) fn migrate_v42_coordination_mailbox(conn: &Connection) -> Result<(), 
     validate_a2a_mailbox_schema_version(conn, 42)
 }
 
-#[allow(dead_code)]
-pub(crate) fn install_a2a_mailbox_schema(conn: &Connection) -> Result<(), MemoryError> {
-    execute_batch_retry(conn, ddl::A2A_MAILBOX_V31_SQL)
-}
-
 /// Validate both Product-only A2A tables as one schema unit. A half-present
 /// pair is always corruption; portable callers avoid this validator because
 /// their effective profile intentionally owns neither table.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn validate_a2a_mailbox_v31_schema(conn: &Connection) -> Result<(), MemoryError> {
     validate_a2a_mailbox_schema_version(conn, 31)
 }
@@ -254,47 +249,6 @@ fn validate_a2a_mailbox_schema_version(conn: &Connection, version: u32) -> Resul
         }
     }
     Ok(())
-}
-
-/// Rebuild the v31 Product A2A FK pair into the v32 nullable-body shape.
-/// The caller owns the encompassing migration transaction, so either both
-/// tables, all rows, indexes and the version sentinel move together or none do.
-#[allow(dead_code)]
-pub(crate) fn rebuild_a2a_mailbox_to_v32(conn: &Connection) -> Result<(), MemoryError> {
-    validate_a2a_mailbox_v31_schema(conn)?;
-    execute_batch_retry(
-        conn,
-        "DROP INDEX idx_a2a_envelopes_recipient_state;
-         DROP INDEX idx_a2a_envelopes_issuer_created;
-         DROP INDEX idx_a2a_receipts_envelope_version;
-         ALTER TABLE a2a_delivery_receipts RENAME TO a2a_delivery_receipts_v31;
-         ALTER TABLE a2a_envelopes RENAME TO a2a_envelopes_v31;",
-    )?;
-    execute_batch_retry(conn, ddl::A2A_MAILBOX_V32_SQL)?;
-    execute_batch_retry(
-        conn,
-        "INSERT INTO a2a_envelopes
-             (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
-              recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
-              body_digest,issuer_identity_assurance,recipient_identity_assurance,
-              issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
-              recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
-         SELECT envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,
-                recipient_agent_identity_id,recipient_admission_id,subject_ref,body,
-                body_digest,issuer_identity_assurance,recipient_identity_assurance,
-                issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,
-                recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version
-           FROM a2a_envelopes_v31;
-         INSERT INTO a2a_delivery_receipts
-             (receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
-              actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at)
-         SELECT receipt_id,envelope_id,envelope_version,state,actor_agent_identity_id,
-                actor_admission_id,identity_assurance,trust_domain,trust_basis,occurred_at
-           FROM a2a_delivery_receipts_v31;
-         DROP TABLE a2a_delivery_receipts_v31;
-         DROP TABLE a2a_envelopes_v31;",
-    )?;
-    validate_a2a_mailbox_schema_version(conn, 32)
 }
 
 #[cfg(test)]

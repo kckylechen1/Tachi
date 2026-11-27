@@ -123,7 +123,7 @@ fn foundry_job_status_counts_tallies_by_status_case_insensitively() {
              ('j2', 'Completed'),
              ('j3', 'skipped'),
              ('j4', 'FAILED'),
-             ('j5', 'pending'),
+             ('j5', 'planned'),
              ('j6', 'running');",
     )
     .unwrap();
@@ -133,9 +133,24 @@ fn foundry_job_status_counts_tallies_by_status_case_insensitively() {
     assert_eq!(counts.completed, 2, "case-insensitive match on status");
     assert_eq!(counts.skipped, 1);
     assert_eq!(counts.failed, 1);
-    assert_eq!(counts.pending, 1);
-    // 'running' isn't one of the tallied buckets — total still counts it,
-    // callers reconcile the "other" bucket themselves from total - known.
+    // Planned, running and queued are the states a job waits in. The probe
+    // used to count a `pending` status that no job is ever given, so it
+    // reported an empty backlog behind every queued job.
+    assert_eq!(counts.pending, 2);
+}
+
+#[test]
+fn foundry_job_status_counts_counts_queued_as_pending() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+         INSERT INTO foundry_jobs VALUES ('j1', 'queued'), ('j2', 'QUEUED');",
+    )
+    .unwrap();
+
+    let counts = foundry_job_status_counts(&conn);
+    assert_eq!(counts.total, 2);
+    assert_eq!(counts.pending, 2);
 }
 
 #[test]

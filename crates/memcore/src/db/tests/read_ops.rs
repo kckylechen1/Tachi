@@ -583,3 +583,50 @@ fn archive_excluded_from_default_fetch() {
         "archived entry should appear when include_archived=true"
     );
 }
+
+/// `_` and `%` are ordinary characters in a path. Read as LIKE wildcards they
+/// let one prefix list a sibling directory.
+#[test]
+fn list_by_path_treats_like_wildcards_in_the_prefix_as_literal_characters() {
+    let mut conn = make_conn();
+    let mut wanted = make_entry("lc-wanted", "under the requested prefix");
+    wanted.path = "/tool_s/one".to_string();
+    let mut sibling = make_entry("lc-sibling", "under a sibling directory");
+    sibling.path = "/toolxs/two".to_string();
+    upsert(&mut conn, &wanted, false).unwrap();
+    upsert(&mut conn, &sibling, false).unwrap();
+
+    let rows = list_by_path(&conn, "/tool_s", 10, false, false).unwrap();
+
+    assert_eq!(
+        rows.iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["lc-wanted"]
+    );
+}
+
+#[test]
+fn wiki_duplicate_lookup_treats_like_wildcards_in_the_parent_as_literal() {
+    let mut conn = make_conn();
+    let mut same_path = make_entry("wiki-parent-wildcard-path", "same path");
+    same_path.path = "/wiki/tool_s/mcp".to_string();
+    same_path.topic = "mcp".to_string();
+    let mut sibling = make_entry("wiki-parent-wildcard-sibling", "sibling text");
+    sibling.path = "/wiki/toolxs/other".to_string();
+    sibling.topic = "other".to_string();
+    upsert(&mut conn, &same_path, false).unwrap();
+    upsert(&mut conn, &sibling, false).unwrap();
+
+    let candidates =
+        list_wiki_duplicate_candidates(&conn, "/wiki/tool_s/mcp", "mcp", "/wiki/tool_s", Some(10))
+            .unwrap();
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wiki-parent-wildcard-path"]
+    );
+}

@@ -68,7 +68,7 @@ impl TaskFactSource for InMemoryTaskFacts {
     fn append(&self, task_ref: &TaskRef, event: TaskEvent) -> Result<(), UnavailableError> {
         self.tasks
             .lock()
-            .expect("task fact map poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(task_ref.as_wire().to_string())
             .or_default()
             .push(event);
@@ -79,7 +79,7 @@ impl TaskFactSource for InMemoryTaskFacts {
         Ok(self
             .tasks
             .lock()
-            .expect("task fact map poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(task_ref.as_wire())
             .cloned()
             .unwrap_or_default())
@@ -325,7 +325,10 @@ impl TaskIntentBridge {
 
         // Mutation region: linearized per-instance by the op lock, and
         // cross-instance by the binding store's atomic bind.
-        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+        let _guard = self
+            .op_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // TB-7 tuple law, checked before any mutation.
         if let Some(binding) = self
@@ -688,7 +691,10 @@ impl TaskIntentBridge {
                            // POST-LOCK truth (two requesters validating revision N
                            // concurrently must not both mutate — the second observes N+1 and
                            // conflicts).
-        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+        let _guard = self
+            .op_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let events = self.derived_events(task_ref)?;
         if !has_task_submitted(&events) || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
@@ -875,7 +881,10 @@ impl TaskIntentBridge {
         // Linearize BEFORE reading state (same law as intervene:
         // ownership, advertisement, and the revision compare-and-apply all
         // observe post-lock truth).
-        let _guard = self.op_lock.lock().expect("bridge op lock poisoned");
+        let _guard = self
+            .op_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let events = self.derived_events(task_ref)?;
         if !has_task_submitted(&events) || !requester_owns(&events, requester) {
             return Err(InterventionError::NotFound);
@@ -1428,5 +1437,51 @@ fn outcome_projection(
         },
         pending_user_action: None,
         result_revision: revision,
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    /// A thread that panicked while holding the fact map's lock must not turn
+    /// every later use of that lock into a second panic.
+    #[test]
+    fn a_poisoned_fact_map_still_appends_and_reads() {
+        let facts = InMemoryTaskFacts::new();
+        let holder = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = facts.tasks.lock().expect("lock the fact map");
+            panic!("the holder panics with the lock taken");
+        }));
+        assert!(holder.is_err());
+        assert!(
+            facts.tasks.lock().is_err(),
+            "the fact map must be poisoned before the recovery is exercised"
+        );
+
+        let task_ref = TaskRef::mint("task:poisoned");
+        let event = TaskEvent {
+            seq: 1,
+            event_id: "event-1".to_string(),
+            source: EventSource::BridgeAdmission,
+            source_revision: "1".to_string(),
+            occurred_at: "2026-08-25T00:00:00Z".to_string(),
+            recorded_at: "2026-08-25T00:00:00Z".to_string(),
+            payload_digest: "digest-1".to_string(),
+            visibility: VisibilityClass::Public,
+            payload: TaskEventPayload::SubmitRejected {
+                reason: "test".to_string(),
+            },
+        };
+        facts
+            .append(&task_ref, event)
+            .expect("append through a poisoned lock");
+        assert_eq!(
+            facts
+                .facts(&task_ref)
+                .expect("read through a poisoned lock")
+                .len(),
+            1
+        );
     }
 }

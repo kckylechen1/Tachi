@@ -125,18 +125,23 @@ pub struct FoundryJobSummary {
 
 /// Find all Foundry jobs whose `memory_ids` JSON array contains `memory_id`.
 ///
-/// Implemented with a substring `LIKE` over the JSON column. SQLite has no
-/// JSON1-array index, but a per-memory call is bounded by the small number of
-/// jobs ever queued for one id (typically 0–3). Pending/active jobs first.
+/// Membership is exact, element by element: a substring match over the JSON
+/// text let a `%` or `_` in an id stand for any character and so report the
+/// jobs of neighbouring ids. SQLite has no JSON1-array index, but a per-memory
+/// call is bounded by the small number of jobs ever queued for one id
+/// (typically 0–3). Pending/active jobs first.
 pub fn find_foundry_jobs_for_memory(
     conn: &Connection,
     memory_id: &str,
 ) -> Result<Vec<FoundryJobSummary>, MemoryError> {
-    let needle = format!("%\"{}\"%", memory_id.replace('"', "\\\""));
     let mut stmt = conn.prepare(
         "SELECT id, kind, status, created_at
          FROM foundry_jobs
-         WHERE memory_ids LIKE ?1
+         WHERE CASE
+                 WHEN json_valid(memory_ids)
+                 THEN EXISTS (SELECT 1 FROM json_each(memory_ids) WHERE json_each.value = ?1)
+                 ELSE 0
+               END
          ORDER BY CASE status
                     WHEN 'running'   THEN 0
                     WHEN 'queued'    THEN 1
@@ -149,7 +154,7 @@ pub fn find_foundry_jobs_for_memory(
                   datetime(created_at) DESC,
                   id DESC",
     )?;
-    let rows = stmt.query_map(params![needle], |row| {
+    let rows = stmt.query_map(params![memory_id], |row| {
         Ok(FoundryJobSummary {
             id: row.get(0)?,
             kind: row.get(1)?,
@@ -209,6 +214,47 @@ mod tests {
             params![id, status, memory_ids, created_at],
         )
         .unwrap();
+    }
+
+    /// Membership is per element: `_` in an id must not stand for any
+    /// character and report the jobs of a neighbouring id.
+    #[test]
+    fn jobs_for_a_memory_match_the_id_exactly_not_as_a_like_pattern() {
+        let conn = open_test_db();
+        insert_job(
+            &conn,
+            "j-own",
+            "queued",
+            r#"["m_1"]"#,
+            "2026-07-20T12:00:00Z",
+        );
+        insert_job(
+            &conn,
+            "j-neighbour",
+            "queued",
+            r#"["mx1"]"#,
+            "2026-07-20T12:00:01Z",
+        );
+        insert_job(
+            &conn,
+            "j-later",
+            "completed",
+            r#"["other", "m_1"]"#,
+            "2026-07-20T12:00:02Z",
+        );
+        insert_job(
+            &conn,
+            "j-broken",
+            "failed",
+            "not json",
+            "2026-07-20T12:00:03Z",
+        );
+
+        let jobs = find_foundry_jobs_for_memory(&conn, "m_1").unwrap();
+
+        let mut ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["j-later", "j-own"]);
     }
 
     #[test]
