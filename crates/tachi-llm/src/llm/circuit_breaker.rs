@@ -73,6 +73,11 @@ impl CircuitBreaker {
     /// caller claim a probe slot a failure had just freed, while the first
     /// probe was still in flight, and read a cooldown left over from an
     /// earlier open phase.
+    ///
+    /// One probe per half-open phase. The slot is cleared when the breaker is
+    /// opened again, so a request left over from an earlier phase may still
+    /// be running when the next phase's probe is admitted; it cannot hold the
+    /// only slot for a whole cooldown.
     fn enter(&self) -> Entry {
         loop {
             if *self.inner.state.read().unwrap_or_else(|e| e.into_inner()) == BreakerState::Closed {
@@ -175,7 +180,11 @@ impl CircuitBreaker {
 
     fn record_failure(&self) {
         let mut state = self.inner.state.write().unwrap_or_else(|e| e.into_inner());
-        let count = self.inner.failure_count.load(Ordering::Relaxed) + 1;
+        let count = self
+            .inner
+            .failure_count
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
         self.inner.failure_count.store(count, Ordering::Relaxed);
         if count >= FAILURE_THRESHOLD && *state != BreakerState::Open {
             *state = BreakerState::Open;
