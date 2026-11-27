@@ -194,13 +194,27 @@ stop_existing_daemon_for_scope() {
         return 1
       fi
       ;;
+    none|stale_pid) ;;
+    *)
+      # `unavailable` is a live pid whose state could not be read; an empty
+      # state means the binary did not answer. Neither says the scope is free.
+      echo "❌ cannot tell what holds this DB scope (daemon status: ${state:-unreadable}); not installing over it"
+      printf '%s\n' "$status"
+      return 1
+      ;;
   esac
 
   for _ in $(seq 1 50); do
     status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    case "$(printf '%s\n' "$status" | daemon_status_text state)" in
+    state=$(printf '%s\n' "$status" | daemon_status_text state)
+    case "$state" in
       running|foreign) sleep 0.2 ;;
-      *) return 0 ;;
+      none|stale_pid) return 0 ;;
+      *)
+        echo "❌ daemon status became unreadable while waiting for the previous daemon to stop"
+        printf '%s\n' "$status"
+        return 1
+        ;;
     esac
   done
 

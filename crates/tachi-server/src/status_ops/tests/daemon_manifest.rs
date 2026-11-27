@@ -103,6 +103,136 @@ fn daemon_mismatch_accepts_matching_daemon_pid_file() {
     assert!(daemon_mismatch_reason(42, Some(&info), &global).is_none());
 }
 
+/// Automatic handling rests on what the pid file records. A file that names
+/// no database, or no pid, cannot be told from another scope's daemon,
+/// whatever version it reports.
+#[test]
+fn daemon_mismatch_will_not_name_a_version_for_a_pid_file_without_a_scope() {
+    let global = PathBuf::from("/tmp/status/global/memory.db");
+    for global_db in [None, Some(String::new())] {
+        let info = DaemonPidInfo {
+            pid: Some(42),
+            port: Some(6919),
+            version: Some("1.3.0".to_string()),
+            global_db,
+            project_db: None,
+        };
+        let reason = daemon_mismatch_reason(42, Some(&info), &global)
+            .expect("a pid file without a database is foreign");
+        assert!(reason.starts_with("daemon scope unknown"), "{reason}");
+    }
+    let info = DaemonPidInfo {
+        pid: None,
+        port: None,
+        version: Some("1.3.0".to_string()),
+        global_db: Some(global.display().to_string()),
+        project_db: None,
+    };
+    let reason = daemon_mismatch_reason(42, Some(&info), &global)
+        .expect("a pid file without a pid is foreign");
+    assert!(reason.starts_with("daemon scope unknown"), "{reason}");
+}
+
+fn record(kind: &str, pid: i32, lock: &str) -> crate::status_ops::DaemonStatus {
+    use crate::status_ops::DaemonStatus;
+    let lock_path = PathBuf::from(lock);
+    match kind {
+        "running" => DaemonStatus::Running { pid, lock_path },
+        "stale" => DaemonStatus::StalePid { pid, lock_path },
+        "unknown" => DaemonStatus::Unavailable {
+            pid,
+            lock_path,
+            reason: "receipt unreadable".to_string(),
+        },
+        other => panic!("no such record kind: {other}"),
+    }
+}
+
+fn foreign_record(pid: i32, lock: &str) -> crate::status_ops::DaemonStatus {
+    crate::status_ops::DaemonStatus::Foreign {
+        pid,
+        lock_path: PathBuf::from(lock),
+        reason: "daemon version 1.3.0 does not match binary x".to_string(),
+        version: None,
+        port: None,
+        global_db: None,
+    }
+}
+
+/// Which of the two records answers for the scope. A live record beats a
+/// stale one whichever file holds it, an unreadable one stays unknown, and a
+/// stale one is still preferred over nothing.
+#[test]
+fn a_live_record_wins_over_a_stale_one_whichever_file_holds_it() {
+    use crate::status_ops::daemon::prefer_live_record;
+    let scoped = foreign_record(7, "/scoped.lock");
+    let old_way = Some(record("stale", 9, "/legacy.lock"));
+
+    // This scope's old daemon used to be hidden by a stale legacy pid file.
+    assert!(matches!(
+        prefer_live_record(Some(scoped.clone()), old_way.clone()),
+        Some(crate::status_ops::DaemonStatus::Foreign { pid: 7, .. })
+    ));
+    // The other way round the legacy record answers, as before.
+    assert!(matches!(
+        prefer_live_record(
+            Some(record("stale", 9, "/scoped.lock")),
+            Some(scoped.clone())
+        ),
+        Some(crate::status_ops::DaemonStatus::Foreign { pid: 7, .. })
+    ));
+    // Nothing live on either side keeps the old fallback.
+    assert!(matches!(
+        prefer_live_record(None, old_way.clone()),
+        Some(crate::status_ops::DaemonStatus::StalePid { pid: 9, .. })
+    ));
+    assert!(matches!(
+        prefer_live_record(Some(record("stale", 9, "/scoped.lock")), None),
+        Some(crate::status_ops::DaemonStatus::StalePid { pid: 9, .. })
+    ));
+    assert!(prefer_live_record(None, None).is_none());
+    // Unknown stays unknown, on either side.
+    assert!(matches!(
+        prefer_live_record(
+            Some(record("unknown", 7, "/scoped.lock")),
+            Some(record("running", 9, "/legacy.lock"))
+        ),
+        Some(crate::status_ops::DaemonStatus::Unavailable { pid: 7, .. })
+    ));
+}
+
+/// Two live records that name different processes are a conflict. Nothing
+/// resolves it on its own, and the installer must not stop either.
+#[test]
+fn two_live_records_that_disagree_are_a_conflict() {
+    use crate::status_ops::daemon::prefer_live_record;
+    let status = prefer_live_record(
+        Some(foreign_record(7, "/scoped.lock")),
+        Some(record("running", 9, "/legacy.lock")),
+    )
+    .expect("a conflict is reported");
+    match status {
+        crate::status_ops::DaemonStatus::Foreign {
+            pid,
+            lock_path,
+            reason,
+            ..
+        } => {
+            assert_eq!(pid, 7);
+            assert_eq!(lock_path, PathBuf::from("/scoped.lock"));
+            assert!(
+                reason.contains("pid 7") && reason.contains("pid 9"),
+                "{reason}"
+            );
+            assert!(
+                !reason.starts_with("daemon version "),
+                "the installer must not stop either: {reason}"
+            );
+        }
+        other => panic!("expected a foreign conflict, got {other:?}"),
+    }
+}
+
 #[test]
 fn collect_daemon_status_prefers_scoped_match_over_legacy_foreign() {
     let app_home = tempfile::tempdir().expect("temp app home");

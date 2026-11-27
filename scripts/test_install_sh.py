@@ -154,6 +154,37 @@ stop_existing_daemon_for_scope "$TACHI_FAKE" /tmp/tachi-memory.db
         self.assertEqual(self.call_log(), [])
         self.assertIn("foreign Tachi daemon holds this DB scope", result.stdout)
 
+    def test_a_status_that_cannot_be_read_stops_the_install(self) -> None:
+        # `unavailable` is a live pid whose state could not be read; an empty
+        # or unparsable answer means the binary did not say. Neither is
+        # "nothing holds the scope".
+        for status in (
+            '{"state": "unavailable", "pid": 4242, "lock_path": "/tmp/lock", "reason": "x"}',
+            "not json",
+            "",
+        ):
+            with self.subTest(status=status):
+                self.status.write_text(status, encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("cannot tell what holds this DB scope", result.stdout)
+                self.assertEqual(self.call_log(), [], "nothing was signalled")
+
+    def test_a_stale_or_absent_record_lets_the_install_continue(self) -> None:
+        for status in (
+            '{"state": "stale_pid", "pid": 4242, "lock_path": "/tmp/lock"}',
+            '{"state": "none"}',
+        ):
+            with self.subTest(status=status):
+                self.status.write_text(status, encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(), {"TACHI_FAKE": str(self.fake_bin / "tachi")}
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.call_log(), [])
+
     # ── the LaunchAgent plist ─────────────────────────────────────────────
 
     def service_driver(self, *, fail_the_write: bool = False) -> str:
@@ -181,6 +212,9 @@ sleep() { :; }
 
     def test_the_plist_is_written_complete_and_nothing_else_is_left_behind(self) -> None:
         directory = self.launch_agents()
+        # A fresh install: the binary answers that nothing holds the scope.
+        # No answer at all is not the same thing, and is refused.
+        self.status.write_text('{\n  "state": "none"\n}\n', encoding="utf-8")
         result = self.run_bash(self.service_driver(), {})
         self.assertEqual(result.returncode, 0, result.stderr)
         plist = directory / f"{LABEL}.plist"

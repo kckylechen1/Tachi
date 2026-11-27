@@ -12,20 +12,74 @@ pub(crate) fn collect_daemon_status(app_home: &Path, global_db_path: &Path) -> D
     let scoped_lock = crate::daemon_lock::scoped_daemon_lock_path(app_home, global_db_path);
     let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
     let scoped_status = collect_daemon_status_from_paths(&scoped_lock, &scoped_pid, global_db_path);
-    if let Some(status) = scoped_status.as_ref() {
-        if matches!(
-            status,
-            DaemonStatus::Running { .. } | DaemonStatus::Unavailable { .. }
-        ) {
-            return status.clone();
-        }
-    }
 
     let lock_path = crate::daemon_lock::legacy_daemon_lock_path(app_home);
     let pid_path = crate::daemon_lock::legacy_daemon_pid_path(app_home);
-    collect_daemon_status_from_paths(&lock_path, &pid_path, global_db_path)
-        .or(scoped_status)
-        .unwrap_or(DaemonStatus::None)
+    let legacy_status = collect_daemon_status_from_paths(&lock_path, &pid_path, global_db_path);
+    prefer_live_record(scoped_status, legacy_status).unwrap_or(DaemonStatus::None)
+}
+
+/// Which of the two records answers for the scope. A live record beats a
+/// stale one whichever file holds it, an unreadable one stays unknown, and
+/// two live records that name different processes are a conflict: it is
+/// reported as foreign, with a reason the installer does not act on. An
+/// absent record is only "nothing is recorded here", never "no daemon".
+pub(crate) fn prefer_live_record(
+    scoped: Option<DaemonStatus>,
+    legacy: Option<DaemonStatus>,
+) -> Option<DaemonStatus> {
+    let live_pid = |status: &DaemonStatus| match status {
+        DaemonStatus::Running { pid, .. } | DaemonStatus::Foreign { pid, .. } => Some(*pid),
+        _ => None,
+    };
+    match (&scoped, &legacy) {
+        // Unreadable is unknown, and stays that way.
+        (Some(DaemonStatus::Unavailable { .. }), _) => return scoped,
+        (_, Some(DaemonStatus::Unavailable { .. })) => return legacy,
+        (Some(scoped_status), Some(legacy_status)) => {
+            match (live_pid(scoped_status), live_pid(legacy_status)) {
+                // Both live and different processes: a conflict nothing
+                // resolves on its own. It reads as foreign, and its reason
+                // does not start with "daemon version", so the installer
+                // leaves both alone.
+                (Some(scoped_pid), Some(legacy_pid)) if scoped_pid != legacy_pid => {
+                    let (lock_path, version, port, global_db) = match scoped_status {
+                        DaemonStatus::Running { lock_path, .. } => {
+                            (lock_path.clone(), None, None, None)
+                        }
+                        DaemonStatus::Foreign {
+                            lock_path,
+                            version,
+                            port,
+                            global_db,
+                            ..
+                        } => (lock_path.clone(), version.clone(), *port, global_db.clone()),
+                        _ => unreachable!("a live record is running or foreign"),
+                    };
+                    return Some(DaemonStatus::Foreign {
+                        pid: scoped_pid,
+                        lock_path,
+                        reason: format!(
+                            "conflicting daemon records: scoped pid {scoped_pid}, legacy pid {legacy_pid}; resolve manually"
+                        ),
+                        version,
+                        port,
+                        global_db,
+                    });
+                }
+                // The same process, or only the scoped record live.
+                (Some(_), _) => return scoped,
+                // Only the legacy record live.
+                (None, Some(_)) => return legacy,
+                (None, None) => {}
+            }
+        }
+        (Some(_), None) => return scoped,
+        (None, Some(_)) => return legacy,
+        (None, None) => {}
+    }
+    // Neither live: the legacy record as before, then the scoped one.
+    legacy.or(scoped)
 }
 
 pub(crate) fn collect_daemon_inventory(
@@ -311,25 +365,30 @@ pub(crate) fn daemon_mismatch_reason(
     let Some(info) = pid_info else {
         return Some("daemon.pid missing or unreadable".to_string());
     };
-    if let Some(pid) = info.pid {
-        if pid != lock_pid {
-            return Some(format!(
-                "daemon.pid pid={pid} does not match lock pid={lock_pid}"
-            ));
-        }
+    // Automatic handling rests on what the pid file records. Without a pid
+    // and a database on record, the daemon cannot be told from another
+    // scope's, whatever version it reports.
+    let Some(pid) = info.pid else {
+        return Some("daemon scope unknown: daemon.pid records no pid".to_string());
+    };
+    if pid != lock_pid {
+        return Some(format!(
+            "daemon.pid pid={pid} does not match lock pid={lock_pid}"
+        ));
     }
     // Scope before version. The installer stops a daemon only on a version
     // mismatch, which is the upgrade path for this scope's own daemon. One
     // that belongs to another database scope must be named by that, whatever
     // version it runs, or the installer would stop it.
-    if let Some(daemon_global) = info.global_db.as_deref() {
-        if !daemon_global.is_empty() && !path_matches_string(global_db_path, daemon_global) {
-            return Some(format!(
-                "daemon global_db {} does not match {}",
-                daemon_global,
-                global_db_path.display()
-            ));
-        }
+    let Some(daemon_global) = info.global_db.as_deref().filter(|db| !db.is_empty()) else {
+        return Some("daemon scope unknown: daemon.pid records no global_db".to_string());
+    };
+    if !path_matches_string(global_db_path, daemon_global) {
+        return Some(format!(
+            "daemon global_db {} does not match {}",
+            daemon_global,
+            global_db_path.display()
+        ));
     }
     match info.version.as_deref() {
         Some(version) => {
