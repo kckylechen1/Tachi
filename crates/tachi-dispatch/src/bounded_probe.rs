@@ -12,6 +12,12 @@
 //!
 //! A probe reaches ordinary descendants. A process that leaves the group with
 //! `setsid` or `setpgid` is not reached, and nothing here waits for its end.
+//!
+//! What a probe hands out is whole for writers that close their pipes and
+//! leave them closed. A process that opens a pipe for writing again after
+//! closing it, which Linux's procfs allows, is outside what this module can
+//! establish: such a writer can be cut short by the reclaim, and until the
+//! process has ended its pipe is not read from again.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -323,8 +329,9 @@ fn no_writer_is_back(streams: &mut [Stream]) -> Result<bool, ProbeFailure> {
 /// Runs the probe and reclaims its group.
 ///
 /// The output is handed out only when the end of the process and the end of
-/// every pipe were seen by the deadline, and no writer has come back since: a
-/// pipe closed by the kill could have cut a writer short.
+/// every pipe were seen by the deadline, and no pipe had a writer when it was
+/// last asked, before the clock was read for that decision: a pipe closed by
+/// the kill could have cut a writer short.
 fn supervise(
     command: Command,
     limits: &ProbeLimits,
@@ -377,17 +384,19 @@ fn supervise(
         // Asked on every round, and before the clock is read: a decision is
         // made only on what was seen by then.
         let leader_ended = process.observe_exit().map_err(|_| ProbeFailure::Io)?;
-        let now = Instant::now();
         if leader_ended
             && streams.iter().all(|stream| stream.ended)
             && no_writer_is_back(&mut streams)?
         {
-            break if now < deadline {
+            // The clock is read after the last of these observations, so
+            // that everything an acceptance rests on was seen by the deadline.
+            break if Instant::now() < deadline {
                 None
             } else {
                 Some(ProbeFailure::OutputOpen)
             };
         }
+        let now = Instant::now();
         if now >= deadline {
             break Some(if leader_ended {
                 ProbeFailure::OutputOpen
