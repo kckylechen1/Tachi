@@ -98,6 +98,36 @@ pub(crate) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
     target_fs::open_run_root(run_dir)
 }
 
+/// Test seam: runs once, right after the run directory named by the key has
+/// been resolved and before any listed record is looked at.
+#[cfg(test)]
+type RunRootResolved = Option<(String, Box<dyn FnMut() + Send>)>;
+
+#[cfg(test)]
+static RUN_ROOT_RESOLVED: std::sync::Mutex<RunRootResolved> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_run_root_resolved(run_dir: &Path, hook: Box<dyn FnMut() + Send>) {
+    *RUN_ROOT_RESOLVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some((run_dir.display().to_string(), hook));
+}
+
+#[cfg(test)]
+fn run_root_resolved(run_dir: &Path) {
+    let mut seam = RUN_ROOT_RESOLVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seam
+        .as_ref()
+        .is_some_and(|(key, _)| *key == run_dir.display().to_string())
+    {
+        let (_, mut hook) = seam.take().expect("checked just above");
+        hook();
+    }
+}
+
 /// Safe descriptor-anchored inspection of a credential target for `doctor`.
 pub(crate) enum TargetInspection {
     Missing,
@@ -185,11 +215,24 @@ pub fn cleanup_managed_credential_materializations(
                 .to_string(),
         );
     }
+    // The records are listed before the run directory is resolved. A record
+    // is published after its file is written, so every record listed here had
+    // its file by now, and the run directory is observed after that: a file
+    // that observation finds gone is gone. A record published later is not in
+    // this list, and is left to the next cleanup.
+    let rows = store
+        .list_state(CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .map_err(|e| format!("list credential materialization metadata: {e}"))?;
     // Resolved once: a run directory that cannot be opened without following
     // a link refuses the whole cleanup before any record is looked at, so
     // no record is selected, removed or marked behind that link.
     let run_root = match options.run_dir.as_deref() {
-        Some(dir) => Some(open_run_root(dir)?),
+        Some(dir) => {
+            let root = open_run_root(dir)?;
+            #[cfg(test)]
+            run_root_resolved(dir);
+            Some(root)
+        }
         None => None,
     };
     let run_dir = options.run_dir.clone().unwrap_or_default();
@@ -209,9 +252,6 @@ pub fn cleanup_managed_credential_materializations(
         skipped: Vec::new(),
         errors: Vec::new(),
     };
-    let rows = store
-        .list_state(CREDENTIAL_MATERIALIZATION_NAMESPACE)
-        .map_err(|e| format!("list credential materialization metadata: {e}"))?;
     for row in rows {
         let mut metadata: ManagedCredentialMaterialization =
             match serde_json::from_str(&row.value_json) {
@@ -223,10 +263,6 @@ pub fn cleanup_managed_credential_materializations(
                     continue;
                 }
             };
-        if metadata.cleanup_status.as_deref() == Some("cleaned") {
-            report.skipped.push(metadata.target);
-            continue;
-        }
         if run_root.is_some() && !Path::new(&metadata.target).is_absolute() {
             // The record does not keep the working directory its path was
             // written against. Read from any other one, this daemon's
@@ -235,6 +271,10 @@ pub fn cleanup_managed_credential_materializations(
                 "{} (recorded by a relative path, which names no run directory)",
                 metadata.target
             ));
+            continue;
+        }
+        if metadata.cleanup_status.as_deref() == Some("cleaned") {
+            report.skipped.push(metadata.target);
             continue;
         }
         if !metadata_matches_cleanup_scope(&metadata, options, run_root.as_ref()) {

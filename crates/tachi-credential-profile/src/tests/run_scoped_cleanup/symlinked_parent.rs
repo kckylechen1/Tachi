@@ -722,3 +722,58 @@ fn doctor_plans_nothing_behind_a_refused_run_directory() {
         through_real.issues
     );
 }
+
+/// A record published while a cleanup is resolving a run directory that was
+/// gone is not that cleanup's to close: its file is there, so it stays open.
+/// The records are listed before the run directory is resolved, and a record
+/// is published after its file is written.
+#[test]
+fn a_record_published_during_a_cleanup_of_a_gone_run_directory_stays_open() {
+    let db_path = crate::test_fixtures::test_fixture_path(format!(
+        "credential-cleanup-late-record-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let db_path = db_path.to_string_lossy().to_string();
+    let store = memcore::MemoryStore::open(&db_path).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let root = tempfile::tempdir().expect("temp root");
+    let run_dir = root.path().join("run");
+    let target = run_dir.join("credentials/auth.json");
+    // Another operation, on its own connection, brings the run directory
+    // back with a credential in it while this cleanup resolves it.
+    let late_target = target.clone();
+    let other_db = db_path.clone();
+    crate::cleanup::set_run_root_resolved(
+        &run_dir,
+        Box::new(move || {
+            let other = memcore::MemoryStore::open(&other_db).expect("second connection");
+            seed_legacy_auth_file(&other, &legacy_auth_file_profile(&late_target));
+        }),
+    );
+
+    let report = crate::cleanup_ephemeral_credential_materializations(&store, &run_dir, false)
+        .expect("the cleanup runs");
+
+    assert!(
+        report.missing.is_empty() && report.removed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).ok().as_deref(),
+        Some(r#"{"token":"secret-token"}"#),
+        "the late credential file is gone"
+    );
+    let rows = store
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .expect("list managed credential metadata");
+    assert_eq!(rows.len(), 1);
+    assert_ne!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].value_json).expect("metadata JSON")
+            ["cleanup_status"],
+        serde_json::json!("cleaned"),
+        "the late record was closed"
+    );
+}
