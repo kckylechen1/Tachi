@@ -7,7 +7,8 @@
 //! but never a symlink that holds the target name itself.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection, TargetLocation,
+    ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot, TargetInspection,
+    TargetLocation,
 };
 use memcore::anchored_fs::{AnchoredDirectory, EntryKind};
 use std::ffi::OsStr;
@@ -17,69 +18,173 @@ use std::path::{Component, Path, PathBuf};
 
 pub(super) fn locate(
     metadata: &ManagedCredentialMaterialization,
-    run_dir: Option<&Path>,
+    run_root: Option<&RunRoot>,
 ) -> TargetLocation {
-    locate_path(Path::new(&metadata.target), run_dir)
+    locate_path(Path::new(&metadata.target), run_root)
 }
 
-fn locate_path(target: &Path, run_dir: Option<&Path>) -> TargetLocation {
-    if let Some(run_dir) = run_dir {
-        let resolved_target = if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            // A relative target was recorded against the daemon's own cwd.
-            match std::env::current_dir() {
-                Ok(cwd) => cwd.join(target),
-                Err(err) => {
-                    return TargetLocation::Unremovable(format!(
-                        "resolve the current directory: {err}"
-                    ))
-                }
-            }
+/// Resolve the run directory once per cleanup. The platform's own top-level
+/// aliases are expanded by name; every other component is opened without
+/// following a link. Any other link on the way refuses the whole run
+/// directory: it sits where a worker may write, and where it points now says
+/// nothing about where it pointed when the credentials were recorded.
+pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
+    let as_given = spelled_in_full(run_dir)?;
+    let resolved = expand_platform_aliases(&as_given);
+    let mut directory = AnchoredDirectory::open_absolute(Path::new("/"))
+        .map_err(|err| format!("open '/': {err}"))?;
+    let mut opened = PathBuf::from("/");
+    let mut missing = false;
+    for component in resolved.components() {
+        let Component::Normal(name) = component else {
+            continue;
         };
-        // Canonicalize `run_dir` once and keep that exact path for both the
-        // prefix match and the anchored open, so an alias target swap between
-        // match and open cannot redirect cleanup into another directory.
-        let canonical_run_dir = match std::fs::canonicalize(run_dir) {
-            Ok(path) => Some(path),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(err) => {
-                return TargetLocation::Unremovable(format!(
-                    "resolve run_dir '{}': {err}",
+        opened.push(name);
+        match open_component(&directory, name, &opened) {
+            Ok(next) => directory = next,
+            Err(TargetLocation::Missing) => {
+                missing = true;
+                break;
+            }
+            Err(TargetLocation::Unremovable(reason)) => {
+                return Err(format!(
+                    "run directory '{}' cannot be opened without following a link: {reason}",
                     run_dir.display()
-                ))
+                ));
             }
-        };
-        if let Some(canonical_run_dir) = canonical_run_dir {
-            if let Some(rel) = relative_under_run_dir(&resolved_target, run_dir, &canonical_run_dir)
-            {
-                return locate_in_run_dir(canonical_run_dir, &rel);
+            // `open_component` only opens directories. A later change must not
+            // turn this into a silent pass.
+            Err(TargetLocation::Removable(_)) => {
+                return Err(format!(
+                    "run directory '{}' cannot be opened as a directory",
+                    run_dir.display()
+                ));
             }
         }
-        return locate_recorded(&resolved_target);
     }
-    locate_for_operator(target)
+    Ok(if missing {
+        RunRoot::Missing
+    } else {
+        RunRoot::Open {
+            as_given,
+            resolved,
+            directory,
+        }
+    })
 }
 
-fn relative_under_run_dir(
-    target: &Path,
-    run_dir: &Path,
-    canonical_run_dir: &Path,
-) -> Option<PathBuf> {
-    // Strip the lexical `run_dir` prefix first so legacy records recorded under
-    // an alias located inside `canonical_run_dir` (e.g. `<real>/current -> <real>`)
-    // resolve cleanly relative to `canonical_run_dir` instead of leaving the
-    // symlink component at the head of the relative path.
-    if let Ok(rel) = target.strip_prefix(run_dir) {
-        return Some(rel.to_path_buf());
+/// `run_dir` as an absolute path with every `.` and `..` resolved by name.
+fn spelled_in_full(run_dir: &Path) -> Result<PathBuf, String> {
+    let mut full = if run_dir.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().map_err(|err| {
+            format!(
+                "resolve the current directory for run_dir '{}': {err}",
+                run_dir.display()
+            )
+        })?
+    };
+    for component in run_dir.components() {
+        match component {
+            Component::RootDir => full = PathBuf::from("/"),
+            Component::CurDir => {}
+            Component::Normal(name) => full.push(name),
+            Component::ParentDir => {
+                if !full.pop() {
+                    return Err(format!(
+                        "run directory '{}' does not name a directory: it goes above '/'",
+                        run_dir.display()
+                    ));
+                }
+            }
+            Component::Prefix(_) => {}
+        }
     }
+    Ok(full)
+}
+
+/// macOS keeps `/var`, `/tmp` and `/etc` as links into `/private`. They belong
+/// to the system and sit where no worker writes, so they are expanded by
+/// name, after checking where they point. Everything else is left for the
+/// no-follow open.
+#[cfg(target_os = "macos")]
+fn expand_platform_aliases(path: &Path) -> PathBuf {
+    const ALIASES: [(&str, &str); 3] = [
+        ("var", "private/var"),
+        ("tmp", "private/tmp"),
+        ("etc", "private/etc"),
+    ];
+    let mut components = path.components();
+    if let (Some(Component::RootDir), Some(Component::Normal(first))) =
+        (components.next(), components.next())
+    {
+        for (alias, real) in ALIASES {
+            if first == OsStr::new(alias)
+                && std::fs::read_link(Path::new("/").join(alias))
+                    .is_ok_and(|target| target == Path::new(real))
+            {
+                return Path::new("/")
+                    .join(real)
+                    .components()
+                    .chain(components)
+                    .collect();
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn expand_platform_aliases(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn locate_path(target: &Path, run_root: Option<&RunRoot>) -> TargetLocation {
+    let (as_given, resolved, directory) = match run_root {
+        None => return locate_for_operator(target),
+        Some(RunRoot::Missing) => return TargetLocation::Missing,
+        Some(RunRoot::Open {
+            as_given,
+            resolved,
+            directory,
+        }) => (as_given, resolved, directory),
+    };
+    let resolved_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        // A relative target was recorded against the daemon's own cwd.
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(target),
+            Err(err) => {
+                return TargetLocation::Unremovable(format!("resolve the current directory: {err}"))
+            }
+        }
+    };
+    let Some(rel) = relative_under(&resolved_target, as_given, resolved) else {
+        return TargetLocation::Unremovable(
+            "it is not under the run directory this cleanup resolved".into(),
+        );
+    };
+    locate_in_run_dir(directory.clone(), resolved.clone(), &rel)
+}
+
+/// Where `target` sits under the run directory, by either spelling of it.
+fn relative_under(target: &Path, as_given: &Path, resolved: &Path) -> Option<PathBuf> {
     target
-        .strip_prefix(canonical_run_dir)
+        .strip_prefix(as_given)
+        .or_else(|_| target.strip_prefix(resolved))
         .ok()
         .map(Path::to_path_buf)
 }
 
-fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
+/// Locate `rel` under the run directory this cleanup opened. `root` is only
+/// for messages; the handle is what is walked.
+fn locate_in_run_dir(
+    mut directory: AnchoredDirectory,
+    root: PathBuf,
+    rel: &Path,
+) -> TargetLocation {
     let mut components = rel
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
@@ -99,17 +204,7 @@ fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
             rel.display()
         ));
     }
-    let mut directory = match AnchoredDirectory::open_absolute(&canonical_run_dir) {
-        Ok(dir) => dir,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return TargetLocation::Missing,
-        Err(err) => {
-            return TargetLocation::Unremovable(format!(
-                "open run_dir '{}': {err}",
-                canonical_run_dir.display()
-            ))
-        }
-    };
-    let mut opened = canonical_run_dir;
+    let mut opened = root;
     for component in components {
         if let Component::Normal(name) = component {
             opened.push(name);
@@ -120,39 +215,6 @@ fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
         }
     }
     classify(directory, leaf)
-}
-
-fn locate_recorded(target: &Path) -> TargetLocation {
-    let Some(leaf) = target.file_name() else {
-        return TargetLocation::Unremovable(format!("'{}' does not name a file", target.display()));
-    };
-    match open_recorded_parent(target) {
-        Ok(parent) => classify(parent, leaf),
-        Err(location) => location,
-    }
-}
-
-/// Open the recorded target's parent one component at a time from `/`.
-fn open_recorded_parent(target: &Path) -> Result<AnchoredDirectory, TargetLocation> {
-    let mut directory = AnchoredDirectory::open_absolute(Path::new("/"))
-        .map_err(|err| TargetLocation::Unremovable(format!("open '/': {err}")))?;
-    let mut opened = PathBuf::from("/");
-    for component in target.parent().unwrap_or(Path::new("/")).components() {
-        match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(name) => {
-                opened.push(name);
-                directory = open_component(&directory, name, &opened)?;
-            }
-            _ => {
-                return Err(TargetLocation::Unremovable(format!(
-                    "'{}' is not an ordinary absolute path",
-                    target.display()
-                )))
-            }
-        }
-    }
-    Ok(directory)
 }
 
 /// Open one recorded path component, never through a symlink. A component
@@ -225,8 +287,12 @@ fn classify(directory: AnchoredDirectory, leaf: &OsStr) -> TargetLocation {
     }
 }
 
-pub(super) fn inspect(target: &Path, run_dir: Option<&Path>, max_bytes: usize) -> TargetInspection {
-    let removable = match locate_path(target, run_dir) {
+pub(super) fn inspect(
+    target: &Path,
+    run_root: Option<&RunRoot>,
+    max_bytes: usize,
+) -> TargetInspection {
+    let removable = match locate_path(target, run_root) {
         TargetLocation::Missing => return TargetInspection::Missing,
         TargetLocation::Unremovable(reason) => return TargetInspection::UntrustedEntry { reason },
         TargetLocation::Removable(removable) => removable,

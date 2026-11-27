@@ -7,7 +7,6 @@ use super::CREDENTIAL_MATERIALIZATION_NAMESPACE;
 use memcore::anchored_fs::AnchoredDirectory;
 use memcore::MemoryStore;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(not(unix))]
@@ -51,6 +50,31 @@ enum Removal {
     ForeignContent,
 }
 
+/// The run directory of a scoped cleanup, resolved once so that selecting
+/// records and removing files share one view of it.
+pub(crate) enum RunRoot {
+    /// The run directory is gone, and so are its targets.
+    Missing,
+    /// `as_given` is the path the caller named; `resolved` is the same path
+    /// with the platform's own top-level aliases expanded. Either spelling
+    /// selects records. Removal walks from the opened handle.
+    Open {
+        as_given: PathBuf,
+        resolved: PathBuf,
+        #[cfg(unix)]
+        directory: AnchoredDirectory,
+    },
+}
+
+/// Resolve the run directory for a cleanup or an inspection. `Err` means the
+/// directory cannot be opened without following a link its caller cannot
+/// vouch for. A cleanup must then leave the run directory alone, records
+/// included: a link where a worker may write can be repointed, and where it
+/// points now says nothing about where the credentials were recorded.
+pub(crate) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
+    target_fs::open_run_root(run_dir)
+}
+
 /// Safe descriptor-anchored inspection of a credential target for `doctor`.
 pub(crate) enum TargetInspection {
     Missing,
@@ -69,10 +93,10 @@ pub(crate) enum TargetInspection {
 
 pub(crate) fn inspect_target_file(
     target: &Path,
-    run_dir: Option<&Path>,
+    run_root: Option<&RunRoot>,
     max_bytes: usize,
 ) -> TargetInspection {
-    target_fs::inspect(target, run_dir, max_bytes)
+    target_fs::inspect(target, run_root, max_bytes)
 }
 
 pub fn cleanup_ephemeral_credential_materializations(
@@ -95,6 +119,7 @@ pub fn cleanup_ephemeral_credential_materializations(
 fn metadata_matches_cleanup_scope(
     metadata: &ManagedCredentialMaterialization,
     options: &CredentialCleanupOptions,
+    run_root: Option<&RunRoot>,
 ) -> bool {
     if let Some(profile) = &options.profile {
         if metadata.profile != *profile {
@@ -106,7 +131,7 @@ fn metadata_matches_cleanup_scope(
             return false;
         }
     }
-    if let Some(run_dir) = &options.run_dir {
+    if options.run_dir.is_some() {
         let target = PathBuf::from(&metadata.target);
         if target
             .components()
@@ -114,12 +139,17 @@ fn metadata_matches_cleanup_scope(
         {
             return false;
         }
-        // New temporary materializations record their canonical physical path.
-        // Keep matching legacy lexical paths and caller-granted aliases alike.
-        let canonical_run_dir = fs::canonicalize(run_dir).ok();
-        if !target.starts_with(run_dir)
-            && !canonical_run_dir.is_some_and(|root| target.starts_with(root))
-        {
+        // Temporary materializations record their canonical physical path,
+        // older ones the path they were given. Both spellings of the run
+        // directory select records. They were resolved once for this
+        // cleanup, so what is selected here is what is removed below.
+        let RunRoot::Open {
+            as_given, resolved, ..
+        } = run_root.expect("a run-scoped cleanup resolves its run directory first")
+        else {
+            return true;
+        };
+        if !target.starts_with(as_given) && !target.starts_with(resolved) {
             return false;
         }
     }
@@ -136,6 +166,13 @@ pub fn cleanup_managed_credential_materializations(
                 .to_string(),
         );
     }
+    // Resolved once: a run directory that cannot be opened without following
+    // a link refuses the whole cleanup before any record is looked at, so
+    // no record is selected, removed or marked behind that link.
+    let run_root = match options.run_dir.as_deref() {
+        Some(dir) => Some(open_run_root(dir)?),
+        None => None,
+    };
     let run_dir = options.run_dir.clone().unwrap_or_default();
     let credentials_dir = run_dir.join("credentials");
     let mut report = CredentialCleanupReport {
@@ -171,13 +208,13 @@ pub fn cleanup_managed_credential_materializations(
             report.skipped.push(metadata.target);
             continue;
         }
-        if !metadata_matches_cleanup_scope(&metadata, options) {
+        if !metadata_matches_cleanup_scope(&metadata, options, run_root.as_ref()) {
             report.skipped.push(metadata.target);
             continue;
         }
         // Every target is located through its parent directory, never by a
         // pathname a worker could repoint between the check and the removal.
-        let removable = match target_fs::locate(&metadata, options.run_dir.as_deref()) {
+        let removable = match target_fs::locate(&metadata, run_root.as_ref()) {
             TargetLocation::Missing => {
                 if !options.dry_run {
                     mark_metadata_cleaned(

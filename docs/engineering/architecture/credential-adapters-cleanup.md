@@ -17,6 +17,11 @@ held directory descriptors with no-follow traversal and atomic publication.
 An explicit `--allow-existing` may replace only a leaf inside the authorized
 run directory; it does not overwrite a hardlink's external backing file.
 Run-directory aliases are resolved to the authorized canonical directory.
+Cleanup is stricter: it resolves the run directory once, expands only the
+platform's own top-level aliases (on macOS `/var`, `/tmp` and `/etc`), and
+refuses a run directory reached through any other link, records included.
+Where such a link points at cleanup time does not show where it pointed when
+the credentials were recorded.
 File overlays are unavailable on non-Unix systems; env adapters remain usable.
 
 A manual file overlay must supply `--run-dir`. Dispatch supplies its own run

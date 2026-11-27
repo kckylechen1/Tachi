@@ -3,15 +3,26 @@
 //! is removed.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection, TargetLocation,
+    ManagedCredentialMaterialization, RemovableTarget, Removal, RunRoot, TargetInspection,
+    TargetLocation,
 };
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+/// Without descriptor anchoring the run directory is only a prefix: nothing
+/// here can tell a link from a directory, and no file is removed through the
+/// target name itself (see `locate`).
+pub(super) fn open_run_root(run_dir: &Path) -> Result<RunRoot, String> {
+    Ok(RunRoot::Open {
+        as_given: run_dir.to_path_buf(),
+        resolved: run_dir.to_path_buf(),
+    })
+}
+
 pub(super) fn locate(
     metadata: &ManagedCredentialMaterialization,
-    _run_dir: Option<&Path>,
+    _run_root: Option<&RunRoot>,
 ) -> TargetLocation {
     let target = PathBuf::from(&metadata.target);
     let Some(leaf) = target.file_name() else {
@@ -41,7 +52,7 @@ pub(super) fn locate(
 
 pub(super) fn inspect(
     target: &Path,
-    _run_dir: Option<&Path>,
+    _run_root: Option<&RunRoot>,
     max_bytes: usize,
 ) -> TargetInspection {
     match fs::symlink_metadata(target) {

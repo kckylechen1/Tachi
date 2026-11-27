@@ -190,9 +190,13 @@ fn config_overlay_replacement_does_not_modify_an_outside_hardlink() {
     );
 }
 
+/// Materialization accepts a granted alias and records the canonical target.
+/// Cleanup does not follow the alias: where a link points at cleanup time
+/// cannot vouch for where the file was recorded. The canonical run directory
+/// still cleans it.
 #[cfg(unix)]
 #[test]
-fn granted_run_directory_alias_materializes_and_cleans_the_canonical_target() {
+fn granted_run_directory_alias_materializes_canonically_and_cleanup_uses_the_real_directory() {
     let fixture = Fixture::new();
     let alias = fixture.directory.path().join("run-alias");
     std::os::unix::fs::symlink(&fixture.run_dir, &alias).expect("granted run-dir alias");
@@ -204,9 +208,18 @@ fn granted_run_directory_alias_materializes_and_cleans_the_canonical_target() {
         .join("credentials/config.json");
     assert_eq!(Path::new(&result.report.steps[0].target), target.as_path());
     assert!(target.exists());
-    let cleanup =
-        crate::cleanup_ephemeral_credential_materializations(&fixture.store, &alias, false)
-            .expect("cleanup through the same granted run-dir alias");
+
+    let error = crate::cleanup_ephemeral_credential_materializations(&fixture.store, &alias, false)
+        .expect_err("cleanup must not follow a granted alias");
+    assert!(error.contains("without following a link"), "{error}");
+    assert!(target.exists(), "cleanup followed the alias: {error}");
+
+    let cleanup = crate::cleanup_ephemeral_credential_materializations(
+        &fixture.store,
+        &fixture.run_dir,
+        false,
+    )
+    .expect("cleanup through the canonical run directory");
     assert_eq!(cleanup.removed, vec![target.to_string_lossy().to_string()]);
     assert!(!target.exists());
 }
