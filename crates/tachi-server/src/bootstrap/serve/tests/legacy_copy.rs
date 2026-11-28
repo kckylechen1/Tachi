@@ -95,6 +95,7 @@ async fn failed_cleanup_fences_existing_global_and_project_targets_on_restart() 
     let ctx = StartupContext {
         home: root.path().to_path_buf(),
         app_home: app_home.clone(),
+        operator_config_home: None,
         command: Commands::Serve,
         defer_manifest_startup: true,
         git_root: None,

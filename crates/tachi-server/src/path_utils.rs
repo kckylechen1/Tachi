@@ -66,7 +66,8 @@ pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Resul
     }
 }
 pub(crate) use home::{
-    app_home_from_global_db, resolve_app_home, resolve_tachi_home, tachi_home, TachiHomeSource,
+    app_home_from_global_db, operator_config_home, resolve_app_home, resolve_tachi_home,
+    tachi_home, OperatorConfigHome, OperatorConfigSource, TachiHomeResolution, TachiHomeSource,
 };
 pub(crate) use named::{
     list_named_projects, list_named_projects_in_home, named_project_for_db_path,

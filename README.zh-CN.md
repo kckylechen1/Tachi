@@ -253,20 +253,22 @@ graph TD
 
 ## 配置
 
-把 `.env.example` 复制为项目根目录下的 `.env`，服务器会自动加载。
+daemon 的配置来自你自己的 home 目录，在 checkout 之外：密钥放 `~/.tachi/secrets.env`，URL、模型和其余设置放 `~/.tachi/config.env`。`.env.example` 列出了这些设置。两个文件都想放到别的目录，就把 `TACHI_HOME` 设为一个绝对路径。
 
 ```bash
-# 语义检索（没有它，词法与图谱召回仍可用）
+# ~/.tachi/secrets.env：密钥
 VOYAGE_API_KEY=your_voyage_key_here
-
-# 推荐：事实抽取、摘要与蒸馏
 SILICONFLOW_API_KEY=your_siliconflow_key_here
+
+# ~/.tachi/config.env：其余设置
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
 # 可选：覆盖全局库路径
 MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
+
+项目里的 `.env`、`.tachi/config.env` 和 `.sigil/config.env` 不会被应用到 daemon：它们是给项目里其它工具用的。启动时，其中含有 daemon 设置的每个文件会在标准错误上被提到一次，方便找到不再生效的设置。从会加载它们的版本升级，见 [docs/UPGRADING.md](docs/UPGRADING.md) 第二部分第 8 节。
 
 后台抽取、摘要和每日蒸馏走配置好的 OpenAI 兼容 API 通道，失败时先尝试配置的备用 provider，整条链路耗尽才记录 `LANE_OUTAGE`。普通推理先试 Claude CLI，再转配置的 API。各通道的覆盖项（`EXTRACT_*`、`DISTILL_*`、`SUMMARY_*`、`REASONING_*`）见 `.env.example`。
 

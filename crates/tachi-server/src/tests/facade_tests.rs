@@ -1,6 +1,7 @@
 use super::{
     ensure_test_env, make_entry, make_server, make_server_with_project_fixture,
-    make_server_with_temp_home, plant_leftover_shared_wiki, seed_wiki_project_entries,
+    make_server_with_temp_home, operator_config_for_test, plant_leftover_shared_wiki,
+    seed_wiki_project_entries,
 };
 use crate::memory_search_ops::recall_simulate::{
     build_recall_simulation_report, RecallSimulationParams,

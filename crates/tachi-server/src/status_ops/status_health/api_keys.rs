@@ -9,37 +9,33 @@ use crate::provider_config::keychain_scan::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyStatus;
 
 pub(super) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, false, None, None, false, None)
+    collect_api_key_status_inner(global_db_path, false, None, false, None)
 }
 
 pub(super) fn collect_api_key_status_with_value_compare(
     global_db_path: &Path,
 ) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, true, None, None, false, None)
+    collect_api_key_status_inner(global_db_path, true, None, false, None)
 }
 
 pub(super) fn collect_api_key_status_immutable(global_db_path: &Path) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, false, None, None, true, None)
+    collect_api_key_status_inner(global_db_path, false, None, true, None)
 }
 
-/// `resolved_home`: the caller's server-bound home (`MemoryServer::tachi_home_dir()`),
-/// unioned into the `config.env` scan set (#1096 leaf-2a round-2, codex
-/// B4-status) — see `provider_config::collect_config_env_values`'s doc for
-/// why this closes the manifest-side/provider-side split-home bug. The only
-/// caller of this function (`status_ops::snapshot::collect_snapshot_inner`)
-/// always has an `app_home` in scope, so it is passed as `Some`.
+/// The provider side reads the same operator configuration files the rest of
+/// the process does, the ones fixed at startup (#1096 leaf-2a: a snapshot's
+/// manifest side and provider side must not resolve to two different homes).
+/// That is why this takes no home: a caller cannot hand in a data home.
 pub(crate) fn collect_api_key_status_with_probe_cache(
     global_db_path: &Path,
     probe_cache: Option<&ProviderProbeCache>,
     compare_vault_values: bool,
-    resolved_home: Option<&Path>,
     llm: Option<&tachi_llm::LlmClient>,
 ) -> Vec<ApiKeyStatus> {
     collect_api_key_status_inner(
         global_db_path,
         compare_vault_values,
         probe_cache,
-        resolved_home,
         false,
         llm,
     )
@@ -49,7 +45,6 @@ fn collect_api_key_status_inner(
     global_db_path: &Path,
     compare_vault_values: bool,
     probe_cache: Option<&ProviderProbeCache>,
-    resolved_home: Option<&Path>,
     immutable: bool,
     llm: Option<&tachi_llm::LlmClient>,
 ) -> Vec<ApiKeyStatus> {
@@ -119,7 +114,7 @@ fn collect_api_key_status_inner(
             )
         })
         .collect::<HashMap<_, _>>();
-    let config_env = crate::provider_config::collect_config_env_values(resolved_home);
+    let config_env = crate::provider_config::collect_config_env_values();
     let vault_values: HashMap<String, String> = if compare_vault_values {
         match load_keychain_vault_api_key_values(global_db_path) {
             Ok(values) => values.into_iter().collect(),

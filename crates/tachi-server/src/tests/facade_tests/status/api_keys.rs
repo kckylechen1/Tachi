@@ -3,6 +3,9 @@ use super::*;
 #[tokio::test]
 async fn tachi_status_marks_vault_alias_in_config_env_as_vault_config() {
     let (server, temp_home) = make_server_with_temp_home();
+    // Startup fixes where configuration is read from. A server built by hand
+    // has to say so too, or status knows no configuration file.
+    let _operator_config = operator_config_for_test(&temp_home.temp_home);
     let config_env = temp_home.temp_home.join(".tachi/config.env");
     std::fs::create_dir_all(config_env.parent().expect("config env parent"))
         .expect("create config env dir");
@@ -43,6 +46,9 @@ async fn tachi_status_marks_vault_alias_in_config_env_as_vault_config() {
 #[tokio::test]
 async fn tachi_status_marks_config_env_only_key_as_configured() {
     let (server, temp_home) = make_server_with_temp_home();
+    // Startup fixes where configuration is read from. A server built by hand
+    // has to say so too, or status knows no configuration file.
+    let _operator_config = operator_config_for_test(&temp_home.temp_home);
     let config_env = temp_home.temp_home.join(".tachi/config.env");
     std::fs::create_dir_all(config_env.parent().expect("config env parent"))
         .expect("create config env dir");
@@ -74,6 +80,9 @@ async fn tachi_status_marks_config_env_only_key_as_configured() {
 #[tokio::test]
 async fn tachi_status_marks_config_env_alias_key_as_configured() {
     let (server, temp_home) = make_server_with_temp_home();
+    // Startup fixes where configuration is read from. A server built by hand
+    // has to say so too, or status knows no configuration file.
+    let _operator_config = operator_config_for_test(&temp_home.temp_home);
     let config_env = temp_home.temp_home.join(".tachi/config.env");
     std::fs::create_dir_all(config_env.parent().expect("config env parent"))
         .expect("create config env dir");

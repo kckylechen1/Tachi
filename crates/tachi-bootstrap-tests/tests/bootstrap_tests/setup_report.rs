@@ -34,6 +34,9 @@ fn setup_report_detects_readiness_from_local_state() {
     let report = api::build_setup_report(
         &home,
         &app_home,
+        // This test's app home is the operator's: nothing was found from a
+        // checkout.
+        &app_home,
         &global_db,
         Some(&project_db),
         Some(&git_root),

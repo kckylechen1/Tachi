@@ -1953,6 +1953,26 @@ pub(crate) fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
     make_server_with_temp_home_and_migration_authority(MigrationAuthority::Deny)
 }
 
+/// Fixes the operator's configuration files for a test built on a temporary
+/// home, the way startup does for that home, and forgets them when dropped.
+pub(crate) fn operator_config_for_test(temp_home: &std::path::Path) -> impl Drop {
+    struct Forget;
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            crate::provider_config::forget_operator_sources_for_test();
+        }
+    }
+    let guard = Forget;
+    crate::provider_config::forget_operator_sources_for_test();
+    crate::provider_config::freeze_operator_sources(
+        crate::provider_config::OperatorConfigSources::at_startup(
+            Some(temp_home),
+            Some(&temp_home.join(".tachi")),
+        ),
+    );
+    guard
+}
+
 pub(crate) fn make_server_with_temp_home_and_migration_authority(
     migration: MigrationAuthority,
 ) -> (MemoryServer, TempHomeGuard) {

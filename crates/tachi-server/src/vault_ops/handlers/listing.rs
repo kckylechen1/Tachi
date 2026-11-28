@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
 use crate::utils::Rfc3339Stamp;
 use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
@@ -59,11 +58,9 @@ fn reconcile_alias_sources(
     configured
 }
 
-fn effective_vault_alias_bindings(resolved_home: &Path) -> HashMap<String, EnvAliasClaims> {
+fn effective_vault_alias_bindings() -> HashMap<String, EnvAliasClaims> {
     reconcile_alias_sources(
-        normalized_alias_source(crate::provider_config::collect_config_env_claims(Some(
-            resolved_home,
-        ))),
+        normalized_alias_source(crate::provider_config::collect_config_env_claims()),
         normalized_alias_source(std::env::vars()),
     )
 }
@@ -458,7 +455,6 @@ fn alias_integrity(
 
 pub(crate) fn build_vault_list_payload(
     store: &memcore::MemoryStore,
-    resolved_home: &Path,
     requested_secret_type: Option<&str>,
     runtime_health: HashMap<String, HashMap<String, VaultKeyHealth>>,
     runtime_bindings: Option<&HashMap<String, BTreeSet<String>>>,
@@ -505,7 +501,7 @@ pub(crate) fn build_vault_list_payload(
         .into_iter()
         .map(|rotation| rotation.prefix)
         .collect::<BTreeSet<_>>();
-    let env_targets = effective_vault_alias_bindings(resolved_home);
+    let env_targets = effective_vault_alias_bindings();
     let account_targets = account_alias_targets(&account_bindings);
     let custody_owners = account_custody_owners(&account_bindings);
     let mut payload = Vec::with_capacity(entries.len());
@@ -630,11 +626,9 @@ pub(crate) async fn handle_vault_list(
         } else {
             (Default::default(), None, None, HashMap::new())
         };
-    let resolved_home = server.tachi_home_dir();
     let resp = server.with_global_store_read(move |store| {
         build_vault_list_payload(
             store,
-            &resolved_home,
             params.secret_type.as_deref(),
             runtime_health,
             runtime_bindings.as_ref(),
@@ -876,7 +870,6 @@ mod tests {
         let list = || {
             build_vault_list_payload(
                 &store,
-                temp.path(),
                 None,
                 HashMap::new(),
                 Some(&runtime),
@@ -1507,10 +1500,14 @@ mod tests {
         )
         .expect("write config.env");
 
-        let raw_claims = crate::provider_config::collect_config_env_claims(Some(home.path()))
-            .into_iter()
-            .filter(|(name, _)| name.trim() == "EXTRACT_API_KEY")
-            .collect::<Vec<_>>();
+        let raw_claims = crate::provider_config::collect_config_env_claims_from(
+            &crate::provider_config::OperatorConfigSources {
+                config_files: vec![home.path().join("config.env")],
+            },
+        )
+        .into_iter()
+        .filter(|(name, _)| name.trim() == "EXTRACT_API_KEY")
+        .collect::<Vec<_>>();
         assert!(raw_claims
             .iter()
             .any(|(_, target)| target.trim() == "vault:DEEPSEEK_API_KEY"));

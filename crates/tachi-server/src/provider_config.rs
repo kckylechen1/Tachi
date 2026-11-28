@@ -6,7 +6,8 @@
 //! do not re-implement Keychain/Vault reads with different behavior.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 use crate::vault_ops::{classify_vault_read_error, VaultMaterializationRevision, VaultReadState};
 use crate::MemoryServer;
@@ -1197,38 +1198,97 @@ fn write_env_catalog_projection(
     Ok(summary)
 }
 
-/// Parse `~/.tachi/config.env` (and peers) into raw key/value claims. Raw keys
-/// and duplicate claims are preserved so security surfaces can detect names
-/// that collide only after normalization.
+/// The files the operator's configuration is read from, fixed once at
+/// startup.
 ///
-/// `resolved_home`, when given, is unioned into the scan locations alongside
-/// every existing one — additive only, nothing below is removed. #1096
-/// leaf-2a round-2 (codex B4-status): this scan set used to miss a
-/// `SIGIL_HOME`-only (or `TACHI_APP_HOME`-only) deployment's home entirely —
-/// `status`'s manifest/probe side reads the server's frozen, funnel-resolved
-/// home (`MemoryServer::tachi_home_dir()`), but this function only ever
-/// looked at `~/.tachi`, `~/.sigil`, a bare `TACHI_HOME` env re-read, and cwd,
-/// so the same `status` snapshot's manifest side and provider-key side could
-/// resolve to two different homes. Passing `Some(server.tachi_home_dir())`
-/// from the `status` call site closes that gap without touching the other
-/// call sites (which keep passing `None` and are byte-for-byte unchanged).
-pub(crate) fn collect_config_env_claims(resolved_home: Option<&Path>) -> Vec<(String, String)> {
-    let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(".tachi").join("config.env"));
-        paths.push(home.join(".sigil").join("config.env"));
-    }
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        paths.push(std::path::PathBuf::from(home).join("config.env"));
-    }
-    paths.push(std::path::PathBuf::from(".tachi/config.env"));
-    paths.push(std::path::PathBuf::from(".sigil/config.env"));
-    if let Some(home) = resolved_home {
-        paths.push(home.join("config.env"));
-    }
+/// They are the files startup loaded provider configuration from, in the order
+/// it loaded them: the operator home's `config.env`, then `~/.sigil/config.env`,
+/// which overrides it. Nothing found from the working directory is among them.
+/// A reader that wants to know what a provider is configured with asks for
+/// this set, and never looks for a file on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OperatorConfigSources {
+    pub(crate) config_files: Vec<PathBuf>,
+}
 
+impl OperatorConfigSources {
+    /// `operator_config_home` is where `config.env` is read from: the home the
+    /// operator named, which replaces `~/.tachi`, or the user's default.
+    /// Either is absent when nothing was named and there is no user home.
+    pub(crate) fn at_startup(
+        user_home: Option<&Path>,
+        operator_config_home: Option<&Path>,
+    ) -> Self {
+        let mut config_files = Vec::new();
+        if let Some(home) = operator_config_home {
+            config_files.push(home.join("config.env"));
+        }
+        if let Some(home) = user_home {
+            let legacy = home.join(".sigil").join("config.env");
+            if !config_files.contains(&legacy) {
+                config_files.push(legacy);
+            }
+        }
+        Self { config_files }
+    }
+}
+
+static OPERATOR_SOURCES: RwLock<Option<OperatorConfigSources>> = RwLock::new(None);
+
+fn fixed_operator_sources() -> &'static RwLock<Option<OperatorConfigSources>> {
+    &OPERATOR_SOURCES
+}
+
+/// Fixes the operator's configuration sources for this process. It is done
+/// once, at startup, before anything reads them. Returns false when they were
+/// already fixed, and changes nothing then.
+pub(crate) fn freeze_operator_sources(sources: OperatorConfigSources) -> bool {
+    let mut fixed = fixed_operator_sources()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if fixed.is_some() {
+        return false;
+    }
+    *fixed = Some(sources);
+    true
+}
+
+pub(crate) fn operator_sources() -> Option<OperatorConfigSources> {
+    fixed_operator_sources()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Tests only: forgets the fixed sources, so that tests sharing a process can
+/// each fix their own.
+#[cfg(test)]
+pub(crate) fn forget_operator_sources_for_test() {
+    *fixed_operator_sources()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// Every `NAME=value` line of the operator's configuration files into raw
+/// key/value claims. Raw keys and duplicate claims are preserved so security
+/// surfaces can detect names that collide only after normalization.
+///
+/// Only the files fixed at startup are read. Until startup has fixed them
+/// there are none, so nothing is read from the machine's own home directory
+/// or from the working directory by accident.
+pub(crate) fn collect_config_env_claims() -> Vec<(String, String)> {
+    operator_sources()
+        .as_ref()
+        .map(collect_config_env_claims_from)
+        .unwrap_or_default()
+}
+
+/// The claims of a given source set, in the order its files are listed in.
+pub(crate) fn collect_config_env_claims_from(
+    sources: &OperatorConfigSources,
+) -> Vec<(String, String)> {
     let mut values = Vec::new();
-    for path in paths {
+    for path in &sources.config_files {
         let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -1252,8 +1312,8 @@ pub(crate) fn collect_config_env_claims(resolved_home: Option<&Path>) -> Vec<(St
 /// Effective key → value view used by legacy consumers. Exact normalized keys
 /// keep the existing last-claim-wins behavior; callers that need collision
 /// evidence use [`collect_config_env_claims`].
-pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String, String> {
-    collect_config_env_claims(resolved_home)
+pub fn collect_config_env_values() -> HashMap<String, String> {
+    collect_config_env_claims()
         .into_iter()
         .map(|(key, value)| (key.trim().to_string(), value))
         .collect()
@@ -1941,36 +2001,107 @@ mod tests {
         );
     }
 
-    /// #1096 leaf-2a round-2 (codex B4-status): `resolved_home` is additive —
-    /// `None` reproduces the exact pre-existing scan set (unchanged for every
-    /// caller but `status`), and `Some(path)` unions in `path/config.env` on
-    /// top of it. This is the SIGIL_HOME-only-deployment regression codex
-    /// flagged: without the resolved-home union, a `config.env` living only
-    /// under a `SIGIL_HOME`-style custom root was invisible to this scan even
-    /// though `status`'s manifest side already resolved to that root.
+    /// The claims are read from the operator's configuration files only, in
+    /// the order they are listed in, duplicates and contradictions included.
     #[test]
-    fn collect_config_env_values_unions_in_resolved_home() {
-        let _lock = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn claims_come_from_the_operator_sources_in_order() {
         let custom_home = tempfile::tempdir().expect("custom home tempdir");
         std::fs::write(
             custom_home.path().join("config.env"),
-            "TACHI_ROUND2_B4_PROBE=custom-value\n",
+            "EXTRACT_API_KEY=custom-value\nEXTRACT_API_KEY = other-value\n",
         )
         .expect("write custom config.env");
-
-        let without_home = collect_config_env_values(None);
-        assert!(
-            !without_home.contains_key("TACHI_ROUND2_B4_PROBE"),
-            "a config.env under an arbitrary path must not be scanned without resolved_home"
-        );
-
-        let with_home = collect_config_env_values(Some(custom_home.path()));
+        let sources = OperatorConfigSources {
+            config_files: vec![custom_home.path().join("config.env")],
+        };
         assert_eq!(
-            with_home.get("TACHI_ROUND2_B4_PROBE").map(String::as_str),
-            Some("custom-value"),
-            "resolved_home's config.env must be unioned into the scan set"
+            collect_config_env_claims_from(&sources),
+            vec![
+                ("EXTRACT_API_KEY".to_string(), "custom-value".to_string()),
+                ("EXTRACT_API_KEY ".to_string(), "other-value".to_string()),
+            ]
+        );
+        let values: HashMap<String, String> = collect_config_env_claims_from(&sources)
+            .into_iter()
+            .map(|(key, value)| (key.trim().to_string(), value))
+            .collect();
+        assert_eq!(
+            values.get("EXTRACT_API_KEY").map(String::as_str),
+            Some("other-value"),
+            "the last claim for an exact key wins"
+        );
+    }
+
+    /// The sources follow startup's order: the operator home's `config.env`,
+    /// then `~/.sigil/config.env`. A home the operator named replaces the
+    /// user's default, whose file is then not reported as configuration.
+    #[test]
+    fn operator_sources_follow_the_startup_order() {
+        let user = tempfile::tempdir().expect("user home tempdir");
+        let named = tempfile::tempdir().expect("named home tempdir");
+        let default =
+            OperatorConfigSources::at_startup(Some(user.path()), Some(&user.path().join(".tachi")));
+        assert_eq!(
+            default.config_files,
+            vec![
+                user.path().join(".tachi").join("config.env"),
+                user.path().join(".sigil").join("config.env"),
+            ]
+        );
+        let replaced = OperatorConfigSources::at_startup(Some(user.path()), Some(named.path()));
+        assert_eq!(
+            replaced.config_files,
+            vec![
+                named.path().join("config.env"),
+                user.path().join(".sigil").join("config.env"),
+            ]
+        );
+        assert!(OperatorConfigSources::at_startup(None, None)
+            .config_files
+            .is_empty());
+    }
+
+    /// Nothing is read until startup has fixed the sources, and they are
+    /// fixed once.
+    #[test]
+    fn claims_are_read_only_from_the_sources_fixed_at_startup() {
+        struct Forget;
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                forget_operator_sources_for_test();
+            }
+        }
+        let _forget = Forget;
+        forget_operator_sources_for_test();
+
+        assert!(collect_config_env_claims().is_empty());
+        assert!(collect_config_env_values().is_empty());
+        let home = tempfile::tempdir().expect("home tempdir");
+        std::fs::write(
+            home.path().join("config.env"),
+            "TACHI_STARTUP_SOURCES_PROBE=fixed-value\n",
+        )
+        .expect("write config.env");
+        assert!(freeze_operator_sources(OperatorConfigSources {
+            config_files: vec![home.path().join("config.env")],
+        }));
+        assert_eq!(
+            collect_config_env_values()
+                .get("TACHI_STARTUP_SOURCES_PROBE")
+                .map(String::as_str),
+            Some("fixed-value")
+        );
+        assert!(
+            !freeze_operator_sources(OperatorConfigSources {
+                config_files: Vec::new(),
+            }),
+            "the sources are fixed once"
+        );
+        assert_eq!(
+            collect_config_env_values()
+                .get("TACHI_STARTUP_SOURCES_PROBE")
+                .map(String::as_str),
+            Some("fixed-value")
         );
     }
 

@@ -53,6 +53,7 @@ pub(super) async fn run_pre_serve_command(
     command: &Commands,
     home: &PathBuf,
     app_home: &PathBuf,
+    operator_config_home: Option<&std::path::Path>,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
@@ -70,6 +71,7 @@ pub(super) async fn run_pre_serve_command(
                 *non_interactive,
                 home,
                 app_home,
+                operator_config_home,
                 global_db_path,
                 project_db_path,
                 git_root,
@@ -126,7 +128,7 @@ pub(super) async fn run_pre_serve_command(
             Ok(true)
         }
         Commands::Host { action } => {
-            crate::host_profile::run_cli(action.clone(), app_home)?;
+            crate::host_profile::run_cli(action.clone(), operator_config_home)?;
             Ok(true)
         }
         Commands::InjectionSurface { action } => {

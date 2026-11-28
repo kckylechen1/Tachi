@@ -11,6 +11,7 @@ use tachi_hub::should_expose_skill_tool;
 
 mod backfill_commands;
 mod background;
+mod checkout_env;
 mod cli_commands;
 mod daemon;
 #[cfg(test)]
@@ -97,99 +98,63 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
     Ok(runtime)
 }
 
-/// Loads an env file that lives in a checkout: the project-local files, and
-/// the files of an app home found inside one. Such a file may set ordinary
-/// Tachi settings, but neither what the daemon executes nor what the Vault
-/// hands to a dispatch.
-fn load_project_env_file(path: &Path, override_existing: bool) {
-    // Directories (e.g. `.env/`) can be opened read-only on Unix and repeatedly
-    // yield EISDIR from dotenvy's iterator; require a regular file and abort on
-    // iterator errors to match `dotenvy::from_path`.
-    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
-        return;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return;
-    };
-    let mut reader = std::io::BufReader::new(file);
-    // dotenvy removes a leading byte order mark only when it loads a whole
-    // file. Read line by line, that line is a parse error and the rest of the
-    // file is lost after it.
-    remove_leading_bom(&mut reader);
-    for item in dotenvy::Iter::new(reader) {
-        let Ok((key, value)) = item else {
-            break;
-        };
-        if crate::utils::is_execution_environment_name(&key) {
-            tracing::warn!(
-                "[startup] ignored execution-environment variable '{key}' from {}",
-                path.display()
-            );
-            continue;
-        }
-        // A checkout does not choose what the Vault hands to a dispatch.
-        if key.eq_ignore_ascii_case("TACHI_VAULT_CHILD_ENV") {
-            tracing::warn!(
-                "[startup] ignored Vault export-mode variable '{key}' from {}",
-                path.display()
-            );
-            continue;
-        }
-        if override_existing || std::env::var_os(&key).is_none() {
-            std::env::set_var(&key, &value);
-        }
-    }
-}
-
-/// The first step of dotenvy's whole-file load.
-fn remove_leading_bom(reader: &mut impl std::io::BufRead) {
-    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-    if reader
-        .fill_buf()
-        .map(|buffer| buffer.starts_with(&BOM))
-        .unwrap_or(false)
-    {
-        reader.consume(3);
-    }
-}
-
+/// Loads the operator's configuration, and nothing from a checkout.
+///
+/// `user_home` is the user's own home directory, `operator_config_home` the
+/// one their `config.env` and `secrets.env` are read from. Either is absent
+/// when none was found, and then nothing is read in its place: `./.tachi` is
+/// whatever the working directory holds.
+///
+/// Returns one line for each checkout file that holds a daemon setting. The
+/// caller has them printed.
 fn load_env_files(
-    home: &Path,
-    app_home: &Path,
-    app_home_in_checkout: bool,
+    user_home: Option<&Path>,
+    operator_config_home: Option<&Path>,
     load_project_local_env: bool,
     git_root: Option<&Path>,
-) {
-    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+) -> Vec<String> {
+    if let Some(home) = user_home {
+        let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    }
     // Load provider configuration for explicit daemon and CLI startup.
     // `from_path` (not override): already-set process env — Cursor inject,
     // shell export, prior dotenv — wins over the file.
-    //
-    // An app home found inside a checkout is content a repository can hold.
-    // Its files get the same refusals as the project-local ones below.
-    if app_home_in_checkout {
-        load_project_env_file(&app_home.join("secrets.env"), false);
-    } else {
-        let _ = dotenvy::from_path(app_home.join("secrets.env"));
+    if let Some(home) = operator_config_home {
+        let _ = dotenvy::from_path(home.join("secrets.env"));
     }
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
-    if app_home_in_checkout {
-        load_project_env_file(&app_home.join("config.env"), true);
-    } else {
-        let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    if let Some(home) = operator_config_home {
+        let _ = dotenvy::from_path_override(home.join("config.env"));
     }
     let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
-    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+    if let Some(home) = user_home {
+        let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+    }
 
+    // A checkout's env files are not applied. Each one that holds a daemon
+    // setting gets a line, with the names of the settings. With project
+    // loading off they are not even opened.
+    let mut notes = Vec::new();
     if load_project_local_env {
-        load_project_env_file(&PathBuf::from(".tachi/config.env"), true);
-        load_project_env_file(&PathBuf::from(".sigil/config.env"), true);
-
+        let mut note = |path: PathBuf| {
+            if let Some(note) = checkout_env::note_ignored(&path, operator_config_home) {
+                notes.push(note);
+            }
+        };
+        note(PathBuf::from(".tachi/config.env"));
+        note(PathBuf::from(".sigil/config.env"));
         if let Ok(cwd) = std::env::current_dir() {
-            load_project_env_file(&cwd.join(".env"), false);
+            note(cwd.join(".env"));
             if let Some(root) = git_root {
-                if root != cwd.as_path() {
-                    load_project_env_file(&root.join(".env"), false);
+                // The same directory under another spelling names the same
+                // file: macOS reaches its temporary directories two ways.
+                let elsewhere = root != cwd.as_path()
+                    && !matches!(
+                        (std::fs::canonicalize(&cwd), std::fs::canonicalize(root)),
+                        (Ok(from), Ok(to)) if from == to
+                    );
+                if elsewhere {
+                    note(root.join(".env"));
                 }
             }
         }
@@ -199,11 +164,65 @@ fn load_env_files(
         Some(value) => std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, value),
         None => std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV),
     }
+    notes
+}
+
+/// Fixes where this process reads the operator's configuration from, before
+/// any file is loaded: the home `config.env` and `secrets.env` come from, and
+/// the files provider configuration claims are read from. Returns that home,
+/// and what the operator should be told about it.
+fn fix_operator_configuration(
+    user_home: Option<&Path>,
+    app_home_resolution: &crate::path_utils::TachiHomeResolution,
+) -> (Option<crate::path_utils::OperatorConfigHome>, Vec<String>) {
+    let operator_config_home = crate::path_utils::operator_config_home(app_home_resolution);
+    let notices = operator_config_notices(app_home_resolution, operator_config_home.as_ref());
+    crate::provider_config::freeze_operator_sources(
+        crate::provider_config::OperatorConfigSources::at_startup(
+            user_home,
+            operator_config_home
+                .as_ref()
+                .map(|home| home.path.as_path()),
+        ),
+    );
+    (operator_config_home, notices)
+}
+
+/// What the operator should know about where configuration is read from.
+fn operator_config_notices(
+    resolution: &crate::path_utils::TachiHomeResolution,
+    operator_config_home: Option<&crate::path_utils::OperatorConfigHome>,
+) -> Vec<String> {
+    use crate::path_utils::{OperatorConfigSource, TachiHomeSource};
+    let mut notices = Vec::new();
+    match (resolution.source, operator_config_home) {
+        // A relative name is whatever the working directory holds.
+        (
+            TachiHomeSource::ExplicitEnv(key),
+            Some(home),
+        ) if home.source == OperatorConfigSource::UserDefault => notices.push(format!(
+            "[tachi-home] {key} is relative ({:?}), so it is not where configuration is read from. Configuration is read from, and written to, {:?}. Set {key} to an absolute path to use another home.",
+            resolution.path, home.path
+        )),
+        // A home found from the working directory holds data, not configuration.
+        (TachiHomeSource::WorkspaceData, Some(home)) => notices.push(format!(
+            "[tachi-home] {:?} is a data home: its secrets.env and config.env are not read. Configuration is read from, and written to, {:?}.",
+            resolution.path, home.path
+        )),
+        (_, None) => notices.push(
+            "[tachi-home] no user home directory was found, so nothing was read from ~/.secrets, ~/.sigil or ~/.tachi. Set TACHI_HOME to an absolute path to configure the daemon.".to_string(),
+        ),
+        _ => {}
+    }
+    notices
 }
 
 struct StartupContext {
     home: PathBuf,
     app_home: PathBuf,
+    /// Where `config.env` and `secrets.env` are read from and written to.
+    /// Fixed at startup; `None` when no such home could be found.
+    operator_config_home: Option<PathBuf>,
     command: Commands,
     defer_manifest_startup: bool,
     git_root: Option<PathBuf>,
@@ -591,12 +610,24 @@ fn initialize_startup_observability(
 }
 
 fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
-    // Load config from dotenv files (same as before)
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    // Load config from dotenv files (same as before).
+    // A home directory is the operator's own only when one was found. Without
+    // one, "." is what data paths fall back to, and no configuration is read
+    // from it.
+    let user_home = dirs::home_dir().filter(|home| home.is_absolute());
+    let home = user_home.clone().unwrap_or_else(|| PathBuf::from("."));
     let app_home_resolution = crate::path_utils::resolve_tachi_home();
     if let Some(notice) =
         workspace_home_selection_notice(app_home_resolution.source, &app_home_resolution.path)
     {
+        eprintln!("{notice}");
+    }
+    // The operator's configuration is read from, and written to, one home.
+    // It is fixed here, before any file is loaded and before the working
+    // directory changes, and everything that reads it later asks for it.
+    let (operator_config_home, notices) =
+        fix_operator_configuration(user_home.as_deref(), &app_home_resolution);
+    for notice in notices {
         eprintln!("{notice}");
     }
     let app_home = app_home_resolution.path;
@@ -631,13 +662,16 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         None
     };
 
-    load_env_files(
-        &home,
-        &app_home,
-        app_home_resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
+    for note in load_env_files(
+        user_home.as_deref(),
+        operator_config_home
+            .as_ref()
+            .map(|home| home.path.as_path()),
         load_project_local_env,
         git_root.as_deref(),
-    );
+    ) {
+        eprintln!("{note}");
+    }
     if let Commands::Hub { action } = &command {
         // Check historical retired DB rows after dotenv files populate
         // MEMORY_DB_PATH, and before startup logging or legacy DB migration
@@ -681,6 +715,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     Ok(StartupContext {
         home,
         app_home,
+        operator_config_home: operator_config_home.map(|home| home.path),
         command,
         defer_manifest_startup,
         git_root,
@@ -1008,6 +1043,7 @@ async fn run_startup_hygiene(
             &ctx.command,
             &ctx.home,
             &ctx.app_home,
+            ctx.operator_config_home.as_deref(),
             global_db_path,
             project_db_path.as_ref(),
             ctx.git_root.as_ref(),
@@ -1129,6 +1165,7 @@ async fn run_startup_hygiene(
         &ctx.command,
         &ctx.home,
         &ctx.app_home,
+        ctx.operator_config_home.as_deref(),
         global_db_path,
         project_db_path.as_ref(),
         ctx.git_root.as_ref(),

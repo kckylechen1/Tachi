@@ -62,6 +62,10 @@ Earlier releases are archived in the [full historical changelog](https://github.
 - Live native clarifications are answered with owned revision fencing (#2410).
 - OpenCode models configured through `staff.json`, with an allowlisted override (#2416).
 
+### Changed
+
+- A checkout's env files no longer configure the daemon. A project's `.env`, `.tachi/config.env` and `.sigil/config.env` are not applied, and `secrets.env` and `config.env` are read only from the operator's home: the absolute `TACHI_HOME`, or `~/.tachi`. Each checkout file that holds a daemon setting is named once on stderr. `tachi host set` and `tachi setup` write to the operator's home. Steps are in [UPGRADING.md](docs/UPGRADING.md), Part 2, section 8.
+
 ### Fixed
 
 - Verified admission windows are compared with nanosecond timestamps (#2421).

@@ -951,3 +951,49 @@ fn ensure_plan_c_symlink_defers_when_canonical_db_does_not_exist_then_links_once
         assert!(alias_db.exists(), "lazily created symlink must resolve");
     });
 }
+
+/// The operator's configuration comes from the home they named, when that is
+/// an absolute path, and otherwise from the user's own `~/.tachi`. A home
+/// found from the working directory is never it, and neither is a relative
+/// name.
+#[test]
+fn operator_config_home_is_the_named_absolute_home_or_the_users_own() {
+    use super::home::TachiHomeResolution;
+    let named_path = std::env::current_dir().expect("cwd").join("tachi-config");
+    let named = TachiHomeResolution {
+        path: named_path.clone(),
+        source: TachiHomeSource::ExplicitEnv("TACHI_HOME"),
+    };
+    assert_eq!(
+        operator_config_home(&named),
+        Some(OperatorConfigHome {
+            path: named_path,
+            source: OperatorConfigSource::ExplicitEnv("TACHI_HOME"),
+        }),
+        "an absolute home the operator named is where its configuration lives"
+    );
+    let user_default = dirs::home_dir()
+        .filter(|home| home.is_absolute())
+        .map(|home| OperatorConfigHome {
+            path: home.join(".tachi"),
+            source: OperatorConfigSource::UserDefault,
+        });
+    let relative = TachiHomeResolution {
+        path: PathBuf::from("data/tachi"),
+        source: TachiHomeSource::ExplicitEnv("TACHI_HOME"),
+    };
+    assert_eq!(
+        operator_config_home(&relative),
+        user_default.clone(),
+        "a relative name is whatever the working directory holds"
+    );
+    let found = TachiHomeResolution {
+        path: PathBuf::from("data").join("tachi"),
+        source: TachiHomeSource::WorkspaceData,
+    };
+    assert_eq!(
+        operator_config_home(&found),
+        user_default,
+        "a home found from the working directory is not the operator's"
+    );
+}

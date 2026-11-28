@@ -281,7 +281,6 @@ fn collect_snapshot_inner(
             global_db_path,
             fresh_provider_probe_cache,
             true,
-            Some(app_home),
             llm,
         )
     } else {
@@ -289,7 +288,6 @@ fn collect_snapshot_inner(
             global_db_path,
             fresh_provider_probe_cache,
             false,
-            Some(app_home),
             llm,
         )
     };

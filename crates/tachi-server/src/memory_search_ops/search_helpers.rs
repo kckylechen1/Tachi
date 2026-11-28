@@ -298,10 +298,14 @@ pub(crate) fn named_project_from_db_path_in_home(
 
 /// Resolve the default workspace project library when the caller omitted `project`.
 ///
-/// Honors an explicit pin (`TACHI_PROJECT`, populated from `.tachi/config.env`
-/// at bootstrap) FIRST, so a repo whose memories live in an explicitly-named
-/// library (e.g. `trading`) is the default target without passing `project=` on
-/// every call. Falls back to the git-derived Plan C folder name
+/// Honors an explicit pin (`TACHI_PROJECT`, set by the operator in the
+/// environment or in the operator's own `config.env`) FIRST, so a repo whose
+/// memories live in an explicitly-named library (e.g. `trading`) is the default
+/// target without passing `project=` on every call. A checkout's env files do
+/// not set it: they are not applied to the daemon. On a daemon that serves
+/// several checkouts the pin is the operator's default for all of them, not a
+/// binding for one project; that is the registered project or workspace
+/// binding. Falls back to the git-derived Plan C folder name
 /// (`~/.tachi/projects/<name>/tachi-memory.db`) when no pin is set — which is what a
 /// repo without an explicit library relies on.
 pub(crate) fn resolve_workspace_named_project() -> Option<String> {

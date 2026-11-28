@@ -142,12 +142,15 @@ fn build_cli_binary_item() -> SetupItem {
 pub(crate) fn build_setup_report(
     home: &Path,
     app_home: &Path,
+    operator_config_home: &Path,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
     env_vars: &HashMap<String, String>,
 ) -> Result<SetupReport, Box<dyn Error>> {
-    let config_env_path = app_home.join("config.env");
+    // The daemon's configuration is read from, and written to, the operator's
+    // home, which is not the app home when that was found in a checkout.
+    let config_env_path = operator_config_home.join("config.env");
 
     let api_key_details = SETUP_API_KEYS
         .iter()
@@ -450,14 +453,24 @@ pub(super) async fn run_setup_command(
     non_interactive: bool,
     home: &Path,
     app_home: &Path,
+    operator_config_home: Option<&Path>,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
+    // The daemon's configuration is written to the operator's home. Without
+    // one there is nowhere to put it.
+    let Some(operator_config_home) = operator_config_home else {
+        return Err(
+            "no home for the daemon's configuration was found, and none was named. Set TACHI_HOME to an absolute path."
+                .into(),
+        );
+    };
     let env_vars = std::env::vars().collect::<HashMap<_, _>>();
     let report = build_setup_report(
         home,
         app_home,
+        operator_config_home,
         global_db_path,
         project_db_path,
         git_root,
@@ -479,7 +492,7 @@ pub(super) async fn run_setup_command(
     // making decisions inside the wizard.
     println!("{}\n", render_setup_report(&report));
 
-    let config_env_path = app_home.join("config.env");
+    let config_env_path = operator_config_home.join("config.env");
     let outcome = setup_wizard::run_interactive_wizard(
         home,
         app_home,
