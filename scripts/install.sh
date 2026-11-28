@@ -124,14 +124,257 @@ xml_escape() {
   printf '%s' "$value"
 }
 
-launchctl_bootout_plist() {
-  local plist="$1"
-  local label="$2"
-  local uid
-  uid=$(id -u)
-  launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
-  launchctl remove "$label" >/dev/null 2>&1 || true
-  launchctl unload "$plist" >/dev/null 2>&1 || true
+absolute_db_path() {
+  local path="$1" home="$2"
+  case "$path" in
+    /*) ;;
+    '~//'*) return 1 ;;
+    '~') path="$home" ;;
+    '~/'*) [[ "$home" == /* ]] || return 1; path="${home%/}/${path:2}" ;;
+    *) return 1 ;;
+  esac
+  [[ "$path" == /* && "$path" != *$'\n'* ]] || return 1
+  printf '%s\n' "$path"
+}
+
+# Resolve symlinks even for a new DB whose file or parent does not exist yet.
+canonical_db_path() {
+  local path="$1" parent leaf resolved
+  [[ "$path" == /* && "$path" != *$'\n'* ]] || return 1
+  if resolved=$(realpath "$path" 2>/dev/null && printf '.'); then
+    resolved=${resolved%$'\n.'}
+    [[ "$resolved" != *$'\n'* ]] || return 1
+    printf '%s\n' "$resolved"
+    return
+  fi
+  [[ "$path" != / && ! -e "$path" && ! -L "$path" ]] || return 1
+  path=${path%/}
+  parent=$(canonical_db_path "${path%/*}/") || return 1
+  leaf=${path##*/}
+  case "$leaf" in
+    ''|.) printf '%s\n' "$parent" ;;
+    ..) parent=${parent%/*}; printf '%s\n' "${parent:-/}" ;;
+    *) printf '%s/%s\n' "${parent%/}" "$leaf" ;;
+  esac
+}
+
+check_launch_agent_db() {
+  local expected="$1" source="$2" domain="$3" arg db="" absolute resolved domain_print
+  local user_home="" app_home="" sigil_home="" legacy_home="" environment_db="" memory_db_set=0
+  local program="" cwd=/ workspace path
+  local -a declared=() launch_arguments=() launch_metadata=()
+  local launch_environment_seen=0
+  shift 3
+  # The definition's environment and launch metadata precede the argv array.
+  while [[ "$1" != -- ]]; do
+    declared+=("$1")
+    shift
+  done
+  shift
+  [[ $# -gt 0 && -n "$1" ]] || return 1
+  program="$1"
+  shift
+
+  while (($#)); do
+    arg="$1"
+    shift
+    case "$arg" in
+      --) break ;;
+      --global-db)
+        arg=${1:-}
+        if (($#)); then shift; fi
+        ;;
+      --global-db=*) arg=${arg#*=} ;;
+      *) continue ;;
+    esac
+    if [[ -z "$arg" || -n "$db" ]]; then
+      printf '❌ %s has an empty or repeated --global-db\n' "$source" >&2
+      return 1
+    fi
+    db="$arg"
+  done
+
+  # An unloaded definition can inherit scope variables from its GUI domain.
+  # The job's own print output already supplies that environment when loaded.
+  if [[ "$db" != /* && -n "$domain" ]]; then
+    if ! domain_print=$(LC_ALL=C launchctl print "$domain" 2>/dev/null) ||
+       ! read_launchctl_scope "$domain_print" "$domain" || ((!launch_environment_seen)); then
+      printf '❌ Cannot verify inherited LaunchAgent environment in %s for %s\n' "$domain" "$source" >&2
+      return 1
+    fi
+  fi
+  for arg in ${launch_metadata[@]+"${launch_metadata[@]}"} ${declared[@]+"${declared[@]}"}; do
+    case "$arg" in
+      HOME=*) user_home=${arg#*=} ;;
+      TACHI_HOME=*) app_home=${arg#*=} ;;
+      SIGIL_HOME=*) sigil_home=${arg#*=} ;;
+      TACHI_APP_HOME=*) legacy_home=${arg#*=} ;;
+      MEMORY_DB_PATH=*) environment_db=${arg#*=}; memory_db_set=1 ;;
+      Program=*) program=${arg#*=} ;;
+      WorkingDirectory=*) cwd=${arg#*=} ;;
+    esac
+  done
+  case "${program##*/}" in tachi|tachi-server) ;; *) return 1 ;; esac
+
+  if [[ -z "$db" || "$db" == '~'* ]]; then
+    if [[ -z "$user_home" ]]; then
+      user_home=$(dscacheutil -q user -a uid "$(id -u)" | awk '/^dir: / { print substr($0, 6) }') || return 1
+    fi
+    [[ "$user_home" == /* && "$user_home" != *$'\n'* ]] || return 1
+  fi
+  if [[ -z "$db" ]]; then
+    app_home=${app_home:-${sigil_home:-$legacy_home}}
+    if [[ -n "$app_home" ]]; then
+      app_home=$(absolute_db_path "$app_home" "$user_home") || return 1
+    else
+      app_home="${user_home%/}/.tachi"
+      # Without an explicit home, Tachi can select a workspace data home.
+      cwd=$(canonical_db_path "$cwd") || return 1
+      while [[ -n "$cwd" ]]; do
+        workspace="${cwd%/}/data/tachi"
+        if [[ -e "$workspace/global/tachi-memory.db" || -e "$workspace/global/memory.db" || -d "$workspace/projects" ]]; then
+          printf '❌ Cannot prove %s DB scope with workspace data home %s\n' "$source" "$workspace" >&2
+          return 1
+        fi
+        cwd=${cwd%/*}
+      done
+    fi
+    if ((memory_db_set)); then
+      arg="$environment_db"
+    else
+      arg="$app_home/global/tachi-memory.db"
+    fi
+  else
+    arg="$db"
+  fi
+
+  # Tachi may change its working directory before opening the database.
+  if ! absolute=$(absolute_db_path "$arg" "$user_home") || ! resolved=$(canonical_db_path "$absolute"); then
+    printf '❌ Cannot resolve %s DB scope %s\n' "$source" "$arg" >&2
+    return 1
+  fi
+  if [[ "$resolved" != "$expected" ]]; then
+    printf '❌ %s targets DB scope %s (installer target %s)\n' "$source" "$resolved" "$expected" >&2
+    return 1
+  fi
+  if [[ -z "$db" ]]; then
+    # Dotenv or the manifest can override implicit paths. Require an explicit
+    # argument when those sources may contribute, without reading secrets.
+    local -a config=("$app_home/config.env" "$user_home/.sigil/config.env")
+    if ((!memory_db_set)); then
+      config+=("$app_home/manifest.json" "$app_home/secrets.env" "$user_home/.secrets/master.env")
+    fi
+    for path in "${config[@]}"; do
+      if [[ -e "$path" || -L "$path" ]]; then
+        printf '❌ Cannot prove %s DB scope with implicit configuration at %s. Use an explicit --global-db.\n' "$source" "$path" >&2
+        return 1
+      fi
+    done
+  fi
+  if [[ "$db" == /* ]]; then
+    echo absolute
+  else
+    echo environment-dependent
+  fi
+}
+
+check_existing_plist_scope() {
+  local plist="$1" expected="$2" domain="$3" count arg i key
+  local -a arguments=() metadata=()
+  [[ -e "$plist" || -L "$plist" ]] || return 0
+  plutil -lint -s "$plist" || return 1
+  count=$(plutil -extract ProgramArguments raw -expect array "$plist") || return 1
+  for ((i = 0; i < count; i++)); do
+    arg=$(plutil -extract "ProgramArguments.$i" raw -expect string -n "$plist" && printf '.') || return 1
+    arguments+=("${arg%.}")
+  done
+  if plutil -type EnableGlobbing "$plist" >/dev/null 2>&1; then
+    arg=$(plutil -extract EnableGlobbing raw -expect bool "$plist") || return 1
+    [[ "$arg" == false ]] || return 1
+  fi
+  if plutil -type RootDirectory "$plist" >/dev/null 2>&1; then
+    arg=$(plutil -extract RootDirectory raw -expect string -n "$plist" && printf '.') || return 1
+    arg="${arg%.}"
+    [[ -z "$arg" || "$arg" == / ]] || return 1
+  fi
+  for key in Program WorkingDirectory; do
+    if plutil -type "$key" "$plist" >/dev/null 2>&1; then
+      arg=$(plutil -extract "$key" raw -expect string -n "$plist" && printf '.') || return 1
+      metadata+=("$key=${arg%.}")
+    fi
+  done
+  if plutil -type EnvironmentVariables "$plist" >/dev/null 2>&1; then
+    plutil -extract EnvironmentVariables raw -expect dictionary "$plist" >/dev/null || return 1
+    for key in HOME MEMORY_DB_PATH TACHI_HOME SIGIL_HOME TACHI_APP_HOME; do
+      if plutil -type "EnvironmentVariables.$key" "$plist" >/dev/null 2>&1; then
+        arg=$(plutil -extract "EnvironmentVariables.$key" raw -expect string -n "$plist" && printf '.') || return 1
+        metadata+=("$key=${arg%.}")
+      fi
+    done
+  fi
+  check_launch_agent_db "$expected" "Existing LaunchAgent plist $plist" "$domain" \
+    ${metadata[@]+"${metadata[@]}"} -- ${arguments[@]+"${arguments[@]}"} >/dev/null
+}
+
+# Populates the caller's launch_arguments, launch_metadata and environment flag.
+read_launchctl_scope() {
+  local job="$1" target="$2" line entry indent="" argument_indent section seen="|"
+  local -a arguments=() metadata=() defaults=() inherited=() environment=()
+  # Inspect the job's own argv and environment rather than re-reading its
+  # plist. The loaded job may have been bootstrapped from a different file.
+  [[ "$job" == "$target = {"$'\n'* && "$job" == *$'\n}' ]] || return 1
+  while IFS= read -r line; do
+    if [[ -n "$indent" ]]; then
+      case "$line" in
+        "$indent}") indent="" ;;
+        "$argument_indent"*)
+          entry=${line#"$argument_indent"}
+          if [[ "$section" == arguments ]]; then
+            arguments+=("$entry")
+          elif [[ "$entry" =~ ^(HOME|MEMORY_DB_PATH|TACHI_HOME|SIGIL_HOME|TACHI_APP_HOME)\ =\>\ (.*)$ ]]; then
+            entry="${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+            case "$section" in
+              'default environment') defaults+=("$entry") ;;
+              'inherited environment') inherited+=("$entry") ;;
+              environment) environment+=("$entry") ;;
+            esac
+          elif [[ "$entry" != *' => '* ]]; then
+            return 1
+          fi
+          ;;
+        *) return 1 ;;
+      esac
+    elif [[ "$line" =~ ^([[:blank:]]+)(arguments|environment|inherited\ environment|default\ environment)\ =\ \{$ ]]; then
+      indent=${BASH_REMATCH[1]}
+      section=${BASH_REMATCH[2]}
+      [[ "$seen" != *"|$section|"* ]] || return 1
+      seen+="$section|"
+      argument_indent="$indent$indent"
+    elif [[ "$line" =~ ^[[:blank:]]+program\ =\ (.*)$ ]]; then
+      metadata+=("Program=${BASH_REMATCH[1]}")
+    elif [[ "$line" =~ ^[[:blank:]]+working\ directory\ =\ (.*)$ ]]; then
+      metadata+=("WorkingDirectory=${BASH_REMATCH[1]}")
+    fi
+  done <<<"$job"
+  [[ -z "$indent" ]] || return 1
+  launch_arguments=(${arguments[@]+"${arguments[@]}"})
+  launch_metadata=(${metadata[@]+"${metadata[@]}"} ${defaults[@]+"${defaults[@]}"} \
+    ${inherited[@]+"${inherited[@]}"} ${environment[@]+"${environment[@]}"})
+  if [[ "$seen" == *'|environment|'* ]]; then launch_environment_seen=1; fi
+}
+
+check_loaded_job_scope() {
+  local job="$1" expected="$2" target="$3" scope_kind
+  local -a launch_arguments=() launch_metadata=()
+  local launch_environment_seen=0
+  read_launchctl_scope "$job" "$target" || return 1
+  scope_kind=$(check_launch_agent_db "$expected" "Loaded LaunchAgent $target" '' \
+    ${launch_metadata[@]+"${launch_metadata[@]}"} -- \
+    ${launch_arguments[@]+"${launch_arguments[@]}"}) || return 1
+  if [[ "$scope_kind" != absolute ]] && ((!launch_environment_seen)); then
+    printf '❌ Cannot read the loaded LaunchAgent environment for %s\n' "$target" >&2
+    return 1
+  fi
 }
 
 launchctl_bootstrap_plist() {
@@ -298,9 +541,8 @@ daemon_status_field() {
 }
 
 # What may be done about whatever holds this DB scope, from one read-only
-# look: `free`, `stop` (this scope's daemon, stopped through the CLI) or
-# `stop-previous <pid>` (the previous version's daemon, see below). Anything
-# else is refused with the status that was read, and returns 1.
+# look: `free` or the reported PID of a current/previous-version daemon.
+# A PID is used only to correlate status with a verified launchd job.
 daemon_scope_verdict() {
   local tachi_bin="$1"
   local global_db="$2"
@@ -310,16 +552,20 @@ daemon_scope_verdict() {
   state=$(daemon_status_field "$fields" state string)
   case "$state" in
     none|stale_pid) echo free ;;
-    running) echo stop ;;
+    running)
+      pid=$(daemon_status_field "$fields" pid number)
+      if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ cannot identify the PID of the running Tachi daemon for this DB scope"
+        return 1
+      fi
+      printf '%s\n' "$pid"
+      ;;
     foreign)
-      # After an upgrade the previous version's daemon is reported as
-      # foreign, and `daemon kill` refuses it. It holds the lock and the port
-      # of this scope until it exits, so the upgrade has to stop it the way
-      # launchd does. Any other foreign daemon is left alone and reported.
+      # A previous-version daemon can still be the verified launchd job.
       reason=$(daemon_status_field "$fields" reason string)
       pid=$(daemon_status_field "$fields" pid number)
-      if [[ "$reason" == "daemon version "* && "$pid" =~ ^[0-9]+$ ]]; then
-        echo "stop-previous $pid"
+      if [[ "$reason" == "daemon version "* && "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$pid"
       else
         echo "❌ a foreign Tachi daemon holds this DB scope and was not stopped"
         printf '%s\n' "$fields"
@@ -336,29 +582,28 @@ daemon_scope_verdict() {
   esac
 }
 
-stop_existing_daemon_for_scope() {
+check_daemon_for_upgrade() {
   local tachi_bin="$1"
   local global_db="$2"
-  local verdict fields state pid
+  local managed_pid="${3:-}" verdict
 
   verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
     printf '%s\n' "$verdict"
     return 1
   }
-  case "$verdict" in
-    free) ;;
-    stop)
-      echo ">> Stopping existing Tachi daemon for this DB scope..."
-      TACHI_DISABLE_AUTO_DAEMON=1 \
-        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
-      ;;
-    "stop-previous "*)
-      pid=${verdict#stop-previous }
-      echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
-      kill -TERM "$pid" 2>/dev/null || true
-      ;;
-  esac
+  if [[ "$verdict" != free && "$verdict" != "$managed_pid" ]]; then
+    printf '❌ A daemon (reported PID %s) holds DB scope %s outside the verified LaunchAgent. Stop it through its service manager or original terminal, then rerun the installer.\n' "$verdict" "$global_db" >&2
+    return 1
+  fi
+  # Even an absolute argument can name a symlink that changed after startup.
+  if [[ "$verdict" == free && -n "$managed_pid" ]]; then
+    printf '❌ Cannot confirm running LaunchAgent PID %s has DB scope %s from daemon status. Verify the service scope before retrying.\n' "$managed_pid" "$global_db" >&2
+    return 1
+  fi
+}
 
+wait_for_daemon_to_stop() {
+  local tachi_bin="$1" global_db="$2" fields state
   for _ in $(seq 1 50); do
     fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
     state=$(daemon_status_field "$fields" state string)
@@ -410,17 +655,37 @@ install_daemon_service() {
     echo "❌ tachi is not on PATH; install the binary before enabling the daemon service"
     exit 1
   fi
+  local uid label="com.kckylechen.tachi.daemon"
+  uid=$(id -u)
+  # Launchd's label is per GUI UID, regardless of HOME, TACHI_HOME or TMPDIR.
+  (
+    install_lock_dir="/private/tmp/tachi-launchagent-$uid-$label.lock"
+    install_plist_tmp=""
+    if ! (umask 077 && mkdir "$install_lock_dir"); then
+      printf '❌ Cannot acquire LaunchAgent install lock %s. If another installer is active, wait for it to finish. Remove a stale lock only after verifying no installer is active.\n' "$install_lock_dir" >&2
+      exit 1
+    fi
+    trap 'if [[ -n "$install_plist_tmp" ]]; then rm -f "$install_plist_tmp"; fi; rmdir "$install_lock_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    install_locked_daemon_service "$uid" "$label"
+  )
+}
 
+install_locked_daemon_service() {
+  local uid="$1" label="$2"
   local tachi_bin
-  local label="com.kckylechen.tachi.daemon"
   local launch_agents="$HOME/Library/LaunchAgents"
+  local inherited_home="${TACHI_HOME:-${SIGIL_HOME:-${TACHI_APP_HOME:-}}}"
   local app_home="${TACHI_HOME:-$HOME/.tachi}"
+  local -x TACHI_HOME="$app_home"
   local logs_dir="$app_home/logs"
   local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/tachi-memory.db}"
   local profile="${TACHI_PROFILE:-}"
   local profile_environment=""
   local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"
   local plist="$launch_agents/$label.plist"
+  local expected job service_target absolute_db managed_pid="" print_error
 
   # Ordinary installs use the default Agent surface. Preserve an explicitly
   # configured legacy restriction; daemon startup validates its selector.
@@ -430,7 +695,11 @@ install_daemon_service() {
   fi
 
   tachi_bin=$(command -v tachi)
-  mkdir -p "$launch_agents" "$logs_dir" "$(dirname "$global_db")"
+  if ! absolute_db=$(absolute_db_path "$global_db" "$HOME") || ! expected=$(canonical_db_path "$absolute_db"); then
+    printf '❌ Cannot resolve installer DB scope %s\n' "$global_db" >&2
+    exit 1
+  fi
+  global_db="$absolute_db"
 
   echo ""
   echo ">> Installing Tachi daemon LaunchAgent..."
@@ -438,20 +707,53 @@ install_daemon_service() {
   echo "   Binary: $tachi_bin"
   echo "   Global DB: $global_db"
 
-  # Asked before anything is replaced or unloaded, so a refusal leaves the
-  # installed plist and the loaded service as they are.
-  local verdict
-  verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
-    printf '%s\n' "$verdict"
+  # Check the on-disk and loaded definitions independently before either
+  # is changed. The loaded job may outlive the file it was started from.
+  if ! check_existing_plist_scope "$plist" "$expected" "gui/$uid"; then
+    printf '❌ Cannot verify existing LaunchAgent plist %s for DB scope %s\n' "$plist" "$expected" >&2
     exit 1
-  }
+  fi
+  service_target="gui/$uid/$label"
+  if job=$(LC_ALL=C launchctl print "$service_target" 2>&1); then
+    if ! check_loaded_job_scope "$job" "$expected" "$service_target"; then
+      printf '❌ Cannot verify loaded LaunchAgent %s for DB scope %s\n' "$service_target" "$expected" >&2
+      exit 1
+    fi
+    if [[ "$job" =~ $'\n'[[:blank:]]+pid\ =\ ([1-9][0-9]*)$'\n' ]]; then
+      managed_pid=${BASH_REMATCH[1]}
+    elif [[ "$job" =~ $'\n'[[:blank:]]+state\ =\ running$'\n' ]]; then
+      printf '❌ Cannot identify the running LaunchAgent %s in daemon status\n' "$service_target" >&2
+      exit 1
+    fi
+  else
+    print_error=${job#$'Bad request.\n'}
+    if [[ "$print_error" == *$'\n'* || ( "$print_error" != 'Could not find service' &&
+          "$print_error" != 'Could not find service.' &&
+          "$print_error" != "Could not find service \"$label\" in domain for "* ) ]]; then
+      printf '❌ Cannot query LaunchAgent %s: %s\n' "$service_target" "${job%%$'\n'*}" >&2
+      exit 1
+    fi
+    job=""
+  fi
+  check_daemon_for_upgrade "$tachi_bin" "$global_db" "$managed_pid" || exit 1
+  if [[ -n "$inherited_home" && "$inherited_home" != "$app_home" ]]; then
+    local inherited_verdict
+    inherited_verdict=$(TACHI_HOME="$inherited_home" daemon_scope_verdict "$tachi_bin" "$global_db") || {
+      printf '%s\n' "$inherited_verdict"
+      exit 1
+    }
+    if [[ "$inherited_verdict" != free && "$inherited_verdict" != "$managed_pid" ]]; then
+      printf '❌ A daemon (reported PID %s) holds DB scope %s outside the verified LaunchAgent. Stop it through its service manager or original terminal, then rerun the installer.\n' "$inherited_verdict" "$global_db" >&2
+      exit 1
+    fi
+  fi
 
   # Written beside the target and renamed over it: launchd and the next run
   # of this script never see a half-written plist, and a failed write leaves
   # the previous one in place.
-  local plist_tmp
-  plist_tmp=$(mktemp "$launch_agents/$label.plist.XXXXXX")
-  if ! cat >"$plist_tmp" <<PLIST
+  mkdir -p "$launch_agents" "$logs_dir" "$(dirname "$global_db")"
+  install_plist_tmp=$(mktemp "$launch_agents/$label.plist.XXXXXX")
+  if ! cat >"$install_plist_tmp" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -493,14 +795,16 @@ $profile_environment
 </plist>
 PLIST
   then
-    rm -f "$plist_tmp"
-    echo "❌ could not write $plist_tmp"
+    echo "❌ could not write $install_plist_tmp"
     exit 1
   fi
-  mv -f "$plist_tmp" "$plist"
+  if [[ -n "$job" ]] && ! launchctl bootout "$service_target"; then
+    exit 1
+  fi
+  wait_for_daemon_to_stop "$tachi_bin" "$global_db" || exit 1
+  mv -f "$install_plist_tmp" "$plist"
+  install_plist_tmp=""
 
-  launchctl_bootout_plist "$plist" "$label"
-  stop_existing_daemon_for_scope "$tachi_bin" "$global_db"
   launchctl_bootstrap_plist "$plist" "$label"
 
   if ! wait_for_daemon_for_scope "$tachi_bin" "$global_db"; then
