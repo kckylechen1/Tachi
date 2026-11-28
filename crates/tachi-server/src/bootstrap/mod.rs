@@ -16,6 +16,7 @@ mod harness_cli;
 mod injection_surface_cli;
 mod instruction_drift_sentinel;
 mod instruction_manifest;
+mod instruction_sync;
 mod manifest_cli;
 mod migrate_cli;
 mod poke_cli;
