@@ -336,7 +336,7 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
     }
 
     #[cfg(unix)]
-    let home_fd = open_dir_nofollow(&ctx.home)?;
+    let home_fd = ctx.home_fd;
 
     let needs_backup = options.adopt && ctx.summary.conflicts > 0;
     let backup_rel_dir = if needs_backup {
@@ -364,6 +364,7 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
 
     let mut summary = ctx.summary.clone();
     let mut reports = Vec::with_capacity(ctx.targets.len());
+    let mut symlink_backups: Vec<serde_json::Value> = Vec::new();
 
     for target in &ctx.targets {
         let previous_symlink_target = match &target.condition {
@@ -391,8 +392,13 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
         }
 
         // Recheck condition immediately before mutation to guard against TOCTOU swaps.
-        let (current_condition, current_fp) =
-            inspect_target_condition(&ctx.home, &target.target_rel, &target.rendered)?;
+        let (current_condition, current_fp) = inspect_target_condition(
+            &ctx.home,
+            #[cfg(unix)]
+            &home_fd,
+            &target.target_rel,
+            &target.rendered,
+        )?;
         if current_condition != target.condition || current_fp != target.preflight_fingerprint {
             return Err(format!(
                 "target {} changed after preflight ({} -> {}); aborting sync",
@@ -412,25 +418,12 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
                     link_target,
                     link_target_b64,
                 } => {
-                    let rel = backup_rel_root.join(format!("symlinks/{}.json", target.target_rel));
-                    let payload = serde_json::json!({
+                    symlink_backups.push(serde_json::json!({
                         "target": target.target_rel,
                         "symlink_target": link_target,
                         "symlink_target_bytes_base64": link_target_b64,
-                    });
-                    let bytes = serde_json::to_vec_pretty(&payload)
-                        .map_err(|e| format!("serialize symlink backup: {e}"))?;
-                    write_rel_file_anchored(
-                        &ctx.home,
-                        #[cfg(unix)]
-                        &home_fd,
-                        &rel,
-                        &bytes,
-                        true,
-                        true,
-                        None,
-                    )?;
-                    rel
+                    }));
+                    backup_rel_root.join("symlinks.json")
                 }
                 TargetCondition::ConflictUnmanaged | TargetCondition::ConflictModifiedManaged => {
                     let rel = backup_rel_root.join("files").join(&target.target_rel);
@@ -493,6 +486,28 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
             previous_symlink_target,
             backup_path: recorded_backup,
         });
+    }
+
+    if !symlink_backups.is_empty() {
+        let backup_rel_root = backup_rel_dir
+            .as_ref()
+            .ok_or_else(|| "internal error: missing backup directory".to_string())?;
+        let manifest_rel = backup_rel_root.join("symlinks.json");
+        let payload = serde_json::json!({
+            "symlinks": symlink_backups,
+        });
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|e| format!("serialize symlink backups: {e}"))?;
+        write_rel_file_anchored(
+            &ctx.home,
+            #[cfg(unix)]
+            &home_fd,
+            &manifest_rel,
+            &bytes,
+            true,
+            true,
+            None,
+        )?;
     }
 
     let receipt_rel = Path::new(".tachi/harness-sync-receipt.json");
@@ -597,6 +612,8 @@ pub(super) fn print_sync_report(report: &HarnessSyncReport) {
 
 struct PreparedPlan {
     home: PathBuf,
+    #[cfg(unix)]
+    home_fd: fs::File,
     source_dir: PathBuf,
     revision: String,
     bundle_sha256: String,
@@ -608,6 +625,8 @@ struct PreparedPlan {
 
 fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
     let home = resolve_and_validate_home(options.home.clone())?;
+    #[cfg(unix)]
+    let home_fd = open_dir_nofollow(&home)?;
     let home_str = home.display().to_string();
     if home_str.contains('\n') || home_str.contains('\r') || home_str.contains("-->") {
         return Err("home path contains unsupported control characters".to_string());
@@ -657,8 +676,8 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
             "unsupported bundle schema_version; expected '{BUNDLE_SCHEMA}'"
         ));
     }
-    validate_identifier(&manifest.revision, 128, "revision")?;
     screen_secrets("revision", &manifest.revision)?;
+    validate_identifier(&manifest.revision, 128, "revision")?;
 
     let LoadedMachineLocal {
         path: machine_local_path,
@@ -694,6 +713,7 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
     };
 
     for decl in &manifest.targets {
+        screen_secrets("target.id", &decl.id)?;
         validate_identifier(&decl.id, 64, "target.id")?;
         if !SUPPORTED_SYNC_HOSTS.contains(&decl.host.as_str()) || decl.host == "constitution" {
             return Err(format!(
@@ -807,8 +827,13 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
 
         check_existing_target_parents_no_symlink(&home, Path::new(&decl.target))?;
         let target_path = home.join(&decl.target);
-        let (condition, preflight_fingerprint) =
-            inspect_target_condition(&home, &decl.target, &rendered)?;
+        let (condition, preflight_fingerprint) = inspect_target_condition(
+            &home,
+            #[cfg(unix)]
+            &home_fd,
+            &decl.target,
+            &rendered,
+        )?;
 
         summary.targets += 1;
         match condition {
@@ -838,6 +863,8 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
 
     Ok(PreparedPlan {
         home,
+        #[cfg(unix)]
+        home_fd,
         source_dir,
         revision: manifest.revision,
         bundle_sha256,
@@ -973,7 +1000,8 @@ fn validate_identifier(value: &str, max_len: usize, label: &str) -> Result<(), S
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     {
         return Err(format!(
-            "invalid {label} '{value}': expected 1..={max_len} ASCII [A-Za-z0-9._-] characters"
+            "invalid {label} (length {}): expected 1..={max_len} ASCII [A-Za-z0-9._-] characters",
+            value.len()
         ));
     }
     Ok(())
@@ -999,11 +1027,19 @@ fn validate_relative_path(raw: &str, label: &str) -> Result<(), String> {
     {
         return Err(format!("invalid relative path for {label}: '{raw}'"));
     }
-    let path = Path::new(raw);
     let mut has_normal = false;
+    for seg in raw.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(format!(
+                "path traversal or non-normal segment in {label}: '{raw}'"
+            ));
+        }
+        has_normal = true;
+    }
+    let path = Path::new(raw);
     for component in path.components() {
         match component {
-            Component::Normal(seg) if !seg.is_empty() => has_normal = true,
+            Component::Normal(seg) if !seg.is_empty() => {}
             _ => {
                 return Err(format!(
                     "path traversal or non-normal segment in {label}: '{raw}'"
@@ -1319,97 +1355,222 @@ fn ensure_safe_dir_under_home(home: &Path, rel_dir: &Path, owner_only: bool) -> 
 
 fn inspect_target_condition(
     home: &Path,
+    #[cfg(unix)] home_fd: &fs::File,
     target_rel: &str,
     rendered: &str,
 ) -> Result<(TargetCondition, Option<FileFingerprint>), String> {
-    let target_path = home.join(target_rel);
-    let meta = match fs::symlink_metadata(&target_path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((TargetCondition::Create, None))
-        }
-        Err(e) => return Err(format!("inspect target '{}': {e}", target_path.display())),
-    };
-    let fp = fingerprint_from_metadata(&meta);
-
-    if meta.file_type().is_symlink() {
-        let raw_target = fs::read_link(&target_path)
-            .map_err(|e| format!("read symlink target '{}': {e}", target_path.display()))?;
-        let link_target = raw_target.display().to_string();
-        let link_target_b64 = {
-            use base64::Engine;
-            #[cfg(unix)]
-            let raw_bytes = {
-                use std::os::unix::ffi::OsStrExt;
-                raw_target.as_os_str().as_bytes()
-            };
-            #[cfg(not(unix))]
-            let raw_bytes = link_target.as_bytes();
-            base64::engine::general_purpose::STANDARD.encode(raw_bytes)
-        };
-        return Ok((
-            TargetCondition::ConflictSymlink {
-                link_target,
-                link_target_b64,
-            },
-            Some(fp),
-        ));
-    }
-    if !meta.file_type().is_file() {
-        return Err(format!(
-            "unsupported non-file target at '{}'",
-            target_path.display()
-        ));
-    }
-
     #[cfg(unix)]
-    let bytes = {
-        let home_fd = open_dir_nofollow(home)?;
-        read_file_under_dir_fd(&home_fd, target_rel)?
-    };
-    #[cfg(not(unix))]
-    let bytes = read_regular_file_bytes_nofollow(&target_path)?;
-
-    let Ok(existing) = String::from_utf8(bytes) else {
-        return Ok((TargetCondition::ConflictUnmanaged, Some(fp)));
-    };
-
-    let cond = match inspect_sync_stamp(&existing) {
-        SyncStampState::ValidClean { .. } => {
-            if existing == rendered {
-                TargetCondition::InSync
-            } else {
-                TargetCondition::UpdateManaged
-            }
+    {
+        let rel_path = Path::new(target_rel);
+        let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
+        let leaf = rel_path
+            .file_name()
+            .ok_or_else(|| format!("missing filename in '{target_rel}'"))?;
+        let parent = match open_existing_sub_dir_at(home_fd, parent_rel)? {
+            Some(dir) => dir,
+            None => return Ok((TargetCondition::Create, None)),
+        };
+        let c_leaf = c_component(leaf)?;
+        let Some((st, fp)) = fstat_at_nofollow(&parent, &c_leaf)? else {
+            return Ok((TargetCondition::Create, None));
+        };
+        let mode_type = st.st_mode & libc::S_IFMT;
+        if mode_type == libc::S_IFLNK {
+            let raw_bytes = readlink_at_bytes(&parent, &c_leaf)?;
+            let link_target = String::from_utf8_lossy(&raw_bytes).into_owned();
+            let link_target_b64 = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&raw_bytes)
+            };
+            return Ok((
+                TargetCondition::ConflictSymlink {
+                    link_target,
+                    link_target_b64,
+                },
+                Some(fp),
+            ));
         }
-        SyncStampState::TamperedOrEdited => TargetCondition::ConflictModifiedManaged,
-        SyncStampState::Absent => TargetCondition::ConflictUnmanaged,
-    };
-    Ok((cond, Some(fp)))
+        if mode_type != libc::S_IFREG {
+            return Err(format!(
+                "unsupported non-file target at '{}'",
+                home.join(target_rel).display()
+            ));
+        }
+        let bytes = read_file_under_dir_fd(home_fd, target_rel)?;
+        let Ok(existing) = String::from_utf8(bytes) else {
+            return Ok((TargetCondition::ConflictUnmanaged, Some(fp)));
+        };
+        let cond = match inspect_sync_stamp(&existing) {
+            SyncStampState::ValidClean { .. } => {
+                if existing == rendered {
+                    TargetCondition::InSync
+                } else {
+                    TargetCondition::UpdateManaged
+                }
+            }
+            SyncStampState::TamperedOrEdited => TargetCondition::ConflictModifiedManaged,
+            SyncStampState::Absent => TargetCondition::ConflictUnmanaged,
+        };
+        Ok((cond, Some(fp)))
+    }
+    #[cfg(not(unix))]
+    {
+        let target_path = home.join(target_rel);
+        let meta = match fs::symlink_metadata(&target_path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((TargetCondition::Create, None))
+            }
+            Err(e) => return Err(format!("inspect target '{}': {e}", target_path.display())),
+        };
+        let fp = fingerprint_from_metadata(&meta);
+        if meta.file_type().is_symlink() {
+            let raw_target = fs::read_link(&target_path)
+                .map_err(|e| format!("read symlink target '{}': {e}", target_path.display()))?;
+            let link_target = raw_target.display().to_string();
+            let link_target_b64 = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(link_target.as_bytes())
+            };
+            return Ok((
+                TargetCondition::ConflictSymlink {
+                    link_target,
+                    link_target_b64,
+                },
+                Some(fp),
+            ));
+        }
+        if !meta.file_type().is_file() {
+            return Err(format!(
+                "unsupported non-file target at '{}'",
+                target_path.display()
+            ));
+        }
+        let bytes = read_regular_file_bytes_nofollow(&target_path)?;
+        let Ok(existing) = String::from_utf8(bytes) else {
+            return Ok((TargetCondition::ConflictUnmanaged, Some(fp)));
+        };
+        let cond = match inspect_sync_stamp(&existing) {
+            SyncStampState::ValidClean { .. } => {
+                if existing == rendered {
+                    TargetCondition::InSync
+                } else {
+                    TargetCondition::UpdateManaged
+                }
+            }
+            SyncStampState::TamperedOrEdited => TargetCondition::ConflictModifiedManaged,
+            SyncStampState::Absent => TargetCondition::ConflictUnmanaged,
+        };
+        Ok((cond, Some(fp)))
+    }
 }
 
+#[cfg(not(unix))]
 fn fingerprint_from_metadata(meta: &fs::Metadata) -> FileFingerprint {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        FileFingerprint {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            mtime: meta.mtime(),
-            mtime_nsec: meta.mtime_nsec(),
-            size: meta.size(),
-        }
+    FileFingerprint {
+        dev: 0,
+        ino: 0,
+        mtime: 0,
+        mtime_nsec: 0,
+        size: meta.len(),
     }
-    #[cfg(not(unix))]
-    {
-        FileFingerprint {
-            dev: 0,
-            ino: 0,
-            mtime: 0,
-            mtime_nsec: 0,
-            size: meta.len(),
+}
+
+#[cfg(unix)]
+fn open_existing_sub_dir_at(root: &fs::File, rel_dir: &Path) -> Result<Option<fs::File>, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut current = root
+        .try_clone()
+        .map_err(|e| format!("clone directory fd: {e}"))?;
+    for comp in rel_dir.components() {
+        let Component::Normal(seg) = comp else {
+            return Err(format!(
+                "invalid directory segment in '{}'",
+                rel_dir.display()
+            ));
+        };
+        let c_name = c_component(seg)?;
+        // SAFETY: live parent directory fd and NUL-terminated single segment; no O_CREAT.
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(format!(
+                "symlink or unsafe directory segment '{}': {err}",
+                seg.to_string_lossy()
+            ));
         }
+        // SAFETY: fresh exclusively owned fd from openat.
+        current = unsafe { fs::File::from_raw_fd(fd) };
     }
+    Ok(Some(current))
+}
+
+#[cfg(unix)]
+fn fstat_at_nofollow(
+    parent: &fs::File,
+    c_leaf: &std::ffi::CString,
+) -> Result<Option<(libc::stat, FileFingerprint)>, String> {
+    use std::os::fd::AsRawFd;
+    let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: valid parent fd, NUL-terminated name, uninit stat buffer written by fstatat.
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            c_leaf.as_ptr(),
+            stat_buf.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } < 0
+    {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("fstatat: {err}"));
+    }
+    // SAFETY: fstatat succeeded and initialized stat_buf.
+    let st = unsafe { stat_buf.assume_init() };
+    let fp = FileFingerprint {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+        mtime: st.st_mtime as i64,
+        mtime_nsec: st.st_mtime_nsec as i64,
+        size: st.st_size as u64,
+    };
+    Ok(Some((st, fp)))
+}
+
+#[cfg(unix)]
+fn readlink_at_bytes(parent: &fs::File, c_leaf: &std::ffi::CString) -> Result<Vec<u8>, String> {
+    use std::os::fd::AsRawFd;
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: valid parent fd, NUL-terminated name, writable buffer of buf.len() bytes.
+    let n = unsafe {
+        libc::readlinkat(
+            parent.as_raw_fd(),
+            c_leaf.as_ptr(),
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+        )
+    };
+    if n < 0 {
+        return Err(format!("readlinkat: {}", std::io::Error::last_os_error()));
+    }
+    let len = n as usize;
+    if len >= buf.len() {
+        return Err("symlink target exceeds 4096 bytes".to_string());
+    }
+    buf.truncate(len);
+    Ok(buf)
 }
 
 #[cfg(unix)]
@@ -1618,35 +1779,6 @@ fn write_rel_file_anchored(
     let parent = open_sub_dir_at(home_fd, parent_rel, true, dir_mode)?;
     let c_leaf = c_component(leaf)?;
 
-    if exclusive {
-        // SAFETY: live parent fd, NUL-terminated leaf, O_CREAT|O_EXCL|O_NOFOLLOW prevents clobbering.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                c_leaf.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600 as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            return Err(format!(
-                "exclusive create '{}': {}",
-                rel_path.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: fresh owned fd from openat.
-        let mut file = unsafe { fs::File::from_raw_fd(fd) };
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|e| format!("write '{}': {e}", rel_path.display()))?;
-        drop(file);
-        parent
-            .sync_all()
-            .map_err(|e| format!("fsync parent dir: {e}"))?;
-        return Ok(());
-    }
-
     let tmp_name = format!(".tachi-sync-tmp.{}", uuid::Uuid::new_v4().as_simple());
     let c_tmp = c_component(std::ffi::OsStr::new(&tmp_name))?;
     // SAFETY: live parent fd, NUL-terminated temp name, O_CREAT|O_EXCL|O_NOFOLLOW.
@@ -1673,6 +1805,36 @@ fn write_rel_file_anchored(
             .and_then(|_| tmp_file.sync_all())
             .map_err(|e| format!("write temp '{}': {e}", tmp_name))?;
         drop(tmp_file);
+
+        if exclusive {
+            // Publish atomically without overwriting any existing target or
+            // exposing a partial file on crash/ENOSPC.
+            // SAFETY: live parent fd and NUL-terminated sibling names.
+            if unsafe {
+                libc::linkat(
+                    parent.as_raw_fd(),
+                    c_tmp.as_ptr(),
+                    parent.as_raw_fd(),
+                    c_leaf.as_ptr(),
+                    0,
+                )
+            } < 0
+            {
+                return Err(format!(
+                    "exclusive linkat '{}': {}",
+                    rel_path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: remove temporary sibling link after atomic publish.
+            unsafe {
+                libc::unlinkat(parent.as_raw_fd(), c_tmp.as_ptr(), 0);
+            }
+            parent
+                .sync_all()
+                .map_err(|e| format!("fsync parent dir: {e}"))?;
+            return Ok(());
+        }
 
         if let Some(expected) = expected_fp {
             let current = fstat_fingerprint_at(&parent, &c_leaf)?;
@@ -1999,7 +2161,13 @@ mod tests {
             fs::read_to_string(backup_root.join("files/.claude/CLAUDE.md")).unwrap(),
             "# Hand-written legacy file\n"
         );
-        assert!(backup_root.join("symlinks/.codex/AGENTS.md.json").is_file());
+        let symlinks_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(backup_root.join("symlinks.json")).unwrap()).unwrap();
+        assert_eq!(symlinks_json["symlinks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            symlinks_json["symlinks"][0]["target"],
+            serde_json::json!(".codex/AGENTS.md")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2117,8 +2285,9 @@ mod tests {
             SyncStampState::TamperedOrEdited
         );
 
-        // 2. Double-slash cannot bypass gemini exclusion of .gemini/config/.
+        // 2. Double-slash and internal dot segments cannot bypass gemini exclusion of .gemini/config/.
         assert!(validate_relative_path(".gemini//config/AGENTS.md", "target").is_err());
+        assert!(validate_relative_path(".gemini/./config/AGENTS.md", "target").is_err());
 
         // 3. Case-insensitive duplicate targets are rejected.
         let root = temp_dir("r1-regressions");
@@ -2167,12 +2336,12 @@ mod tests {
         let err = run_plan(&claude_only).expect_err("missing constitution import must fail");
         assert!(err.contains("requires constitution"));
 
-        // 5. Secret-like revision and Google API key prefix are rejected.
-        let fake_rev = format!("{}{}", "ghp_", "RevSecret123456");
+        // 5. Secret-like revision (even with trailing newline) and Google API key prefix are rejected without echo.
+        let fake_rev = format!("{}{}\n", "ghp_", "RevSecret123456");
         write_six_surface_bundle(&bundle, &fake_rev);
         let err = run_plan(&opts).expect_err("secret in revision must fail");
         assert!(err.contains("secret pattern rejected"));
-        assert!(!err.contains(&fake_rev));
+        assert!(!err.contains("RevSecret123456"));
 
         write_six_surface_bundle(&bundle, "2026-11-28.1");
         let fake_google = format!("{}{}", "AIza", "SyFakeKey0123456789");

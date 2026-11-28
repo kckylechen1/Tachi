@@ -175,9 +175,9 @@ Default bundle directory: `<home>/.tachi/instructions/` (override with
   - Any `conflict_*` target blocks the entire sync unless `--adopt` is passed.
   - With `--adopt`, regular unmanaged/edited files are backed up verbatim under
     `<home>/.tachi/backups/harness-sync/<run_id>/files/<rel_target>` and
-    replaced symlinks have their `read_link` target (lossy display + lossless
-    base64 bytes on Unix) recorded under
-    `<home>/.tachi/backups/harness-sync/<run_id>/symlinks/<rel_target>.json`
+    replaced symlinks have their `read_link` targets (lossy display + lossless
+    base64 bytes on Unix) recorded in a single manifest file
+    `<home>/.tachi/backups/harness-sync/<run_id>/symlinks.json`
     (`0700`/`0600`) before atomic sibling temp-file + `rename` replacement.
     Renaming over a symlink replaces the link itself without dereferencing or
     modifying its former target.
