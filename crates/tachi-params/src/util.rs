@@ -28,16 +28,25 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "COMSPEC",
     "NODE_OPTIONS",
     "NODE_PATH",
+    "NODE_REPL_EXTERNAL_MODULE",
     "NPM_CONFIG_SCRIPT_SHELL",
+    "NPM_CONFIG_NODE_OPTIONS",
+    "NPM_CONFIG_NODE_GYP",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "NPM_CONFIG_GIT",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PYTHONHOME",
     "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
     "PERL5DB",
     "PERL5OPT",
     "PERL5LIB",
+    "PERLLIB",
     "RUBYOPT",
     "RUBYLIB",
+    "RUBYPATH",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
     "GIT_EXEC_PATH",
@@ -48,20 +57,44 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
+    // Git and other tools run these; `gradlew` runs "$JAVA_HOME/bin/java".
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "BROWSER",
+    "JAVA_HOME",
+    "NODE_GYP_FORCE_PYTHON",
     "RUSTC",
     "RUSTDOC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
+    // `CARGO` is forwarded to whatever runs it. `RUSTUP_TOOLCHAIN` makes a
+    // rustup proxy pick a toolchain, and install a missing one; `RUSTUP_HOME`
+    // moves where toolchains and their settings are looked up.
+    "CARGO",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_HOME",
+    // Where rustup fetches a missing toolchain from, before it is run.
+    "RUSTUP_DIST_SERVER",
     "CARGO_BUILD_RUSTC",
     "CARGO_BUILD_RUSTDOC",
     "CARGO_BUILD_RUSTC_WRAPPER",
     "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     "CARGO_HOME",
+    // Cargo runs the credential provider a registry names. The default
+    // registry decides whose.
+    "CARGO_REGISTRY_DEFAULT",
+    "CARGO_REGISTRY_CREDENTIAL_PROVIDER",
+    "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
     "MAVEN_OPTS",
     "GRADLE_OPTS",
 ];
@@ -75,6 +108,16 @@ const EXECUTION_ENVIRONMENT_NAME_PREFIXES: &[&str] =
 const TARGET_SELECTOR_PREFIX: &str = "CARGO_TARGET_";
 const TARGET_SELECTOR_SUFFIXES: &[&str] = &["_RUNNER", "_LINKER"];
 
+/// A registry's own settings carry its name between fixed words:
+/// `CARGO_REGISTRIES_<NAME>_CREDENTIAL_PROVIDER` names the provider cargo
+/// runs for that registry, `CARGO_CREDENTIAL_ALIAS_<NAME>` the entry its
+/// token is read from. The name must not be empty, so that
+/// `CARGO_REGISTRIES_<NAME>_INDEX` and the bare `CARGO_CREDENTIAL_ALIAS` stay
+/// ordinary settings.
+const REGISTRY_SETTING_PREFIX: &str = "CARGO_REGISTRIES_";
+const REGISTRY_PROVIDER_SUFFIX: &str = "_CREDENTIAL_PROVIDER";
+const REGISTRY_ALIAS_PREFIX: &str = "CARGO_CREDENTIAL_ALIAS_";
+
 pub fn is_execution_environment_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     EXECUTION_ENVIRONMENT_NAMES.contains(&upper.as_str())
@@ -85,6 +128,13 @@ pub fn is_execution_environment_name(name: &str) -> bool {
             && TARGET_SELECTOR_SUFFIXES
                 .iter()
                 .any(|suffix| upper.ends_with(suffix)))
+        || upper
+            .strip_prefix(REGISTRY_SETTING_PREFIX)
+            .and_then(|rest| rest.strip_suffix(REGISTRY_PROVIDER_SUFFIX))
+            .is_some_and(|registry| !registry.is_empty())
+        || upper
+            .strip_prefix(REGISTRY_ALIAS_PREFIX)
+            .is_some_and(|registry| !registry.is_empty())
 }
 
 pub fn is_shell_env_name(name: &str) -> bool {
@@ -133,15 +183,63 @@ mod tests {
             "npm_config_script_shell",
             "GIT_CONFIG_PARAMETERS",
             "PERL5DB",
+            // Forwarded to whatever runs `cargo`; a rustup proxy picks the
+            // toolchain, and may install one; npm turns NODE_OPTIONS into
+            // what its scripts load, and reads its configuration from these.
+            "CARGO",
+            "cargo",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_HOME",
+            "NPM_CONFIG_NODE_OPTIONS",
+            "npm_config_node_options",
+            "NPM_CONFIG_NODE_GYP",
+            "NPM_CONFIG_USERCONFIG",
+            "NPM_CONFIG_GLOBALCONFIG",
+            // npm runs `git` through NPM_CONFIG_GIT; Python, Node, Ruby, Perl
+            // and the JVM load code from these; Git runs these as programs;
+            // Cargo runs the credential provider a registry names.
+            "NPM_CONFIG_GIT",
+            "PYTHONBREAKPOINT",
+            "NODE_REPL_EXTERNAL_MODULE",
+            "RUBYPATH",
+            "PERLLIB",
+            "CLASSPATH",
+            "GIT_EDITOR",
+            "GIT_SEQUENCE_EDITOR",
+            "GIT_PAGER",
+            "CARGO_REGISTRY_CREDENTIAL_PROVIDER",
+            "CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS",
+            // A named registry's provider and credential alias carry the
+            // registry's name between fixed words.
+            "CARGO_REGISTRIES_PRIVATE_CREDENTIAL_PROVIDER",
+            "cargo_registries_private_credential_provider",
+            "CARGO_CREDENTIAL_ALIAS_PRIVATE",
+            // The default registry decides whose credential provider runs;
+            // the distribution server decides where a toolchain is fetched
+            // from before it is run.
+            "CARGO_REGISTRY_DEFAULT",
+            "RUSTUP_DIST_SERVER",
+            // `gradlew` runs "$JAVA_HOME/bin/java"; npm runs node-gyp's
+            // Python; cargo and others open BROWSER; git runs these.
+            "JAVA_HOME",
+            "NODE_GYP_FORCE_PYTHON",
+            "BROWSER",
+            "EDITOR",
+            "VISUAL",
+            "PAGER",
         ] {
             assert!(is_execution_environment_name(name), "{name}");
         }
+        // Ordinary settings stay allowed, and a selector needs its name.
         for name in [
             "NPM_CONFIG_REGISTRY",
             "NPM_CONFIG_CACHE",
             "CARGO_TARGET_DIR",
             "CARGO_BUILD_JOBS",
-            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_IO_THREADS",
+            "CARGO_REGISTRIES_PRIVATE_INDEX",
+            "CARGO_CREDENTIAL_ALIAS",
+            "CARGO_REGISTRIES__CREDENTIAL_PROVIDER",
         ] {
             assert!(!is_execution_environment_name(name), "{name}");
         }
