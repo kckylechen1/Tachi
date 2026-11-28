@@ -144,79 +144,248 @@ launchctl_bootstrap_plist() {
   fi
 }
 
+# The top-level fields of the status of whatever holds this DB scope, one
+# `name<TAB>type<TAB>value` line each, or nothing. Nothing means the binary
+# did not answer: it failed, or what it printed is not one JSON object.
 daemon_status_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
+
+  # The output reaches the decoder as the binary wrote it. Kept in a shell
+  # variable first, it would lose a NUL byte, and a broken object could become
+  # a whole one. Here a NUL becomes a byte the decoder refuses.
   TACHI_DISABLE_AUTO_DAEMON=1 \
-    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null || true
+    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null |
+    tr '\000' '\001' | json_object_fields
 }
 
-daemon_status_is_running() {
-  grep -q '"state": "running"'
+# One `name<TAB>type<TAB>value` line for each top-level field of the input,
+# and nothing else unless the whole input is exactly one JSON object. Nothing
+# else may read the status: matched as text, a nested field passes for the
+# top-level one and a value of the wrong type for the right one.
+#
+# A `\u` escape is refused, and so is a name with any escape in it. Two names
+# that differ only in an escape would then be one name written twice. A value
+# is printed as it stands between its quotes, and a control character cannot
+# occur there, so a line holds one field. The status reads a value only as
+# one of its plain words, and no short escape can spell one of them, so the
+# value as written decides exactly as the decoded one would.
+#
+# Both awk runs are pinned to the C locale. In a UTF-8 locale awk compares
+# strings by their collation there: a name with a soft hyphen in it, `st­ate`,
+# compared equal to `state` and stood in for it. The C locale compares bytes.
+# It does not check that the text is valid UTF-8. Nothing is decided on a byte
+# that is not compared exactly, so such a byte can only keep a value from
+# matching.
+json_object_fields() {
+  LC_ALL=C awk '
+    function ws(c) {
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") i++
+        else break
+      }
+    }
+    # A string opens at i. Leaves i just after its closing quote.
+    function string(c, e) {
+      i++
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\"") { i++; return }
+        if (c == "\\") {
+          e = substr(s, i + 1, 1)
+          if (index("\"\\/bfnrt", e) == 0) { bad = 1; return }
+          i += 2
+          continue
+        }
+        if (c < " ") { bad = 1; return }
+        i++
+      }
+      bad = 1
+    }
+    # A value opens at i, whitespace already skipped. Returns its type, or
+    # sets bad.
+    function value(depth, c) {
+      if (bad || depth > 32) { bad = 1; return "" }
+      c = substr(s, i, 1)
+      if (c == "{") return object(depth + 1, 0)
+      if (c == "[") return array(depth + 1)
+      if (c == "\"") { string(); return bad ? "" : "string" }
+      if (substr(s, i, 4) == "true") { i += 4; return "true" }
+      if (substr(s, i, 5) == "false") { i += 5; return "false" }
+      if (substr(s, i, 4) == "null") { i += 4; return "null" }
+      if (match(substr(s, i), /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+        i += RLENGTH
+        return "number"
+      }
+      bad = 1
+      return ""
+    }
+    function object(depth, top,   key, f, t, c) {
+      i++
+      ws()
+      if (substr(s, i, 1) == "}") { i++; return "object" }
+      for (;;) {
+        ws()
+        if (substr(s, i, 1) != "\"") { bad = 1; return "" }
+        f = i
+        string()
+        if (bad) return ""
+        key = substr(s, f + 1, i - f - 2)
+        if (index(key, "\\") > 0) { bad = 1; return "" }
+        ws()
+        if (substr(s, i, 1) != ":") { bad = 1; return "" }
+        i++
+        ws()
+        f = i
+        t = value(depth)
+        if (bad) return ""
+        if (top) {
+          if (key in seen) { bad = 1; return "" }
+          seen[key] = 1
+          out = out key "\t" t "\t" shown(f, t) "\n"
+        }
+        ws()
+        c = substr(s, i, 1)
+        if (c == ",") { i++; continue }
+        if (c == "}") { i++; return "object" }
+        bad = 1
+        return ""
+      }
+    }
+    function array(depth, c) {
+      i++
+      ws()
+      if (substr(s, i, 1) == "]") { i++; return "array" }
+      for (;;) {
+        ws()
+        value(depth)
+        if (bad) return ""
+        ws()
+        c = substr(s, i, 1)
+        if (c == ",") { i++; continue }
+        if (c == "]") { i++; return "array" }
+        bad = 1
+        return ""
+      }
+    }
+    # What to print for a value that ran from f up to i.
+    function shown(f, t) {
+      if (t == "string") return substr(s, f + 1, i - f - 2)
+      if (t == "number") return substr(s, f, i - f)
+      return ""
+    }
+    {
+      s = s (NR > 1 ? "\n" : "") $0
+    }
+    END {
+      n = length(s)
+      i = 1
+      ws()
+      if (substr(s, i, 1) != "{") exit 1
+      object(1, 1)
+      ws()
+      if (bad || i <= n) exit 1
+      printf "%s", out
+    }
+  '
 }
 
-# The value of a quoted field of the status JSON, or nothing.
-daemon_status_text() {
-  sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -n 1
+# The value of a top-level field of decoded status fields, when that field is
+# of the given type.
+daemon_status_field() {
+  LC_ALL=C awk -F '\t' -v name="$2" -v type="$3" '$1 == name && $2 == type { print $3; exit }' <<<"$1"
 }
 
-# The value of a numeric field of the status JSON, or nothing.
-daemon_status_number() {
-  sed -n "s/.*\"$1\": \([0-9][0-9]*\).*/\1/p" | head -n 1
-}
-
-stop_existing_daemon_for_scope() {
+# What may be done about whatever holds this DB scope, from one read-only
+# look: `free`, `stop` (this scope's daemon, stopped through the CLI) or
+# `stop-previous <pid>` (the previous version's daemon, see below). Anything
+# else is refused with the status that was read, and returns 1.
+daemon_scope_verdict() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status
+  local fields state reason pid
 
-  status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-  state=$(printf '%s\n' "$status" | daemon_status_text state)
+  fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+  state=$(daemon_status_field "$fields" state string)
   case "$state" in
-    running)
-      echo ">> Stopping existing Tachi daemon for this DB scope..."
-      TACHI_DISABLE_AUTO_DAEMON=1 \
-        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
-      ;;
+    none|stale_pid) echo free ;;
+    running) echo stop ;;
     foreign)
       # After an upgrade the previous version's daemon is reported as
       # foreign, and `daemon kill` refuses it. It holds the lock and the port
       # of this scope until it exits, so the upgrade has to stop it the way
       # launchd does. Any other foreign daemon is left alone and reported.
-      pid=$(printf '%s\n' "$status" | daemon_status_number pid)
-      if [[ "$(printf '%s\n' "$status" | daemon_status_text reason)" == "daemon version "* &&
-        "$pid" =~ ^[0-9]+$ ]]; then
-        echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
-        kill -TERM "$pid" 2>/dev/null || true
+      reason=$(daemon_status_field "$fields" reason string)
+      pid=$(daemon_status_field "$fields" pid number)
+      if [[ "$reason" == "daemon version "* && "$pid" =~ ^[0-9]+$ ]]; then
+        echo "stop-previous $pid"
       else
         echo "❌ a foreign Tachi daemon holds this DB scope and was not stopped"
-        printf '%s\n' "$status"
+        printf '%s\n' "$fields"
         return 1
       fi
+      ;;
+    *)
+      # `unavailable` is a live pid whose state could not be read; an empty
+      # state means the binary did not answer. Neither says the scope is free.
+      echo "❌ cannot tell what holds this DB scope (daemon status: ${state:-unreadable}); not installing over it"
+      printf '%s\n' "$fields"
+      return 1
+      ;;
+  esac
+}
+
+stop_existing_daemon_for_scope() {
+  local tachi_bin="$1"
+  local global_db="$2"
+  local verdict fields state pid
+
+  verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
+    printf '%s\n' "$verdict"
+    return 1
+  }
+  case "$verdict" in
+    free) ;;
+    stop)
+      echo ">> Stopping existing Tachi daemon for this DB scope..."
+      TACHI_DISABLE_AUTO_DAEMON=1 \
+        "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
+      ;;
+    "stop-previous "*)
+      pid=${verdict#stop-previous }
+      echo ">> Stopping the previous version's Tachi daemon (pid $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
       ;;
   esac
 
   for _ in $(seq 1 50); do
-    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    case "$(printf '%s\n' "$status" | daemon_status_text state)" in
+    fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+    state=$(daemon_status_field "$fields" state string)
+    case "$state" in
       running|foreign) sleep 0.2 ;;
-      *) return 0 ;;
+      none|stale_pid) return 0 ;;
+      *)
+        echo "❌ daemon status became unreadable while waiting for the previous daemon to stop"
+        printf '%s\n' "$fields"
+        return 1
+        ;;
     esac
   done
 
   echo "❌ previous daemon for this DB scope did not stop"
-  printf '%s\n' "$status"
+  printf '%s\n' "$fields"
   return 1
 }
 
 wait_for_daemon_for_scope() {
   local tachi_bin="$1"
   local global_db="$2"
-  local status
+  local fields
 
   for _ in $(seq 1 50); do
-    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
-    if printf '%s\n' "$status" | daemon_status_is_running; then
+    fields=$(daemon_status_for_scope "$tachi_bin" "$global_db") || fields=""
+    if [[ "$(daemon_status_field "$fields" state string)" == running ]]; then
       TACHI_DISABLE_AUTO_DAEMON=1 \
         "$tachi_bin" --global-db "$global_db" --no-project-db daemon status || true
       return 0
@@ -225,7 +394,7 @@ wait_for_daemon_for_scope() {
   done
 
   echo "❌ daemon service did not report state=running"
-  printf '%s\n' "$status"
+  printf '%s\n' "$fields"
   return 1
 }
 
@@ -268,6 +437,14 @@ install_daemon_service() {
   echo "   Label: $label"
   echo "   Binary: $tachi_bin"
   echo "   Global DB: $global_db"
+
+  # Asked before anything is replaced or unloaded, so a refusal leaves the
+  # installed plist and the loaded service as they are.
+  local verdict
+  verdict=$(daemon_scope_verdict "$tachi_bin" "$global_db") || {
+    printf '%s\n' "$verdict"
+    exit 1
+  }
 
   # Written beside the target and renamed over it: launchd and the next run
   # of this script never see a half-written plist, and a failed write leaves
