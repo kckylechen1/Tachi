@@ -161,6 +161,33 @@ pub fn search_vec(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    search_vec_with_domain(
+        conn,
+        query_vec,
+        top_k,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of,
+        surface,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_vec_with_domain(
+    conn: &Connection,
+    query_vec: &[f32],
+    top_k: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+    domain: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
     let as_of_utc = as_of
         .map(|instant| normalize_sqlite_as_of(conn, instant))
         .transpose()?;
@@ -179,6 +206,7 @@ pub fn search_vec(
         as_of_utc.as_deref(),
         surface,
         wiki_gate,
+        domain,
     )?;
 
     // Widen unconditionally whenever the current pass came up short --
@@ -190,7 +218,7 @@ pub fn search_vec(
     // When nothing was filtered out, `rows.len() >= top_k` already holds
     // after the first query above and this loop is a no-op -- zero extra
     // queries, identical to pre-tachi#1245 cost.
-    if top_k > 0 {
+    if top_k > 0 && domain.is_none() {
         for _ in 0..VEC_OVERFETCH_MAX_ATTEMPTS {
             if rows.len() >= top_k {
                 break;
@@ -212,6 +240,7 @@ pub fn search_vec(
                 as_of_utc.as_deref(),
                 surface,
                 wiki_gate,
+                domain,
             )?;
         }
     }
@@ -247,6 +276,7 @@ fn run_search_vec_query(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
+    domain: Option<&str>,
 ) -> Result<Vec<(String, f64)>, MemoryError> {
     // `surface` gates an extra `AND (...)` predicate mirroring [`Surface`]'s
     // Rust classifier (`surface_sql_splice`). `None` produces an empty
@@ -254,6 +284,43 @@ fn run_search_vec_query(
     // existed, preserving the fused-pool behavior exactly.
     let surface_clause = surface_sql_splice(surface, true);
     let wiki_clause = wiki_gate.splice(true);
+    if let Some(domain) = domain {
+        // vec0 computes its global top-k before joined predicates run. A
+        // domain-scoped query instead computes exact L2 distances only
+        // for eligible rows, so strong out-of-domain vectors cannot consume
+        // the candidate budget. This path intentionally trades KNN speed for
+        // scoped recall correctness.
+        let mut stmt = conn.prepare_cached(&format!(
+            r#"SELECT v.id, vec_distance_l2(v.embedding, ?1) AS distance
+               FROM memories_vec v
+               JOIN memories m ON m.id = v.id
+               WHERE (?2 = 1 OR m.archived = 0)
+                 AND lower(trim(m.category)) <> 'sticky'
+                 AND lower(trim(m.path)) <> '/sticky'
+                 AND lower(trim(m.path)) NOT LIKE '/sticky/%'
+                 AND (?4 = 1 OR m.superseded_by IS NULL)
+                 AND (?5 IS NULL OR m.path LIKE ?5 ESCAPE '\')
+                 AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+                 AND m.domain = ?7
+                 AND vec_distance_l2(v.embedding, ?1) IS NOT NULL
+                 AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
+               ORDER BY distance, m.id
+               LIMIT ?3"#,
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                blob,
+                include_archived as i64,
+                k as i64,
+                include_superseded as i64,
+                path_like,
+                as_of_utc,
+                domain
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+        )?;
+        return rows.collect::<Result<Vec<_>, _>>().map_err(Into::into);
+    }
     // Fixed text per (surface, gate); `k` is a bound parameter, so widen
     // passes and repeat searches reuse the cached statement (audit A6).
     let mut stmt = conn.prepare_cached(&format!(
@@ -343,6 +410,35 @@ pub(crate) fn search_fts_with_normalized_as_of(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    search_fts_with_normalized_as_of_and_domain(
+        conn,
+        query,
+        use_simple_query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc,
+        surface,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_fts_with_normalized_as_of_and_domain(
+    conn: &Connection,
+    query: &str,
+    use_simple_query: bool,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+    domain: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
     let safe_query = use_simple_query.then(|| simple_query_input(query));
     let match_query = safe_query.as_deref().unwrap_or(query);
     if match_query.is_empty() || (!use_simple_query && match_query.trim().is_empty()) {
@@ -360,6 +456,7 @@ pub(crate) fn search_fts_with_normalized_as_of(
         as_of_utc,
         surface,
         WikiCorpusGate::resolve(wiki_corpus_store, path_prefix),
+        domain,
     )
 }
 
@@ -405,6 +502,7 @@ fn search_fts_match(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
+    domain: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let path_like = path_prefix.map(|prefix| format!("{}%", escape_like_pattern(prefix)));
     let match_operand = if use_simple_query {
@@ -434,6 +532,7 @@ fn search_fts_match(
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5 ESCAPE '\')
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+              AND (?7 IS NULL OR m.domain = ?7)
               AND m.id NOT LIKE 'anchor:%'{surface_clause}{wiki_clause}
              ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
@@ -446,7 +545,8 @@ fn search_fts_match(
             limit as i64,
             include_superseded as i64,
             path_like,
-            as_of_utc
+            as_of_utc,
+            domain
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -514,6 +614,7 @@ pub fn search_symbolic_candidates(
         surface,
         wiki_corpus_store,
         memories_symbolic_fts_available(conn),
+        None,
         &SYMBOLIC_ENTRY_ROWS,
     )
 }
@@ -528,8 +629,8 @@ pub fn search_symbolic_candidates(
 /// discarded work (audit B1). The caller resolves `symbolic_fts_available`
 /// once per search ([`RecallTables`]) instead of each leg re-probing
 /// `sqlite_master` (audit B11).
-#[allow(clippy::too_many_arguments)] // matches the established raw-query helper plus relevance query
-pub(crate) fn search_symbolic_candidates_with_relevance(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_symbolic_candidates_with_relevance_and_domain(
     conn: &Connection,
     query: &str,
     relevance_query: &str,
@@ -541,6 +642,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
     symbolic_fts_available: bool,
+    domain: Option<&str>,
 ) -> Result<Vec<String>, MemoryError> {
     search_symbolic_candidate_rows(
         conn,
@@ -554,6 +656,7 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         surface,
         wiki_corpus_store,
         symbolic_fts_available,
+        domain,
         &SYMBOLIC_ID_ROWS,
     )
 }
@@ -598,6 +701,7 @@ fn search_symbolic_candidate_rows<T>(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
     symbolic_fts_available: bool,
+    domain: Option<&str>,
     shape: &SymbolicRowShape<T>,
 ) -> Result<Vec<T>, MemoryError> {
     let terms = symbolic_terms(query);
@@ -635,6 +739,7 @@ fn search_symbolic_candidate_rows<T>(
             as_of_utc,
             surface,
             wiki_gate,
+            domain,
             shape,
         );
     }
@@ -650,6 +755,7 @@ fn search_symbolic_candidate_rows<T>(
         as_of_utc,
         surface,
         wiki_gate,
+        domain,
         shape,
     )
 }
@@ -743,18 +849,27 @@ pub const SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE: &str = "SELECT {columns}
 /// leg resolved — so the default stays off rather than becoming a third
 /// answer to "is this the Wiki store" that no store ever supplied.
 pub fn symbolic_trigram_select_sql(columns: &str, surface: Option<Surface>) -> String {
-    symbolic_trigram_select_sql_with_gate(columns, surface, WikiCorpusGate::off())
+    symbolic_trigram_select_sql_with_gate(columns, surface, WikiCorpusGate::off(), None)
 }
 
 fn symbolic_trigram_select_sql_with_gate(
     columns: &str,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
+    domain: Option<&str>,
 ) -> String {
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
+    let sql = SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE
         .replace("{columns}", columns)
         .replace("{surface_clause}", &surface_sql_splice(surface, true))
-        .replace("{wiki_clause}", &wiki_gate.splice(true))
+        .replace("{wiki_clause}", &wiki_gate.splice(true));
+    if domain.is_some() {
+        sql.replace(
+            " AND m.id NOT LIKE 'anchor:%'",
+            " AND m.id NOT LIKE 'anchor:%' AND m.domain = ?8",
+        )
+    } else {
+        sql
+    }
 }
 
 /// Trigram-accelerated symbolic candidate retrieval (#1331).
@@ -778,12 +893,14 @@ fn search_symbolic_via_trigram<T>(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
+    domain: Option<&str>,
     shape: &SymbolicRowShape<T>,
 ) -> Result<Vec<T>, MemoryError> {
     let match_query = symbolic_trigram_match_query(terms);
-    let sql = symbolic_trigram_select_sql_with_gate(shape.qualified_columns, surface, wiki_gate);
+    let sql =
+        symbolic_trigram_select_sql_with_gate(shape.qualified_columns, surface, wiki_gate, domain);
 
-    let params: Vec<Value> = vec![
+    let mut params: Vec<Value> = vec![
         (include_archived as i64).into(),
         (include_superseded as i64).into(),
         path_like.map(str::to_owned).into(),
@@ -792,6 +909,9 @@ fn search_symbolic_via_trigram<T>(
         relevance_query.to_owned().into(),
         (limit.max(1) as i64).into(),
     ];
+    if let Some(domain) = domain {
+        params.push(domain.to_owned().into());
+    }
 
     // Fixed text per (projection, surface, gate): served from the statement
     // cache on repeat searches (audit A6).
@@ -829,6 +949,7 @@ fn search_symbolic_via_table_scan<T>(
     as_of_utc: Option<&str>,
     surface: Option<Surface>,
     wiki_gate: WikiCorpusGate,
+    domain: Option<&str>,
     shape: &SymbolicRowShape<T>,
 ) -> Result<Vec<T>, MemoryError> {
     // Unqualified (`qualified = false`): this path SELECTs from bare
@@ -866,6 +987,11 @@ fn search_symbolic_via_table_scan<T>(
         sql.push_str(" AND (");
         sql.push_str(&term_clauses.join(" OR "));
         sql.push(')');
+    }
+
+    if let Some(domain) = domain {
+        params.push(domain.to_owned().into());
+        sql.push_str(&format!(" AND domain = ?{}", params.len()));
     }
 
     // The pre-cap score is the final ranker's exact token scorer, not a SQL

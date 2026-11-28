@@ -149,6 +149,24 @@ fn detached_handle_verification_requires_a_stable_file_identity() {
     assert!(physical_db_identity_is_stable("unix:1:2"));
     assert!(physical_db_identity_is_stable("windows:1:2"));
     assert!(!physical_db_identity_is_stable("path:/tmp/memory.db"));
+    assert!(!physical_db_identity_is_stable("path:"));
+}
+
+#[test]
+fn physical_store_equality_refuses_unstable_path_fallbacks() {
+    let mut left = MemoryStore::open_in_memory().expect("left store");
+    let mut right = MemoryStore::open_in_memory().expect("right store");
+    left.opened_physical_db_identity = Some("path:/tmp/replaced.db".into());
+    right.opened_physical_db_identity = Some("path:/tmp/replaced.db".into());
+    assert!(
+        !left.shares_physical_database(&right),
+        "the same path fallback cannot prove two handles share one inode"
+    );
+    left.opened_physical_db_identity = Some("unix:7:11".into());
+    right.opened_physical_db_identity = Some("unix:7:11".into());
+    assert!(left.shares_physical_database(&right));
+    right.opened_physical_db_identity = Some("unix:7:12".into());
+    assert!(!left.shares_physical_database(&right));
 }
 
 fn open_compat_summaries(db_path: &str) -> Result<MemoryStore, MemoryError> {

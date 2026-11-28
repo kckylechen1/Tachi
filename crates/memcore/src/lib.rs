@@ -491,7 +491,15 @@ use rusqlite::Connection;
 ///
 /// Admin-only methods (vault/hub) live in `store::{vault,hub}` and
 /// are compiled only when the `admin` feature is enabled.
+static NEXT_MEMORY_STORE_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+fn next_memory_store_instance_id() -> u64 {
+    NEXT_MEMORY_STORE_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct MemoryStore {
+    pub(crate) instance_id: u64,
     pub(crate) conn: Connection,
     pub(crate) reserved_reference_write: db::ReservedReferenceWriteFlag,
     pub vec_available: bool,

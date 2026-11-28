@@ -894,6 +894,7 @@ impl MemoryStore {
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         let mut store = Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1132,6 +1133,7 @@ impl MemoryStore {
         }
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1237,6 +1239,7 @@ impl MemoryStore {
         // the one this open committed.
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1432,6 +1435,7 @@ impl MemoryStore {
         crate::private_partition::refuse_stamped_private_store(&conn)?;
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1526,6 +1530,7 @@ impl MemoryStore {
         crate::private_partition::refuse_stamped_private_store(&conn)?;
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1563,6 +1568,7 @@ impl MemoryStore {
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
+            instance_id: crate::next_memory_store_instance_id(),
             conn,
             reserved_reference_write,
             vec_available,
@@ -1605,10 +1611,32 @@ impl MemoryStore {
         &self.db_label
     }
 
+    /// Process-local identity of this opened store instance. Unlike db_label,
+    /// this is never equal for two separately opened stores.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     /// This store's effective schema profile (#1585): the stamped one, or the
     /// full profile for a pre-#1585 database that has not been stamped yet.
     pub fn store_profile(&self) -> crate::db::StoreProfile {
         self.profile
+    }
+
+    /// Return whether two opened handles address the same physical database.
+    /// In-memory or otherwise identity-less handles never compare equal here.
+    pub fn shares_physical_database(&self, other: &Self) -> bool {
+        match (
+            self.opened_physical_db_identity.as_deref(),
+            other.opened_physical_db_identity.as_deref(),
+        ) {
+            (Some(left), Some(right)) => {
+                physical_db_identity_is_stable(left)
+                    && physical_db_identity_is_stable(right)
+                    && left == right
+            }
+            _ => false,
+        }
     }
 
     /// Verify that this already-open connection still addresses the physical

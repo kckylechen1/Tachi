@@ -3,7 +3,7 @@
 //! Each recorded call:
 //!   * acquires a semaphore permit (caps concurrent invocations);
 //!   * writes `prompt.md` / `result.md` / `status.json` under
-//!     `<tachi_home>/foundry-runs/<label>-<UTCts>/`;
+//!     `<tachi_home>/foundry-runs/<label>-<UTCts>-<suffix>/`;
 //!   * runs the caller-supplied provider executor (a `tachi-llm` chat-lane
 //!     closure — no subprocess spawn);
 //!   * writes the outcome (`result.md` + `status.json`) regardless of
@@ -28,6 +28,7 @@
 //! written by the distill runner, not by a recorded call).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -72,6 +73,8 @@ pub const FAILED_RETENTION_DAYS: u64 = 30;
 /// folder's concurrency footprint is unchanged by the decommission.
 pub const DEFAULT_MAX_CONCURRENT: usize = 2;
 
+static NEXT_RUN_DIR_SUFFIX: AtomicU64 = AtomicU64::new(0);
+
 /// Outcome of a recorded LLM call. The recorder writes the full prompt +
 /// result + status trail to disk; this struct is the in-memory handle the
 /// caller uses to consume the produced text.
@@ -91,7 +94,7 @@ pub struct RecordedCallWithReceipt {
 
 /// Bounded recorder for LLM calls, writing the `prompt.md` /
 /// `result.md` / `status.json` artifact triple per call under
-/// `<runs_dir>/<label>-<UTCts>/`. The executor is caller-supplied — this
+/// `<runs_dir>/<label>-<UTCts>-<suffix>/`. The executor is caller-supplied — this
 /// type never spawns a subprocess.
 pub struct LlmCallRecorder {
     sem: Arc<Semaphore>,
@@ -139,8 +142,42 @@ impl LlmCallRecorder {
         &self.runs_dir
     }
 
+    async fn create_run_dir(&self, label: &str, ts: &str) -> Result<PathBuf, String> {
+        let first_suffix = NEXT_RUN_DIR_SUFFIX.fetch_add(1, Ordering::Relaxed);
+        self.create_run_dir_from_suffix(label, ts, first_suffix)
+            .await
+    }
+
+    async fn create_run_dir_from_suffix(
+        &self,
+        label: &str,
+        ts: &str,
+        first_suffix: u64,
+    ) -> Result<PathBuf, String> {
+        let safe_label = files::sanitize_label(label);
+        let mut suffix = first_suffix;
+        for _ in 0..128 {
+            let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}-{suffix}"));
+            match tokio::fs::create_dir(&run_dir).await {
+                Ok(()) => return Ok(run_dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix = suffix.wrapping_add(1);
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "llm recorder create run dir {}: {e}",
+                        run_dir.display()
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "llm recorder could not allocate a unique run directory for {safe_label}-{ts} after 128 attempts"
+        ))
+    }
+
     /// Record a provider-executor call: acquire a bounded-concurrency
-    /// permit, create `<runs_dir>/<label>-<ts>/`, write `prompt.md`, run
+    /// permit, create `<runs_dir>/<label>-<ts>-<suffix>/`, write `prompt.md`, run
     /// `executor`, then write `result.md` + `status.json` regardless of
     /// outcome. `prompt` is recorded verbatim to `prompt.md`; `executor` is
     /// what actually produces the completion (a `tachi-llm` chat-lane call
@@ -155,6 +192,21 @@ impl LlmCallRecorder {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<String, String>>,
     {
+        let ts = compact_run_stamp(jiff::Timestamp::now());
+        self.record_call_at(label, prompt, &ts, executor).await
+    }
+
+    async fn record_call_at<F, Fut>(
+        &self,
+        label: &str,
+        prompt: &str,
+        ts: &str,
+        executor: F,
+    ) -> Result<RecordedCallOutcome, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<String, String>>,
+    {
         let permit = self
             .sem
             .clone()
@@ -162,15 +214,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = compact_run_stamp(jiff::Timestamp::now());
-        let safe_label = files::sanitize_label(label);
-        let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
-        if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
-            return Err(format!(
-                "llm recorder create run dir {}: {e}",
-                run_dir.display()
-            ));
-        }
+        let run_dir = self.create_run_dir(label, ts).await?;
 
         let prompt_path = run_dir.join("prompt.md");
         if let Err(e) =
@@ -254,6 +298,23 @@ impl LlmCallRecorder {
         Fut: std::future::Future<Output = Result<O, String>>,
         O: Into<Generated<String>>,
     {
+        let ts = compact_run_stamp(jiff::Timestamp::now());
+        self.record_call_with_receipt_at(label, prompt, &ts, executor)
+            .await
+    }
+
+    async fn record_call_with_receipt_at<F, Fut, O>(
+        &self,
+        label: &str,
+        prompt: &str,
+        ts: &str,
+        executor: F,
+    ) -> Result<RecordedCallWithReceipt, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<O, String>>,
+        O: Into<Generated<String>>,
+    {
         let permit = self
             .sem
             .clone()
@@ -261,15 +322,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = compact_run_stamp(jiff::Timestamp::now());
-        let safe_label = files::sanitize_label(label);
-        let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
-        if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
-            return Err(format!(
-                "llm recorder create run dir {}: {e}",
-                run_dir.display()
-            ));
-        }
+        let run_dir = self.create_run_dir(label, ts).await?;
 
         let prompt_path = run_dir.join("prompt.md");
         if let Err(e) =
@@ -492,6 +545,103 @@ mod tests {
         assert!(
             status.get("model_invocation").is_none(),
             "text-only adapter must preserve its legacy status shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_timestamp_calls_get_independent_self_consistent_runs() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let recorder = LlmCallRecorder::new_in_app_home(2, app_home.path());
+        let fixed_ts = "20261127T120000.123";
+
+        let plain = recorder
+            .record_call_at("same label", "plain prompt", fixed_ts, || async {
+                Ok::<_, String>("plain result".to_string())
+            })
+            .await
+            .expect("plain call");
+        let receipt = recorder
+            .record_call_with_receipt_at("same label", "receipt prompt", fixed_ts, || async {
+                Ok::<_, String>(Generated {
+                    value: "receipt result".to_string(),
+                    invocation: PersistedModelInvocationReceiptV1::claude_cli_reasoning(1),
+                })
+            })
+            .await
+            .expect("receipt call");
+        assert_eq!(plain.text, "plain result");
+        assert_eq!(receipt.text, "receipt result");
+
+        let mut run_dirs = std::fs::read_dir(recorder.runs_dir())
+            .expect("runs directory")
+            .map(|entry| entry.expect("run entry").path())
+            .collect::<Vec<_>>();
+        run_dirs.sort();
+        assert_eq!(run_dirs.len(), 2, "same-ms calls must not share a run dir");
+
+        let mut saw_plain = false;
+        let mut saw_receipt = false;
+        for run_dir in run_dirs {
+            let name = run_dir.file_name().expect("run dir name").to_string_lossy();
+            assert!(
+                name.starts_with(&format!("same_label-{fixed_ts}-")),
+                "{name}"
+            );
+            let prompt = std::fs::read_to_string(run_dir.join("prompt.md")).expect("prompt");
+            let result = std::fs::read_to_string(run_dir.join("result.md")).expect("result");
+            let status: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(run_dir.join("status.json")).expect("status"),
+            )
+            .expect("parse status");
+            assert_eq!(status["status"], "success");
+            assert_eq!(status["label"], "same label");
+            assert_eq!(status["bytes"].as_u64(), Some(result.len() as u64));
+            match prompt.as_str() {
+                "plain prompt" => {
+                    saw_plain = true;
+                    assert_eq!(result, "plain result");
+                    assert!(status.get("model_invocation").is_none());
+                }
+                "receipt prompt" => {
+                    saw_receipt = true;
+                    assert_eq!(result, "receipt result");
+                    assert_eq!(status["model_invocation"]["latency_ms"], 1);
+                }
+                other => panic!("unexpected prompt in independent run: {other}"),
+            }
+        }
+        assert!(saw_plain && saw_receipt);
+    }
+
+    #[tokio::test]
+    async fn preoccupied_run_dir_candidate_is_not_reused() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let recorder = LlmCallRecorder::new_in_app_home(1, app_home.path());
+        let fixed_ts = "20261127T120000.123";
+        let occupied = recorder
+            .runs_dir()
+            .join(format!("preoccupied-{fixed_ts}-7"));
+        std::fs::create_dir(&occupied).expect("preoccupy candidate");
+        std::fs::write(occupied.join("sentinel"), "original").expect("write sentinel");
+
+        let allocated = recorder
+            .create_run_dir_from_suffix("preoccupied", fixed_ts, 7)
+            .await
+            .expect("allocate next candidate");
+
+        assert_ne!(allocated, occupied);
+        assert_eq!(
+            allocated
+                .file_name()
+                .expect("allocated name")
+                .to_string_lossy()
+                .to_string(),
+            format!("preoccupied-{fixed_ts}-8")
+        );
+        assert!(allocated.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(occupied.join("sentinel")).expect("original sentinel"),
+            "original"
         );
     }
 }

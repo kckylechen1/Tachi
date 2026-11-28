@@ -47,13 +47,13 @@ pub(crate) use read::{fetch_by_ids_with_vector_table, fetch_embeddings_by_ids};
 pub(crate) use read::{get_active_resource_entry, list_by_path_recent_for_recall};
 #[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
-pub(crate) use search::search_fts_with_normalized_as_of;
-pub(crate) use search::search_symbolic_candidates_with_relevance;
+pub(crate) use search::search_fts_with_normalized_as_of_and_domain;
+pub(crate) use search::search_symbolic_candidates_with_relevance_and_domain;
 pub(crate) use search::wiki_corpus_store_sql_splice;
 pub(crate) use search::{ensure_symbolic_score_function, RecallTables};
 pub use search::{
-    search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    search_fts, search_symbolic_candidates, search_vec, search_vec_with_domain,
+    symbolic_trigram_select_sql, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 /// tachi#1607 snapshot-import seam: transaction-scoped, no public signature
 /// mentions a `Connection`/`Transaction` — the store-level
@@ -2674,7 +2674,8 @@ fn upsert_prepared_within_tx(
         .transpose()?;
     let write_time_utc = now_utc_iso();
 
-    let (path, metadata_json) = update::prepare_upsert_metadata(tx, entry, &path, &clean_text)?;
+    let (path, metadata_json, body_changed) =
+        update::prepare_upsert_metadata(tx, entry, &path, &clean_text)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
@@ -2691,6 +2692,19 @@ fn upsert_prepared_within_tx(
     // guarded against exactly that kind of downgrade, and these two are not.
     // `recall_count` / `query_diversity` are set on insert and left alone on
     // conflict — they appear in the column list but not in the update set.
+    if body_changed && !vec_available && crate::db::table_exists(tx, "memories_vec")? {
+        let stale_vector_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories_vec WHERE id = ?1)",
+            params![entry.id],
+            |row| row.get(0),
+        )?;
+        if stale_vector_exists {
+            return Err(MemoryError::InvalidArg(format!(
+                "memory '{}' body changed without invalidating or replacing the old vector while vector projection is unavailable; refusing stale retrieval evidence",
+                entry.id
+            )));
+        }
+    }
     let rows_written = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
@@ -2803,6 +2817,10 @@ fn upsert_prepared_within_tx(
                 params![entry.id, blob],
             )?;
         }
+    } else if body_changed && vec_available {
+        // An omitted vector is meaningful on update: the old embedding no
+        // longer describes the new body and must not remain KNN evidence.
+        tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![entry.id])?;
     }
 
     Ok(IdlessUpsertResult::Saved)

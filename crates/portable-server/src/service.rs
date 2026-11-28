@@ -409,20 +409,38 @@ impl StoreSet {
         global_path: String,
         attached: Vec<(String, String, MemoryStore)>,
     ) -> Self {
-        Self {
-            global: StoreHandle {
-                name: "global".to_string(),
-                path: global_path,
-                store: Arc::new(Mutex::new(global)),
-            },
-            attached: attached
-                .into_iter()
-                .map(|(name, path, store)| StoreHandle {
-                    name,
-                    path,
-                    store: Arc::new(Mutex::new(store)),
+        let global = StoreHandle {
+            name: "global".to_string(),
+            path: global_path,
+            store: Arc::new(Mutex::new(global)),
+        };
+        let mut unique: Vec<StoreHandle> = Vec::new();
+        for (name, path, store) in attached {
+            if global
+                .store
+                .lock()
+                .unwrap()
+                .shares_physical_database(&store)
+                || unique.iter().any(|existing| {
+                    existing
+                        .store
+                        .lock()
+                        .unwrap()
+                        .shares_physical_database(&store)
                 })
-                .collect(),
+            {
+                eprintln!("[portable] ignoring duplicate physical database attachment '{name}'");
+                continue;
+            }
+            unique.push(StoreHandle {
+                name,
+                path,
+                store: Arc::new(Mutex::new(store)),
+            });
+        }
+        Self {
+            global,
+            attached: unique,
         }
     }
 
@@ -439,6 +457,7 @@ impl StoreSet {
         &self.global
     }
 
+    #[cfg(test)]
     fn project(&self) -> Option<&StoreHandle> {
         self.attached.iter().find(|store| store.name == "project")
     }
@@ -695,27 +714,67 @@ impl PortableServer {
             options.weights = weights.apply_to(options.weights);
         }
         // Same store order and lock sequence as before (one store locked at a
-        // time), now on the blocking pool.
+        // time). Prepare performs no access writes; only the merged winners
+        // below are finalized as displays.
         let stores = self.stores.clone();
-        let mut results = run_store_work(move || {
+        let (mut results, plans) = run_store_work(move || {
             let mut results = Vec::new();
-            for handle in stores.all() {
+            let mut plans = Vec::new();
+            for (store_index, handle) in stores.all().enumerate() {
                 let store = handle
                     .store
                     .lock()
                     .map_err(|_| "store lock poisoned".to_string())?;
-                let mut store_results = store
-                    .search(&query, Some(per_store_search_options(&options)))
+                let (store_results, plan) = store
+                    .search_prepare_access(&query, Some(per_store_search_options(&options)))
                     .map_err(|e| e.to_string())?;
-                results.append(&mut store_results);
+                results.extend(
+                    store_results
+                        .into_iter()
+                        .map(|result| (store_index, result)),
+                );
+                plans.push(plan);
+            }
+            Ok((results, plans))
+        })
+        .await?;
+        results.sort_by(|left, right| {
+            right
+                .1
+                .score
+                .final_score
+                .total_cmp(&left.1.score.final_score)
+        });
+        let mut seen = HashSet::new();
+        results.retain(|result| seen.insert(result.1.entry.id.clone()));
+        results.truncate(top_k);
+
+        let stores = self.stores.clone();
+        let results = run_store_work(move || {
+            let handles = stores.all().collect::<Vec<_>>();
+            let mut results = results;
+            for (store_index, plan) in plans.into_iter().enumerate() {
+                let store = handles[store_index]
+                    .store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?;
+                store
+                    .finalize_search_access(
+                        plan,
+                        results
+                            .iter_mut()
+                            .filter(move |(source, _)| *source == store_index)
+                            .map(|(_, result)| result),
+                    )
+                    .map_err(|e| e.to_string())?;
             }
             Ok(results)
         })
         .await?;
-        results.sort_by(|left, right| right.score.final_score.total_cmp(&left.score.final_score));
-        let mut seen = HashSet::new();
-        results.retain(|result| seen.insert(result.entry.id.clone()));
-        results.truncate(top_k);
+        let results = results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect::<Vec<_>>();
         serde_json::to_string(&results).map_err(|e| e.to_string())
     }
 
@@ -770,7 +829,7 @@ impl PortableServer {
             handle
                 .store
                 .lock()
-                .map(|store| store.stats(false).is_ok())
+                .map(|store| store.probe_readable().is_ok())
                 .unwrap_or(false)
         })
     }
@@ -798,23 +857,26 @@ impl PortableServer {
                 .store
                 .lock()
                 .map_err(|_| "store lock poisoned".to_string())?;
-            let stats = store.stats(true).map_err(|e| e.to_string())?;
+            let entry_count = store.memory_count(true).map_err(|e| e.to_string())?;
             Ok(json!({
                 "name": handle.name,
                 "path": handle.path,
-                "entry_count": stats.total,
+                "entry_count": entry_count,
                 "vec_available": store.vec_available,
             }))
         };
         let stores = self.stores.clone();
         let (global, project, attached) = run_store_work(move || {
             let global = database_status(&stores.global)?;
-            let project = stores.project().map(database_status).transpose()?;
             let attached = stores
                 .attached
                 .iter()
                 .map(database_status)
                 .collect::<Result<Vec<_>, _>>()?;
+            let project = attached
+                .iter()
+                .find(|database| database["name"] == "project")
+                .cloned();
             Ok((global, project, attached))
         })
         .await?;
@@ -1425,6 +1487,90 @@ mod tests {
         );
         assert_eq!(status["databases"]["global"]["entry_count"], 1);
         assert_eq!(status["databases"]["project"]["entry_count"], 1);
+    }
+
+    #[test]
+    fn store_set_deduplicates_only_handles_to_the_same_physical_database() {
+        let directory =
+            std::env::temp_dir().join(format!("portable-store-set-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("owned store-set fixture");
+        let path = directory.join("shared.db");
+        let global = MemoryStore::open(path.to_str().unwrap()).expect("global store");
+        let duplicate = MemoryStore::open(path.to_str().unwrap()).expect("alias store");
+        let independent = MemoryStore::open_in_memory().expect("independent memory store");
+        let set = StoreSet::new(
+            global,
+            path.display().to_string(),
+            vec![
+                ("project".into(), path.display().to_string(), duplicate),
+                (
+                    "independent".into(),
+                    "memory:independent".into(),
+                    independent,
+                ),
+            ],
+        );
+        assert_eq!(set.all().count(), 2, "physical alias must be ignored once");
+        assert_eq!(set.attached[0].name, "independent");
+        std::fs::remove_dir_all(directory).expect("remove store-set fixture");
+    }
+
+    #[tokio::test]
+    async fn merged_search_records_display_only_for_the_final_winner() {
+        let global = MemoryStore::open_in_memory().expect("global");
+        let project = MemoryStore::open_in_memory().expect("project");
+        let server = PortableServer::new(
+            global,
+            vec![(
+                "project".to_string(),
+                "/tmp/project.db".to_string(),
+                project,
+            )],
+            None,
+            "default".to_string(),
+            "/tmp/global.db".to_string(),
+        );
+        let mut global_save = save_params("merged display accounting", "/global");
+        global_save.id = Some("global-winner".to_string());
+        global_save.scope = Some("global".to_string());
+        global_save.importance = Some(1.0);
+        server
+            .save(Parameters(global_save))
+            .await
+            .expect("global save");
+        let mut project_save = save_params("merged display accounting", "/project");
+        project_save.id = Some("project-loser".to_string());
+        project_save.importance = Some(0.0);
+        server
+            .save(Parameters(project_save))
+            .await
+            .expect("project save");
+
+        let response = server
+            .search(Parameters(SearchParams {
+                query: "merged display accounting".to_string(),
+                top_k: Some(1),
+                graph_expand_hops: Some(0),
+                ..Default::default()
+            }))
+            .await
+            .expect("merged search");
+        let response: Vec<serde_json::Value> = serde_json::from_str(&response).unwrap();
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["entry"]["id"], "global-winner");
+
+        let global = server.stores.global.store.lock().unwrap();
+        let winner = global.get("global-winner").unwrap().unwrap();
+        assert_eq!(winner.access_count, 1);
+        assert_eq!(winner.recall_count, 1);
+        drop(global);
+        let project = server.stores.attached[0].store.lock().unwrap();
+        let loser = project.get("project-loser").unwrap().unwrap();
+        assert_eq!(loser.access_count, 0, "a local finalist was not displayed");
+        assert_eq!(loser.recall_count, 0, "recall requires an actual display");
+        assert_eq!(loser.scored_count, 1, "candidate scoring remains recorded");
+        let display_days = project.distinct_access_days("project-loser").unwrap();
+        assert_eq!(display_days, 0, "no display history may be written");
     }
 
     #[tokio::test]

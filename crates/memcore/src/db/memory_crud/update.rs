@@ -293,13 +293,22 @@ fn accumulated_enrichment_status(enrichment: &Map<String, Value>, new: [bool; 3]
     }
 }
 
+fn body_changed(tx: &Transaction<'_>, id: &str, clean_text: &str) -> Result<bool, MemoryError> {
+    let same_text: Option<bool> = tx
+        .query_row(
+            "SELECT text IS ?2 COLLATE BINARY FROM memories WHERE id = ?1",
+            params![id, clean_text],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(same_text == Some(false))
+}
+
 /// Completed stages describe the stored body. Preserve historical receipts,
 /// attempted markers and failure context when a writer replaces that body.
 fn invalidate_changed_body_completion(
-    tx: &Transaction<'_>,
-    id: &str,
-    clean_text: &str,
     metadata: &mut Value,
+    body_changed: bool,
 ) -> Result<(), MemoryError> {
     let Some(enrichment) = metadata.get("enrichment").and_then(Value::as_object) else {
         return Ok(());
@@ -309,14 +318,7 @@ fn invalidate_changed_body_completion(
     {
         return Ok(());
     }
-    let same_text: Option<bool> = tx
-        .query_row(
-            "SELECT text IS ?2 COLLATE BINARY FROM memories WHERE id = ?1",
-            params![id, clean_text],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if same_text == Some(false) {
+    if body_changed {
         if let Some(enrichment) = metadata
             .get_mut("enrichment")
             .and_then(Value::as_object_mut)
@@ -335,11 +337,12 @@ pub(super) fn prepare_upsert_metadata(
     entry: &crate::MemoryEntry,
     path: &str,
     clean_text: &str,
-) -> Result<(String, String), MemoryError> {
+) -> Result<(String, String, bool), MemoryError> {
+    let body_changed = body_changed(tx, &entry.id, clean_text)?;
     let mut metadata = entry.metadata.clone();
-    invalidate_changed_body_completion(tx, &entry.id, clean_text, &mut metadata)?;
+    invalidate_changed_body_completion(&mut metadata, body_changed)?;
     let path = crate::types::apply_location_relocation(path, &entry.location, &mut metadata);
-    Ok((path, serde_json::to_string(&metadata)?))
+    Ok((path, serde_json::to_string(&metadata)?, body_changed))
 }
 
 pub(super) fn saved_upsert_metadata(
@@ -376,7 +379,8 @@ fn update_with_revision_within_tx(
     let mut metadata = super::merge_ordinary_reserved_metadata(tx, id, &incoming_metadata)?;
     let clean_text = crate::noise::scrub_think_tags(new_text);
     let clean_summary = crate::noise::scrub_think_tags(new_summary);
-    invalidate_changed_body_completion(tx, id, &clean_text, &mut metadata)?;
+    let body_changed = body_changed(tx, id, &clean_text)?;
+    invalidate_changed_body_completion(&mut metadata, body_changed)?;
     let metadata_json = serde_json::to_string(&metadata)?;
 
     tx.execute(
@@ -418,6 +422,8 @@ fn update_with_revision_within_tx(
                 "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
                 params![id, vec_blob],
             )?;
+        } else if body_changed && crate::db::table_exists(tx, "memories_vec")? {
+            tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![id])?;
         }
     }
 

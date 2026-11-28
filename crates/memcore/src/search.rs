@@ -180,6 +180,35 @@ impl Default for SearchOptions {
     }
 }
 
+/// Prepared evidence for a merged search. Constructed only by the store's
+/// prepare method and consumed once by that same store's finalize method.
+#[derive(Debug)]
+pub struct SearchAccessPlan {
+    pub(crate) store_instance_id: u64,
+    pub(crate) writable: bool,
+    pub(crate) query: String,
+    pub(crate) local_display_ids: Vec<String>,
+    pub(crate) scored_ids: Vec<String>,
+    pub(crate) fts_hit_ids: Vec<String>,
+    pub(crate) recall_config: RecallConfig,
+    pub(crate) impression: Option<crate::recall_impressions::RecallImpressionPayload>,
+}
+
+impl SearchAccessPlan {
+    fn empty(query: &str, opts: &SearchOptions, writable: bool) -> Self {
+        Self {
+            store_instance_id: 0,
+            writable,
+            query: query.to_string(),
+            local_display_ids: Vec::new(),
+            scored_ids: Vec::new(),
+            fts_hit_ids: Vec::new(),
+            recall_config: recall_config(opts).clone(),
+            impression: None,
+        }
+    }
+}
+
 pub(super) fn recall_config(opts: &SearchOptions) -> &RecallConfig {
     opts.recall_config
         .as_ref()
@@ -587,7 +616,7 @@ pub fn hybrid_search(
     query: &str,
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
-    hybrid_search_inner(conn, query, opts, false, None).map(|(results, _, _)| results)
+    hybrid_search_inner(conn, query, opts, false, None, false).map(|(results, _, _, _)| results)
 }
 
 /// Runs the normal hybrid pipeline and reports content-free candidate-leg
@@ -602,8 +631,8 @@ pub(crate) fn hybrid_search_with_candidate_leg_evidence(
     opts: &SearchOptions,
     observed_ids: &[String],
 ) -> Result<(Vec<SearchResult>, HashMap<String, CandidateLegEvidence>), MemoryError> {
-    hybrid_search_inner(conn, query, opts, false, Some(observed_ids))
-        .map(|(results, _, evidence)| (results, evidence))
+    hybrid_search_inner(conn, query, opts, false, Some(observed_ids), false)
+        .map(|(results, _, evidence, _)| (results, evidence))
 }
 
 /// Instrumented twin of [`hybrid_search`]: returns the ranked `SearchResult`s
@@ -620,14 +649,30 @@ pub fn hybrid_search_with_receipt(
     query: &str,
     opts: &SearchOptions,
 ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
-    hybrid_search_inner(conn, query, opts, true, None)
-        .map(|(results, receipt, _)| (results, receipt))
+    hybrid_search_inner(conn, query, opts, true, None, false)
+        .map(|(results, receipt, _, _)| (results, receipt))
+}
+
+/// Search without writing access evidence, retaining the plan needed by a
+/// caller that merges several stores before deciding what was displayed.
+pub(crate) fn hybrid_search_prepare_access(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+) -> Result<(Vec<SearchResult>, SearchAccessPlan), MemoryError> {
+    hybrid_search_inner(conn, query, opts, false, None, true).map(|(results, _, _, plan)| {
+        (
+            results,
+            plan.expect("deferred search returns an access plan"),
+        )
+    })
 }
 
 type HybridSearchOutcome = (
     Vec<SearchResult>,
     SearchPhaseReceipt,
     HashMap<String, CandidateLegEvidence>,
+    Option<SearchAccessPlan>,
 );
 
 fn hybrid_search_inner(
@@ -636,6 +681,7 @@ fn hybrid_search_inner(
     opts: &SearchOptions,
     sample: bool,
     observed_ids: Option<&[String]>,
+    defer_access: bool,
 ) -> Result<HybridSearchOutcome, MemoryError> {
     let total_start = sample.then(Instant::now);
 
@@ -668,7 +714,8 @@ fn hybrid_search_inner(
             // the empty-candidate early return — honest "did not execute"
             // rather than zero elapsed.
         });
-        return Ok((vec![], receipt, candidate_leg_evidence));
+        let plan = defer_access.then(|| SearchAccessPlan::empty(query, opts, opts.record_access));
+        return Ok((vec![], receipt, candidate_leg_evidence, plan));
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
@@ -747,12 +794,14 @@ fn hybrid_search_inner(
             result.superseded_by = targets.remove(&result.entry.id);
         }
     }
-    if let Some(payload) = &mut impression_payload {
-        let displayed_ids = results
-            .iter()
-            .map(|result| result.entry.id.clone())
-            .collect::<Vec<_>>();
-        payload.finalize_displayed(&displayed_ids);
+    if !defer_access {
+        if let Some(payload) = &mut impression_payload {
+            let displayed_ids = results
+                .iter()
+                .map(|result| result.entry.id.clone())
+                .collect::<Vec<_>>();
+            payload.finalize_displayed(&displayed_ids);
+        }
     }
 
     // ── Record access (bump counters) ─────────────────────────────────────────
@@ -769,7 +818,7 @@ fn hybrid_search_inner(
     // downstream that reads a zero as "never retrieved" is reading this line's
     // absence, not a fact about the memory.
     let access_start = sample.then(Instant::now);
-    let access_receipt = if opts.record_access {
+    let access_receipt = if opts.record_access && !defer_access {
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         // FTS hits drive recall_count; collect before taking results slice
         let fts_hit_ids: Vec<String> = candidates.fts_scores.keys().cloned().collect();
@@ -803,6 +852,17 @@ fn hybrid_search_inner(
         None
     };
 
+    let access_plan = defer_access.then(|| SearchAccessPlan {
+        store_instance_id: 0,
+        writable: opts.record_access,
+        query: query.to_string(),
+        local_display_ids: results.iter().map(|r| r.entry.id.clone()).collect(),
+        scored_ids,
+        fts_hit_ids: candidates.fts_scores.keys().cloned().collect(),
+        recall_config: recall_config(opts).clone(),
+        impression: impression_payload.take(),
+    });
+
     let receipt = finish_receipt(sample, total_start, |b| {
         b.excluded_test_rows = excluded_test_ids.as_ref().map_or(0, HashSet::len);
         b.candidates = candidates_receipt;
@@ -812,7 +872,7 @@ fn hybrid_search_inner(
         b.access_recording = access_receipt;
     });
 
-    Ok((results, receipt, candidate_leg_evidence))
+    Ok((results, receipt, candidate_leg_evidence, access_plan))
 }
 
 /// Receipt-builder closure. Keeps the per-phase plumbing in one place so the

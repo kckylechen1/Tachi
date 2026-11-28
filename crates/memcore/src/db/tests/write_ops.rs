@@ -1037,6 +1037,134 @@ fn update_with_revision_detects_conflict() {
 }
 
 #[test]
+fn upsert_without_vector_invalidates_only_a_changed_existing_body() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("vector-invalidation", "original body");
+    entry.vector = Some(vec![0.11; 1024]);
+    upsert(&mut conn, &entry, true).unwrap();
+
+    let vector_rows = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM memories_vec WHERE id = 'vector-invalidation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    entry.vector = None;
+    entry.metadata = json!({"unrelated":"metadata edit"});
+    upsert(&mut conn, &entry, true).unwrap();
+    assert_eq!(vector_rows(&conn), 1, "same body must retain its vector");
+
+    entry.text = "replacement body".to_string();
+    upsert(&mut conn, &entry, true).unwrap();
+    assert_eq!(
+        vector_rows(&conn),
+        0,
+        "changed body must invalidate its vector"
+    );
+}
+
+#[test]
+fn upsert_refuses_changed_body_when_old_vector_cannot_be_invalidated() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("vector-unavailable-update", "original body");
+    entry.vector = Some(vec![0.31; 1024]);
+    upsert(&mut conn, &entry, true).unwrap();
+    entry.vector = None;
+    entry.text = "replacement body".to_string();
+
+    let error = upsert(&mut conn, &entry, false)
+        .expect_err("changed body must not retain stale evidence when deletion is unavailable");
+    assert!(
+        error.to_string().contains("invalidating or replacing"),
+        "{error}"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT text FROM memories WHERE id = 'vector-unavailable-update'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "original body"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM memories_vec WHERE id = 'vector-unavailable-update'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+
+    entry.vector = Some(vec![0.99; 1024]);
+    let error = upsert(&mut conn, &entry, false)
+        .expect_err("a replacement vector must not bypass the unavailable-projection guard");
+    assert!(
+        error.to_string().contains("invalidating or replacing"),
+        "{error}"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT text FROM memories WHERE id = 'vector-unavailable-update'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "original body"
+    );
+}
+
+#[test]
+fn revision_update_invalidates_vector_only_after_a_successful_body_change() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("revision-vector-invalidation", "original body");
+    entry.vector = Some(vec![0.21; 1024]);
+    upsert(&mut conn, &entry, true).unwrap();
+    let metadata = serde_json::to_string(&json!({})).unwrap();
+    let vector_rows = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM memories_vec WHERE id = 'revision-vector-invalidation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    assert!(!update_with_revision(
+        &mut conn,
+        &entry.id,
+        "stale replacement",
+        "stale",
+        "manual",
+        &metadata,
+        None,
+        0,
+    )
+    .unwrap());
+    assert_eq!(
+        vector_rows(&conn),
+        1,
+        "CAS failure must not delete the vector"
+    );
+
+    assert!(update_with_revision(
+        &mut conn,
+        &entry.id,
+        "replacement body",
+        "replacement",
+        "manual",
+        &metadata,
+        None,
+        1,
+    )
+    .unwrap());
+    assert_eq!(vector_rows(&conn), 0);
+}
+
+#[test]
 fn guarded_revision_update_rejects_same_revision_enrichment_drift() {
     let mut conn = make_conn();
     let mut entry = make_entry("guarded-rev-1", "original");
