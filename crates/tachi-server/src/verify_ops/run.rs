@@ -1124,7 +1124,7 @@ async fn run_with_runner<R: CheckRunner>(
 
     let status = if tree_mutated {
         "failed"
-    } else if outcome.exit_code == Some(0) {
+    } else if !outcome.timed_out && !outcome.kill_abandoned && outcome.exit_code == Some(0) {
         "passed"
     } else {
         "failed"

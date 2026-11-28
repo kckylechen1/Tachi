@@ -16,6 +16,8 @@ use memcore::ClaimState;
 struct FakeRunner {
     exit_code: Option<i32>,
     head_sha: &'static str,
+    timed_out: bool,
+    kill_abandoned: bool,
 }
 
 #[async_trait::async_trait]
@@ -43,8 +45,8 @@ impl CheckRunner for FakeRunner {
         Ok(CheckRunOutcome {
             exit_code: self.exit_code,
             duration_ms: 7,
-            timed_out: false,
-            kill_abandoned: false,
+            timed_out: self.timed_out,
+            kill_abandoned: self.kill_abandoned,
         })
     }
 
@@ -299,6 +301,8 @@ fn fake_runner() -> FakeRunner {
     FakeRunner {
         exit_code: Some(0),
         head_sha: "deadbeef0123456789abcdef0123456789abcdef01",
+        timed_out: false,
+        kill_abandoned: false,
     }
 }
 
@@ -560,6 +564,60 @@ async fn run_exit_nonzero_lands_in_failed_bucket() {
     assert_eq!(ledger["overall"], "failed");
     assert_eq!(ledger["items"][0]["status"], "failed");
     assert_eq!(ledger["items"][0]["source"], "server_run:clippy");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_exit_zero_never_passes_when_timed_out_or_output_was_abandoned() {
+    let (_root, _guard) = with_run_root();
+    for (flow_id, timed_out, kill_abandoned) in [
+        ("flow_run-timeout-zero", true, false),
+        ("flow_run-abandoned-zero", false, true),
+    ] {
+        let server = make_server();
+        let worktree = tempfile::tempdir().expect("worktree tempdir");
+        seed_claim(
+            &server,
+            flow_id,
+            worktree.path().to_str().expect("utf8 worktree"),
+        );
+        let runner = FakeRunner {
+            timed_out,
+            kill_abandoned,
+            ..fake_runner()
+        };
+        let raw = run_with_runner(
+            &server,
+            &runner,
+            flow_id,
+            "fmt",
+            check_kind_argv("fmt").expect("fmt argv"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("run completes");
+
+        assert_eq!(raw["item_status"], "failed");
+        assert_eq!(raw["exit_code"], 0);
+        assert_eq!(raw["timed_out"], timed_out);
+        assert_eq!(raw["kill_abandoned"], kill_abandoned);
+        assert!(raw["gate"]["failed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("fmt")));
+        let receipt: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                server
+                    .tachi_home_dir()
+                    .join("verify-receipts")
+                    .join(flow_id)
+                    .join("fmt.json"),
+            )
+            .expect("read receipt"),
+        )
+        .expect("receipt JSON");
+        assert_eq!(receipt["status"], "failed");
+    }
 }
 
 #[tokio::test]

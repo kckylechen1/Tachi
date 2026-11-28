@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::{
-    db::search_fts_with_normalized_as_of, error::MemoryError, namespace::Surface,
+    db::search_fts_with_normalized_as_of_and_domain, error::MemoryError, namespace::Surface,
     recall_config::RecallConfig, scorer::tokenize,
 };
 
@@ -286,6 +286,7 @@ pub(super) fn search_fts_with_expansion_config(
 /// SQLite-representable `as_of` (`normalize_sqlite_as_of`). The raw-`as_of`
 /// test entry point above keeps its own validation, pinned by
 /// `fts_expansion_rejects_sqlite_unrepresentable_as_of_before_empty_query`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_fts_with_expansion_normalized(
     conn: &Connection,
@@ -300,6 +301,37 @@ pub(super) fn search_fts_with_expansion_normalized(
     surface: Option<Surface>,
     wiki_corpus_store: bool,
 ) -> Result<FtsScoresWithGroups, MemoryError> {
+    search_fts_with_expansion_normalized_and_domain(
+        conn,
+        query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of_utc,
+        recall_config,
+        sample,
+        surface,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_fts_with_expansion_normalized_and_domain(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of_utc: Option<&str>,
+    recall_config: &RecallConfig,
+    sample: bool,
+    surface: Option<Surface>,
+    wiki_corpus_store: bool,
+    domain: Option<&str>,
+) -> Result<FtsScoresWithGroups, MemoryError> {
     let mut merged = HashMap::new();
     let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
@@ -312,7 +344,7 @@ pub(super) fn search_fts_with_expansion_normalized(
             recall_config.expanded_fts_score_factor
         };
         let group_start = sample.then(Instant::now);
-        let group_hits = search_fts_with_normalized_as_of(
+        let group_hits = search_fts_with_normalized_as_of_and_domain(
             conn,
             &fts_query,
             true,
@@ -323,6 +355,7 @@ pub(super) fn search_fts_with_expansion_normalized(
             as_of_utc,
             surface,
             wiki_corpus_store,
+            domain,
         )?;
         let group_elapsed = group_start.map(|s| s.elapsed());
         let group_hit_count = group_hits.len();
@@ -347,7 +380,7 @@ pub(super) fn search_fts_with_expansion_normalized(
             fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
         {
             let fallback_start = sample.then(Instant::now);
-            let fallback_hits = search_fts_with_normalized_as_of(
+            let fallback_hits = search_fts_with_normalized_as_of_and_domain(
                 conn,
                 &or_query,
                 false,
@@ -358,6 +391,7 @@ pub(super) fn search_fts_with_expansion_normalized(
                 as_of_utc,
                 surface,
                 wiki_corpus_store,
+                domain,
             )?;
             let fallback_elapsed = fallback_start.map(|s| s.elapsed());
             let fallback_hit_count = fallback_hits.len();

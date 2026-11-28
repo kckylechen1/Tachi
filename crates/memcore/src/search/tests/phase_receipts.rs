@@ -575,18 +575,10 @@ fn receipt_populates_all_running_phases_on_a_normal_successful_search() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
+fn receipt_skips_downstream_phases_when_domain_filters_candidates_in_sql() {
     let mut conn = setup();
     insert(&mut conn, "a", "rust performance memory safety", &["rust"]);
     insert(&mut conn, "b", "rust async runtime tokio", &["rust"]);
-
-    // The `domain` filter is applied ONLY inside `rank_candidate_entries`
-    // (ranking.rs:75-80), NOT during candidate collection — so the FTS /
-    // symbolic channels still surface both rows, fetch_by_ids loads them,
-    // and THEN ranking's domain filter zeros `entries_ref` out (every
-    // seeded row has `domain: None`, which never matches `Some("nope")`).
-    // This is exactly the "#1097 r1 ②" shape: rank ran real DB work
-    // (`get_superseded_ids`) but produced zero survivors.
     let opts = SearchOptions {
         top_k: 3,
         domain: Some("nonexistent-domain".to_string()),
@@ -594,10 +586,33 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
+    assert!(results.is_empty());
+    assert!(receipt.fetch.is_none());
+    assert!(receipt.rank.is_none());
+}
+
+#[test]
+fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
+    let mut conn = setup();
+    insert(&mut conn, "a", "rust performance memory safety", &["rust"]);
+    insert(&mut conn, "b", "rust async runtime tokio", &["rust"]);
+
+    // The final test-memory filter runs only in ranking. FTS / symbolic still
+    // surface both rows and fetch_by_ids loads them, then ranking zeros the
+    // entries out. This preserves the original rank-phase receipt oracle now
+    // that domain filtering correctly happens during candidate collection.
+    conn.execute("UPDATE memories SET path = '/test/phase-receipt'", [])
+        .unwrap();
+    let opts = SearchOptions {
+        top_k: 3,
+        record_access: false,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
 
     assert!(
         results.is_empty(),
-        "domain filter excludes every seeded row"
+        "test-memory filter excludes every seeded row"
     );
     assert!(receipt.sampled, "caller opted into sampling");
     // fetch DID execute (candidates were non-empty) — honest "ran":
@@ -606,7 +621,7 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
         "fetch must be present — candidate collection surfaced rows"
     );
     // #1097 r1 ②: the rank phase executed `get_superseded_ids` and was
-    // timed BEFORE the domain filter ran. The receipt must carry that
+    // timed BEFORE the final candidate filter ran. The receipt must carry that
     // work — `rank = None` here would erase an already-executed DB I/O
     // and make "rank is slow" reports lie ("rank never ran").
     let rank = receipt.rank.as_ref().expect(
@@ -618,7 +633,7 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
     );
     assert_eq!(
         rank.ranked_result_count, 0,
-        "domain filter zeroed out every candidate"
+        "test-memory filter zeroed out every candidate"
     );
     // #1097 r1 ② honest "did not run": `get_access_times` runs AFTER the
     // filter (ranking.rs:96), so when the filter zeros out it never

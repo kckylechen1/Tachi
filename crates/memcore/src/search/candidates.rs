@@ -7,8 +7,8 @@ use std::time::Instant;
 use crate::{
     db::{
         escape_like_pattern, fetch_by_ids_with_vector_table,
-        search_symbolic_candidates_with_relevance, search_vec, wiki_corpus_store_sql_splice,
-        RecallTables,
+        search_symbolic_candidates_with_relevance_and_domain, search_vec_with_domain,
+        wiki_corpus_store_sql_splice, RecallTables,
     },
     error::MemoryError,
     namespace::surface_sql_splice,
@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    expansion::search_fts_with_expansion_normalized,
+    expansion::search_fts_with_expansion_normalized_and_domain,
     ranking::{NormalPoolEvidence, SymbolicEvidenceQuery},
     recall_config, CandidatePhaseReceipt, ChannelPhaseReceipt, SearchOptions,
     TypoFallbackAttribution, TypoFallbackPhaseReceipt,
@@ -134,7 +134,7 @@ pub(super) fn collect_candidates_for_search(
     let vec_start = sample.then(Instant::now);
     let mut vec_scores = if opts.vec_available {
         if let Some(qv) = &opts.query_vec {
-            search_vec(
+            search_vec_with_domain(
                 conn,
                 qv,
                 n,
@@ -144,6 +144,7 @@ pub(super) fn collect_candidates_for_search(
                 as_of_utc,
                 opts.surface,
                 opts.wiki_corpus_store,
+                opts.domain.as_deref(),
             )?
         } else {
             HashMap::new()
@@ -169,7 +170,7 @@ pub(super) fn collect_candidates_for_search(
     // from the original query — and could not give a bounded follow-up.
     // `as_of_utc` is already normalized, so the FTS leg does not repeat the
     // `julianday` preflight (audit B11).
-    let (fts_scores, fts_groups) = search_fts_with_expansion_normalized(
+    let (fts_scores, fts_groups) = search_fts_with_expansion_normalized_and_domain(
         conn,
         query,
         n,
@@ -181,6 +182,7 @@ pub(super) fn collect_candidates_for_search(
         sample,
         opts.surface,
         opts.wiki_corpus_store,
+        opts.domain.as_deref(),
     )?;
     let fts_candidate_count = fts_scores.len();
 
@@ -189,7 +191,7 @@ pub(super) fn collect_candidates_for_search(
     // (`clean-cli`, `dry-run`, `RECALL_PROBE_*`). Pull a bounded lexical set so
     // symbolic scoring can add candidates instead of merely re-ranking FTS/vec.
     let symbolic_start = sample.then(Instant::now);
-    let symbolic_candidate_ids = search_symbolic_candidates_with_relevance(
+    let symbolic_candidate_ids = search_symbolic_candidates_with_relevance_and_domain(
         conn,
         query,
         symbolic.expanded_text(),
@@ -202,6 +204,7 @@ pub(super) fn collect_candidates_for_search(
         opts.surface,
         opts.wiki_corpus_store,
         tables.symbolic_fts,
+        opts.domain.as_deref(),
     )?;
     let symbolic_elapsed = symbolic_start.map(|s| s.elapsed());
     let symbolic_candidate_count = symbolic_candidate_ids.len();
@@ -519,6 +522,7 @@ fn typo_prefilter_ids(
             AND (?3 IS NULL OR m.path LIKE ?3 ESCAPE '\\')
             AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
             AND m.id NOT LIKE 'anchor:%'
+            AND (?7 IS NULL OR m.domain = ?7)
             AND memories_symbolic_fts MATCH ?5{surface_clause}{wiki_clause}
           ORDER BY bm25(memories_symbolic_fts), m.id
           LIMIT ?6"
@@ -530,6 +534,7 @@ fn typo_prefilter_ids(
         as_of_utc.map(str::to_owned).into(),
         match_query.into(),
         (config.prefilter_candidate_limit as i64).into(),
+        opts.domain.clone().into(),
     ];
     // Fixed text per (surface, gate); served from the statement cache.
     let mut stmt = conn.prepare_cached(&sql)?;
