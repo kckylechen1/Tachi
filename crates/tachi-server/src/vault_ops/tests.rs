@@ -921,11 +921,11 @@ async fn concurrent_wrong_unlocks_get_no_more_attempts_than_the_limit_allows() {
     );
 }
 
-/// Once a lockout has ended the count starts over under the turn, once:
-/// the attempts that queued up behind the first one share the new budget
-/// instead of each starting a count of their own.
+/// Once a lockout has ended the count is still at the limit: of the attempts
+/// that queue behind each other, exactly one derives a key and relocks. The
+/// rest meet that lockout without deriving.
 #[tokio::test]
-async fn attempts_after_an_ended_lockout_share_one_new_budget() {
+async fn attempts_after_an_ended_lockout_relock_once_under_the_turn() {
     use crate::vault_ops::session::VAULT_UNLOCK_MAX_FAILED_ATTEMPTS as LIMIT;
 
     let db_path = crate::utils::test_fixture_path(format!(
@@ -956,26 +956,59 @@ async fn attempts_after_an_ended_lockout_share_one_new_budget() {
             .expect_err("a wrong password is refused")
         });
     }
-    let mut missed = 0;
-    let mut locked_out = 0;
+    let mut relocked = 0;
     let mut refused = 0;
     while let Some(result) = attempts.join_next().await {
         match result.expect("attempt task") {
-            err if err.starts_with("Wrong password") => missed += 1,
-            // The attempt whose failure reaches the limit is told about the
-            // lockout it caused.
-            err if err.starts_with("Too many failed vault unlock attempts") => locked_out += 1,
+            err if err.starts_with("Too many failed vault unlock attempts") => relocked += 1,
             err if err.starts_with("Vault unlock temporarily locked") => refused += 1,
-            err => panic!("unexpected unlock answer: {err}"),
+            err => panic!("no attempt after an ended lockout merely misses: {err}"),
         }
     }
 
     assert_eq!(
-        (missed, locked_out, refused),
-        (LIMIT as usize - 1, 1, queued - LIMIT as usize),
-        "the new budget is spent once, not once per attempt"
+        (relocked, refused),
+        (1, queued - 1),
+        "an ended lockout grants no new budget"
     );
-    assert_eq!(server.vault_read().failed_attempts.0, LIMIT);
+    let state = server.vault_read().failed_attempts;
+    assert_eq!(
+        state.0,
+        LIMIT + 1,
+        "the one miss is recorded on top of the limit"
+    );
+    assert!(
+        state.1.is_some_and(|until| until > Instant::now()),
+        "that miss installs a new lockout window"
+    );
+}
+
+/// A password refused at the turn was never tested; it is zeroed, not left
+/// in freed memory.
+#[test]
+fn refused_unlock_password_is_zeroed_before_it_is_dropped() {
+    use crate::vault_ops::session::{admit_unlock_turn, VAULT_UNLOCK_MAX_FAILED_ATTEMPTS as LIMIT};
+
+    let db_path = crate::utils::test_fixture_path(format!(
+        "memory-server-vault-unlock-refusal-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    crate::vault_test_api::seed_vault(&server, "correct-password").expect("seed vault");
+    server.vault_write().failed_attempts = (LIMIT, Some(Instant::now() + Duration::from_secs(300)));
+
+    let mut password = "never-tested".to_string();
+    let err = admit_unlock_turn(&server, &mut password)
+        .expect_err("an active lockout refuses the attempt");
+    assert!(
+        err.starts_with("Vault unlock temporarily locked"),
+        "unexpected refusal: {err}"
+    );
+    assert_eq!(password.len(), "never-tested".len());
+    assert!(
+        password.bytes().all(|byte| byte == 0),
+        "the refused password must be zeroed in place"
+    );
 }
 
 #[tokio::test]

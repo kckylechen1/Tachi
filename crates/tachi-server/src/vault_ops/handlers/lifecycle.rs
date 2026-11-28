@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn handle_vault_unlock(
-    server: &impl VaultCtx,
+    server: &(impl VaultCtx + Clone + Send + 'static),
     params: VaultUnlockParams,
 ) -> Result<String, String> {
     let result = async {
@@ -59,7 +59,7 @@ pub(crate) async fn handle_vault_unlock(
         } else {
             None
         };
-        let password = match (fifo_password.take(), keychain_password.take()) {
+        let mut password = match (fifo_password.take(), keychain_password.take()) {
             (Some(password), None) => password,
             (None, Some(password)) => password,
             (Some(_), Some(_)) => {
@@ -93,24 +93,37 @@ pub(crate) async fn handle_vault_unlock(
         // own doc comment and discrimination tests require.
         // Only serialize the CPU-heavy KDF and lockout-state update after any
         // interactive FIFO or Keychain password read completes.
-        let _turn = UNLOCK_ADMISSION.lock().await;
-        admit_unlock_turn(server)?;
+        let turn = UNLOCK_ADMISSION.lock().await;
+        admit_unlock_turn(server, &mut password)?;
 
         // The KDF is deliberately slow. It runs off the async worker threads;
-        // the password travels with it and is zeroed there.
-        let key = match tokio::task::spawn_blocking(move || {
+        // the password travels with it and is zeroed there. A miss is recorded
+        // where the derivation ends, still holding the turn: a caller that
+        // goes away mid-derivation neither frees the turn for a second
+        // derivation nor loses the failure. A success hands the turn back with
+        // the key, so the unlocked state is committed before the next attempt
+        // is admitted and no failure recorded after it is wiped out by it.
+        let accounting = server.clone();
+        let (key, turn) = match tokio::task::spawn_blocking(move || {
             let mut password = password;
             let derived = crypto::derive_verified_key_from_stored_config(&config, &password);
             crypto::zero_string(&mut password);
-            derived
+            match derived {
+                Ok(key) => Ok((key, turn)),
+                Err(err @ crypto::StoredVaultKeyDerivationError::WrongPassword) => {
+                    // The recorder always refuses; its message names a new lockout.
+                    Err(match record_vault_unlock_failure(&accounting) {
+                        Err(recorded) => recorded,
+                        Ok(_) => err.to_string(),
+                    })
+                }
+                Err(err) => Err(err.to_string()),
+            }
         })
         .await
         {
-            Ok(Ok(key)) => key,
-            Ok(Err(crypto::StoredVaultKeyDerivationError::WrongPassword)) => {
-                return record_vault_unlock_failure(server);
-            }
-            Ok(Err(err)) => return Err(err.to_string()),
+            Ok(Ok(verified)) => verified,
+            Ok(Err(err)) => return Err(err),
             Err(err) => return Err(format!("vault unlock derivation task failed: {err}")),
         };
 
@@ -120,6 +133,7 @@ pub(crate) async fn handle_vault_unlock(
             v.unlock_time = Some(Instant::now());
             v.failed_attempts = (0, None);
         }
+        drop(turn);
 
         serde_json::to_string(&json!({
             "unlocked": true
