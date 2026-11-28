@@ -53,6 +53,27 @@ fn daemon_mismatch_detects_foreign_version() {
     assert!(reason.contains(env!("CARGO_PKG_VERSION")));
 }
 
+/// The installer stops a foreign daemon only on a version mismatch. One that
+/// belongs to another database scope and also runs another version must be
+/// reported by its scope, or the installer would stop it.
+#[test]
+fn daemon_mismatch_reports_another_database_scope_before_its_version() {
+    let global = PathBuf::from("/tmp/status/global/memory.db");
+    let info = DaemonPidInfo {
+        pid: Some(42),
+        port: Some(6919),
+        version: Some("1.3.0".to_string()),
+        global_db: Some("/elsewhere/tachi-memory.db".to_string()),
+        project_db: None,
+    };
+    let reason = daemon_mismatch_reason(42, Some(&info), &global)
+        .expect("another scope's daemon is foreign");
+    assert!(
+        reason.starts_with("daemon global_db /elsewhere/tachi-memory.db"),
+        "{reason}"
+    );
+}
+
 #[test]
 fn daemon_mismatch_detects_pid_file_lock_pid_disagreement() {
     let global = PathBuf::from("/tmp/status/global/memory.db");

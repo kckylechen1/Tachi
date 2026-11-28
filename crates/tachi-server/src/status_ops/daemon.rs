@@ -318,6 +318,19 @@ pub(crate) fn daemon_mismatch_reason(
             ));
         }
     }
+    // Scope before version. The installer stops a daemon only on a version
+    // mismatch, which is the upgrade path for this scope's own daemon. One
+    // that belongs to another database scope must be named by that, whatever
+    // version it runs, or the installer would stop it.
+    if let Some(daemon_global) = info.global_db.as_deref() {
+        if !daemon_global.is_empty() && !path_matches_string(global_db_path, daemon_global) {
+            return Some(format!(
+                "daemon global_db {} does not match {}",
+                daemon_global,
+                global_db_path.display()
+            ));
+        }
+    }
     match info.version.as_deref() {
         Some(version) => {
             if version != env!("CARGO_PKG_VERSION") {
@@ -328,15 +341,6 @@ pub(crate) fn daemon_mismatch_reason(
             }
         }
         None => return Some("daemon.pid missing version".to_string()),
-    }
-    if let Some(daemon_global) = info.global_db.as_deref() {
-        if !daemon_global.is_empty() && !path_matches_string(global_db_path, daemon_global) {
-            return Some(format!(
-                "daemon global_db {} does not match {}",
-                daemon_global,
-                global_db_path.display()
-            ));
-        }
     }
     None
 }

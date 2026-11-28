@@ -127,6 +127,52 @@ class PackageReleaseBinaryTests(unittest.TestCase):
             f"{sig_line}{digest}  tachi-v{VERSION}-{triple}.tar.gz\n",
         )
 
+    def test_an_apple_triple_is_not_packaged_unsigned_from_another_host(self) -> None:
+        triple = "aarch64-apple-darwin"
+        self.write_tool("rustc", "#!/bin/sh\nprintf 'host: aarch64-unknown-linux-gnu\\n'\n")
+        self.write_tool("uname", "#!/bin/sh\necho Linux\n")
+        self.stage_binary(triple, runs=False)
+
+        result = self.run_packager("--triple", triple)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refusing to package", result.stderr)
+        self.assertEqual(self.lines(self.codesign_log), [])
+        self.assertEqual(self.lines(self.smoke_log), [])
+        self.assertEqual([entry.name for entry in self.out.iterdir()], [], "an unsigned tarball was produced")
+
+    def test_a_failed_manifest_rewrite_leaves_the_existing_sums_untouched(self) -> None:
+        triple = "aarch64-apple-darwin"
+        self.write_tool("rustc", "#!/bin/sh\nprintf 'host: x86_64-apple-darwin\\n'\n")
+        self.stage_binary(triple, runs=False)
+        # `awk` reads the manifest with `-v target=`. It dies part-way there and
+        # keeps working for the digest line.
+        self.write_tool(
+            "awk",
+            '#!/bin/sh\ncase "$1" in\n  -v) printf \'%s\\n\' "half a line"; exit 1;;\nesac\n'
+            'exec /usr/bin/awk "$@"\n',
+        )
+        sums = self.out / f"tachi-v{VERSION}-SHASUMS256.txt"
+        sig_line = f"{'0' * 64}  tachi-v{VERSION}-{triple}.tar.gz.sig\n"
+        old_line = f"{'1' * 64}  tachi-v{VERSION}-{triple}.tar.gz\n"
+        sums.write_text(sig_line + old_line, encoding="utf-8")
+
+        result = self.run_packager("--triple", triple)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not rewrite", result.stderr)
+        self.assertEqual(
+            sums.read_text(encoding="utf-8"),
+            sig_line + old_line,
+            "the manifest was replaced by an incomplete one",
+        )
+        leftovers = [
+            entry.name
+            for entry in self.out.iterdir()
+            if entry.name.startswith(".tachi-SHASUMS256")
+        ]
+        self.assertEqual(leftovers, [], "a temporary manifest was left behind")
+
 
 if __name__ == "__main__":
     unittest.main()
