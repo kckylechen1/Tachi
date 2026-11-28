@@ -77,6 +77,40 @@ async fn project_bindings_do_not_cross_into_a_nested_checkout() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn project_bindings_follow_an_alias_with_a_missing_suffix_to_its_own_checkout() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let outer = tempfile::tempdir().unwrap();
+    write_bindings(outer.path(), "OUTER_KEY=vault:OUTER_KEY\n");
+    let nested = outer.path().join("vendor/nested");
+    fs::create_dir_all(nested.join(".git")).unwrap();
+    fs::create_dir(nested.join("existing")).unwrap();
+    let alias = outer.path().join("alias");
+    symlink(nested.join("existing"), &alias).unwrap();
+    let missing_cwd = alias.join("nonexistent_subdir/child");
+
+    assert!(crate::vault_ops::env::load_project_vault_env(&missing_cwd)
+        .unwrap()
+        .is_none());
+
+    write_bindings(&nested, "NESTED_KEY=vault:NESTED_KEY\n");
+    let (path, bindings, _) = crate::vault_ops::load_project_env_bindings(&missing_cwd).unwrap();
+    assert_eq!(
+        path,
+        nested.canonicalize().unwrap().join(".tachi/vault.env")
+    );
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].env_name, "NESTED_KEY");
+
+    let dangling = outer.path().join("dangling");
+    symlink(nested.join("absent"), &dangling).unwrap();
+    assert!(crate::vault_ops::load_project_vault_env(&dangling.join("child")).is_err());
+    assert!(crate::vault_ops::load_project_vault_env(&alias.join("missing/../child")).is_err());
+}
+
 // A binding file reached through a symlink is not project content; refusing
 // it keeps the file from becoming a read of whatever the link names.
 #[cfg(unix)]

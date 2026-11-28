@@ -4,6 +4,7 @@ use crate::MemoryServer;
 use memcore::HubCapability;
 use serde_json::json;
 use std::collections::HashSet;
+use std::io;
 use std::path::PathBuf;
 use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
 
@@ -14,6 +15,53 @@ mod ownership_tests;
 #[cfg(all(test, unix))]
 #[path = "export_file_tests.rs"]
 mod file_tests;
+
+#[cfg(all(test, unix))]
+#[test]
+fn hub_file_exports_replace_a_hardlink_without_changing_the_linked_file() {
+    use std::fs;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let external = root.join("external");
+    fs::write(&external, "external bytes").unwrap();
+    let output = ExportDir::open_or_create(root.join("out")).unwrap();
+    let leaf = output.path.join("skill.md");
+    fs::hard_link(&external, &leaf).unwrap();
+
+    output.write_file("skill.md", "exported bytes").unwrap();
+
+    assert_eq!(fs::read_to_string(&external).unwrap(), "external bytes");
+    assert_eq!(fs::read_to_string(&leaf).unwrap(), "exported bytes");
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn hub_file_exports_preserve_private_0600_mode_on_overwrite() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let output = ExportDir::open_or_create(root.join("out")).unwrap();
+    let leaf = output.path.join("private-skill.md");
+    fs::write(&leaf, "initial private content").unwrap();
+    fs::set_permissions(&leaf, fs::Permissions::from_mode(0o600)).unwrap();
+
+    output
+        .write_file("private-skill.md", "updated private content")
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&leaf).unwrap(),
+        "updated private content"
+    );
+    let mode = fs::symlink_metadata(&leaf).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "re-exporting over a 0600 file must not widen permissions"
+    );
+}
 
 fn claude_cleanup_report(requested: bool) -> serde_json::Value {
     json!({
@@ -250,10 +298,22 @@ struct ExportDir {
     fd: std::os::fd::OwnedFd,
 }
 
+fn check_export_destination(file_name: &str, is_regular: io::Result<bool>) -> io::Result<()> {
+    match is_regular {
+        Ok(true) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(false) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to replace non-regular export file: {file_name}"),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(unix)]
 mod export_dir_unix {
-    use super::ExportDir;
-    use std::ffi::{CString, OsStr};
+    use super::{check_export_destination, ExportDir};
+    use std::ffi::{CStr, CString, OsStr};
     use std::fs::File;
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -402,20 +462,23 @@ mod export_dir_unix {
         }
 
         pub(super) fn write_file(&self, file_name: &str, content: &str) -> io::Result<()> {
-            let c_name = c_component(OsStr::new(file_name))?;
-            // SAFETY: `self.fd` is an open directory fd; O_NOFOLLOW | O_NONBLOCK
-            // refuses symlinks and FIFOs without blocking.
+            let destination = c_component(OsStr::new(file_name))?;
+            let temporary = CString::new(format!(".tachi-export-{}", uuid::Uuid::new_v4()))
+                .expect("generated temporary name has no NUL");
+            // Create the staging file owner-only (0600) so contents are never
+            // exposed to other local users prior to publication.
+            // SAFETY: the directory fd is live, the name is a single
+            // component and O_CREAT consumes the supplied mode.
             let fd = unsafe {
                 libc::openat(
                     self.fd.as_raw_fd(),
-                    c_name.as_ptr(),
+                    temporary.as_ptr(),
                     libc::O_WRONLY
                         | libc::O_CREAT
-                        | libc::O_TRUNC
+                        | libc::O_EXCL
                         | libc::O_NOFOLLOW
-                        | libc::O_NONBLOCK
                         | libc::O_CLOEXEC,
-                    0o644 as libc::c_uint,
+                    0o600 as libc::c_uint,
                 )
             };
             if fd < 0 {
@@ -423,17 +486,64 @@ mod export_dir_unix {
             }
             // SAFETY: `fd` is freshly opened and exclusively owned.
             let mut file = unsafe { File::from_raw_fd(fd) };
-            if !file.metadata()?.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("refusing to write non-regular file: {file_name}"),
-                ));
+            let result = file
+                .write_all(content.as_bytes())
+                .and_then(|()| {
+                    let existing = self.stat_entry(&destination);
+                    check_export_destination(
+                        file_name,
+                        existing
+                            .as_ref()
+                            .map(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFREG)
+                            .map_err(|err| {
+                                io::Error::from_raw_os_error(err.raw_os_error().unwrap_or(0))
+                            }),
+                    )?;
+                    if let Ok(stat) = existing {
+                        let target_mode = (stat.st_mode & 0o666) as libc::mode_t;
+                        if target_mode != 0o600 {
+                            // SAFETY: `file` owns a live fd; fchmod preserves existing
+                            // regular-file access bits without widening 0600 files.
+                            if unsafe { libc::fchmod(file.as_raw_fd(), target_mode) } != 0 {
+                                return Err(io::Error::last_os_error());
+                            }
+                        }
+                    }
+                    file.sync_all()
+                })
+                .and_then(|()| {
+                    drop(file);
+                    // SAFETY: both names are single components under the
+                    // live fd. renameat replaces the entry without opening it.
+                    let result = unsafe {
+                        libc::renameat(
+                            self.fd.as_raw_fd(),
+                            temporary.as_ptr(),
+                            self.fd.as_raw_fd(),
+                            destination.as_ptr(),
+                        )
+                    };
+                    if result == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            if result.is_err() {
+                let _ = self.unlink_file(&temporary);
             }
-            file.write_all(content.as_bytes())
+            result
         }
 
         pub(super) fn remove_regular_file(&self, file_name: &OsStr) -> io::Result<()> {
             let c_name = c_component(file_name)?;
+            if self.is_regular_file(&c_name)? {
+                self.unlink_file(&c_name)?;
+            }
+            Ok(())
+        }
+
+        fn stat_entry(&self, c_name: &CStr) -> io::Result<libc::stat> {
             let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
             // SAFETY: `self.fd` is live, `c_name` is one component, AT_SYMLINK_NOFOLLOW
             // inspects the link itself rather than its target.
@@ -449,10 +559,14 @@ mod export_dir_unix {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: fstatat succeeded and initialized `stat`.
-            let stat = unsafe { stat.assume_init() };
-            if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
-                return Ok(());
-            }
+            Ok(unsafe { stat.assume_init() })
+        }
+
+        fn is_regular_file(&self, c_name: &CStr) -> io::Result<bool> {
+            Ok((self.stat_entry(c_name)?.st_mode & libc::S_IFMT) == libc::S_IFREG)
+        }
+
+        fn unlink_file(&self, c_name: &CStr) -> io::Result<()> {
             // SAFETY: `unlinkat` without AT_REMOVEDIR never removes directories or follows symlinks.
             if unsafe { libc::unlinkat(self.fd.as_raw_fd(), c_name.as_ptr(), 0) } != 0 {
                 Err(io::Error::last_os_error())
@@ -471,7 +585,34 @@ impl ExportDir {
     }
 
     fn write_file(&self, file_name: &str, content: &str) -> std::io::Result<()> {
-        std::fs::write(self.path.join(file_name), content)
+        use std::fs;
+        use std::io::Write;
+
+        let destination = self.path.join(file_name);
+        let temporary = self
+            .path
+            .join(format!(".tachi-export-{}", uuid::Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let written = file
+            .write_all(content.as_bytes())
+            .and_then(|()| file.sync_all());
+        drop(file);
+
+        let result = written
+            .and_then(|()| {
+                check_export_destination(
+                    file_name,
+                    destination.symlink_metadata().map(|meta| meta.is_file()),
+                )
+            })
+            .and_then(|()| fs::rename(&temporary, &destination));
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn remove_regular_file(&self, file_name: &std::ffi::OsStr) -> std::io::Result<()> {

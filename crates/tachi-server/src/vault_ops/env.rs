@@ -2,7 +2,9 @@ use crate::vault_ops::ctx::*;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Component, Path, PathBuf};
 
 use super::access::{load_unlocked_vault_secrets, read_unlocked_vault_secret};
 use super::load_unlocked_api_key_secret_pools;
@@ -136,27 +138,67 @@ pub(crate) struct ProjectVaultEnv {
 /// the project around it. The file is read through directory descriptors, so
 /// neither it nor `.tachi` can be a symlink leading out of that directory.
 pub(crate) fn load_project_vault_env(cwd: &Path) -> Result<Option<ProjectVaultEnv>, String> {
-    let start = if cwd.is_file() {
-        cwd.parent().unwrap_or(cwd)
-    } else {
-        cwd
-    };
+    let start = project_vault_env_start(cwd).map_err(|err| {
+        format!(
+            "Failed to resolve project location {}: {err}",
+            cwd.display()
+        )
+    })?;
     for dir in start.ancestors() {
-        // A removed cwd still has ancestors that may carry bindings.
-        if std::fs::symlink_metadata(dir).is_err() {
-            continue;
-        }
         for name in PROJECT_ENV_FILE_NAMES {
             let path = dir.join(".tachi").join(name);
             if let Some(contents) = read_project_vault_env_file(dir, &path)? {
                 return Ok(Some(ProjectVaultEnv { path, contents }));
             }
         }
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-            return Ok(None);
+        let marker = dir.join(".git");
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => return Ok(None),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("Failed to inspect {}: {err}", marker.display())),
         }
     }
     Ok(None)
+}
+
+fn project_vault_env_start(cwd: &Path) -> io::Result<PathBuf> {
+    if cwd.components().any(|part| part == Component::ParentDir) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "project location must not contain '..'",
+        ));
+    }
+    let absolute = std::path::absolute(cwd)?;
+    // Normalize separators so symlink_metadata sees a dangling link even
+    // when the caller supplied a trailing slash.
+    let mut candidate: PathBuf = absolute.components().collect();
+    let mut allow_file = true;
+    loop {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let resolved = candidate.canonicalize()?;
+                let metadata = fs::metadata(&resolved)?;
+                if metadata.is_dir() {
+                    return Ok(resolved);
+                }
+                if allow_file && metadata.is_file() {
+                    return resolved
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .ok_or_else(|| ErrorKind::NotADirectory.into());
+                }
+                return Err(io::Error::new(
+                    ErrorKind::NotADirectory,
+                    format!("{} is not a directory", candidate.display()),
+                ));
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound && candidate.file_name().is_some() => {
+                candidate.pop();
+                allow_file = false;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 #[cfg(unix)]
