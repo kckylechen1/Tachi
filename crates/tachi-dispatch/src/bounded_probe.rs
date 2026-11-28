@@ -1,0 +1,891 @@
+//! Bounded probes of vendor processes, for answers the daemon needs before it
+//! goes on: run one process to its end or to a deadline, read what it printed,
+//! and leave nothing of its process group behind.
+//!
+//! Two conditions hold for the whole module, and the first is checked before
+//! anything is started. Children stay waitable: SIGCHLD is not ignored and
+//! `SA_NOCLDWAIT` is not set, and the disposition is not changed while a probe
+//! runs, so an ended leader stays a zombie until it is waited for. And nothing
+//! else in this process waits for a child it did not start. Together they keep
+//! an ended leader's PID, and its group's ID, from being given to another
+//! process while a group signal is still to be sent.
+//!
+//! A probe reaches ordinary descendants. A process that leaves the group with
+//! `setsid` or `setpgid` is not reached, and nothing here waits for its end.
+//!
+//! What a probe hands out is whole for writers that close their pipes and
+//! leave them closed, and for so long as nothing else reads those pipes. A
+//! process that opens a pipe for writing again after closing it, which Linux's
+//! procfs allows, is outside what this module can establish: such a writer can
+//! be cut short by the reclaim, and until the process has ended its pipe is
+//! not read from again. Nor is a second reader, which the same way can get at
+//! a pipe: what it reads is not in the output.
+
+use std::io;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+/// The leader of its own process group, and this process's to reap.
+///
+/// The leader stays unreaped until every group signal has been sent. Reaping
+/// it frees its PID, and with it the group's ID, and a signal sent to the
+/// group afterwards would reach whoever was given that number next.
+pub(crate) struct GroupProcess {
+    child: Child,
+    owns_root: bool,
+}
+
+impl GroupProcess {
+    /// Starts `command` as the leader of a new process group.
+    ///
+    /// Refused when children of this process would not stay waitable. The
+    /// leader has to remain an unreaped zombie after it ends, or its group's
+    /// ID could be given away under a signal still meant for it.
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+        let mut disposition: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: asks for this process's current SIGCHLD disposition and
+        // writes it only into `disposition`.
+        if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut disposition) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let reaped_by_the_kernel = disposition.sa_sigaction == libc::SIG_IGN
+            || disposition.sa_flags & libc::SA_NOCLDWAIT != 0;
+        if reaped_by_the_kernel {
+            return Err(io::Error::other(
+                "children of this process are reaped on their own, so a probe group cannot be reclaimed safely",
+            ));
+        }
+        let child = command.process_group(0).spawn()?;
+        Ok(Self {
+            child,
+            owns_root: true,
+        })
+    }
+
+    pub(crate) fn child_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
+    /// Whether the leader has ended. It is left unreaped, so its PID and its
+    /// group's ID stay reserved.
+    pub(crate) fn observe_exit(&mut self) -> io::Result<bool> {
+        if !self.owns_root {
+            return Err(io::Error::other("probe child ownership was lost"));
+        }
+        // WNOWAIT reserves the child's PID/PGID even after its normal exit.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waits on this process's own child and writes only into `info`.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                self.owns_root = false;
+            }
+            return Err(error);
+        }
+        Ok(unsafe { info.si_pid() } != 0)
+    }
+
+    /// Stops and kills the group, then reaps the leader. No group signal
+    /// follows the reap.
+    ///
+    /// The stop is sent first because a stopped member cannot fork. That
+    /// narrows the window in which a member forks a new one that the kill then
+    /// misses; a member may still fork between the two signals, and a member
+    /// running under credentials this process cannot signal is not reached.
+    pub(crate) fn terminate_and_reap(&mut self) -> io::Result<ExitStatus> {
+        if !self.owns_root {
+            return Err(io::Error::other("probe child ownership was lost"));
+        }
+        let _exit_observed = match self.observe_exit() {
+            Ok(exited) => exited,
+            Err(error) if !self.owns_root => return Err(error),
+            Err(_) => false,
+        };
+        // SAFETY: process_group(0) created this group, and WNOWAIT has not
+        // consumed its leader. No termination signal follows an attempt to
+        // reap it.
+        let pgid = self.child.id() as libc::pid_t;
+        unsafe { libc::kill(-pgid, libc::SIGSTOP) };
+        let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        let signal_error = (result != 0)
+            .then(io::Error::last_os_error)
+            .filter(|error| error.raw_os_error() != Some(libc::ESRCH));
+        if signal_error.is_some() {
+            let _ = self.child.kill();
+        }
+        self.owns_root = false;
+        let status = self.child.wait();
+        #[cfg(target_os = "macos")]
+        let signal_error = signal_error.filter(|error| {
+            // Darwin skips zombie group members and can return EPERM for a
+            // sole unreaped leader. Only definite absence after a successful
+            // reap resolves that error; live or unobservable groups still fail.
+            !(_exit_observed
+                && status.is_ok()
+                && error.raw_os_error() == Some(libc::EPERM)
+                && group_is_absent(pgid))
+        });
+        match signal_error {
+            Some(error) => Err(error),
+            None => status,
+        }
+    }
+}
+
+impl Drop for GroupProcess {
+    fn drop(&mut self) {
+        if self.owns_root {
+            let _ = self.terminate_and_reap();
+        }
+    }
+}
+
+/// Whether nothing is left of a process group, as far as a signal can tell.
+#[cfg(any(target_os = "macos", test))]
+fn group_is_absent(pgid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 is only an existence/permission query. A recycled PGID
+    // can make this proof fail conservatively, but receives no termination signal.
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// How long a probe may take, and how much it may print on each stream. A
+/// stream without a limit is not opened: what the process prints there is
+/// discarded.
+#[derive(Clone, Copy)]
+pub(crate) struct ProbeLimits {
+    pub timeout: Duration,
+    pub stdout_bytes: usize,
+    pub stderr_bytes: Option<usize>,
+}
+
+/// A probe that ran to its end.
+pub(crate) struct ProbeOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Why a probe gave nothing. Every case is a refusal: a caller never acts on
+/// part of what a probe printed.
+#[derive(Debug)]
+pub(crate) enum ProbeFailure {
+    /// The deadline passed while the process was still running, or the owner
+    /// of the probe had not answered by then and the time given to reclaim.
+    TimedOut,
+    /// The process had ended, but its output was not seen ended by the
+    /// deadline, or something was written to it after it had ended.
+    OutputOpen,
+    /// A stream printed past its limit.
+    OverLimit,
+    /// It could not be started, read or finished, or children of this process
+    /// do not stay waitable.
+    Io,
+}
+
+/// A pipe held open by a descendant would not wake a wait once the leader has
+/// ended, so the leader is asked this often while a pipe is open. With every
+/// pipe ended it is asked this often until it ends.
+const OUTPUT_POLL: Duration = Duration::from_millis(50);
+const EXIT_POLL: Duration = Duration::from_millis(5);
+/// How long after the deadline the owner of a probe is given to reclaim the
+/// group and answer. It is spent only when killing or reaping is slow.
+const RECLAIM_MARGIN: Duration = Duration::from_secs(5);
+
+/// What one read of a pipe found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Nothing more can come: every writer has closed the pipe.
+    Ended,
+    /// A writer still holds the pipe and has written nothing more for now.
+    Open,
+}
+
+/// One output pipe of the probe, read without a thread.
+struct Stream {
+    fd: std::os::fd::OwnedFd,
+    limit: usize,
+    bytes: Vec<u8>,
+    /// A read said the pipe had ended. It is asked again before that counts.
+    ended: bool,
+}
+
+impl Stream {
+    /// Takes the pipe and makes a read on it return at once.
+    fn open(fd: std::os::fd::OwnedFd, limit: usize) -> Result<Self, ProbeFailure> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl only inspects and sets flags on a descriptor this
+        // stream owns and keeps owning; it reads no memory of ours.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(ProbeFailure::Io);
+        }
+        Ok(Self {
+            fd,
+            limit,
+            bytes: Vec::new(),
+            ended: false,
+        })
+    }
+
+    /// Reads what the pipe holds now. A pipe that has ended still delivers
+    /// what it holds first.
+    fn read_available(&mut self) -> Result<Read, ProbeFailure> {
+        use std::os::fd::AsRawFd;
+        let mut buffer = [0u8; 8192];
+        loop {
+            // SAFETY: reads into `buffer`, which is live and as long as stated.
+            let count = unsafe {
+                libc::read(
+                    self.fd.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if count > 0 {
+                let count = count as usize;
+                if self.bytes.len() + count > self.limit {
+                    return Err(ProbeFailure::OverLimit);
+                }
+                self.bytes.extend_from_slice(&buffer[..count]);
+                continue;
+            }
+            if count == 0 {
+                return Ok(Read::Ended);
+            }
+            match io::Error::last_os_error().kind() {
+                io::ErrorKind::WouldBlock => return Ok(Read::Open),
+                io::ErrorKind::Interrupted => continue,
+                _ => return Err(ProbeFailure::Io),
+            }
+        }
+    }
+
+    /// Whether no writer holds the pipe any more. A pipe reports that as
+    /// hung up, whether or not it still holds what was written to it.
+    fn writers_are_gone(&self) -> Result<bool, ProbeFailure> {
+        use std::os::fd::AsRawFd;
+        // The read event has to be asked for: asked for nothing, a pipe on
+        // macOS reports nothing, not even that it is hung up.
+        let mut fds = [libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: `fds` is live for the call and holds one initialised entry.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, 0) };
+        if ready < 0 {
+            return Err(ProbeFailure::Io);
+        }
+        Ok(fds[0].revents & libc::POLLHUP != 0)
+    }
+}
+
+/// Waits up to `until` for any of the pipes to have more or to end.
+fn wait_for_output(streams: &mut [Stream], until: Instant) -> Result<(), ProbeFailure> {
+    use std::os::fd::AsRawFd;
+    let mut fds: Vec<libc::pollfd> = streams
+        .iter()
+        .filter(|stream| !stream.ended)
+        .map(|stream| libc::pollfd {
+            fd: stream.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let millis = i32::try_from(until.saturating_duration_since(Instant::now()).as_millis())
+        .unwrap_or(i32::MAX);
+    // SAFETY: `fds` is live for the call and holds only initialised entries.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+    if ready < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+        return Err(ProbeFailure::Io);
+    }
+    Ok(())
+}
+
+/// Asks of every pipe that reported its end whether a writer holds it again.
+/// One that has is read from again. On Linux a pipe can be given a new writer
+/// after it ended, while the process is still running.
+fn no_writer_is_back(streams: &mut [Stream]) -> Result<bool, ProbeFailure> {
+    let mut none = true;
+    for stream in streams.iter_mut() {
+        if !stream.writers_are_gone()? {
+            stream.ended = false;
+            none = false;
+        }
+    }
+    Ok(none)
+}
+
+/// Runs the probe and reclaims its group.
+///
+/// The output is handed out only when the end of the process and the end of
+/// every pipe were seen by the deadline, and no pipe had a writer when it was
+/// last asked, before the clock was read for that decision: a pipe closed by
+/// the kill could have cut a writer short.
+fn supervise(
+    command: Command,
+    limits: &ProbeLimits,
+    deadline: Instant,
+) -> Result<ProbeOutput, ProbeFailure> {
+    // An owner that got the processor too late starts nothing.
+    if Instant::now() >= deadline {
+        return Err(ProbeFailure::TimedOut);
+    }
+    let mut command = command;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(if limits.stderr_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    // On every exit from here that is not a completed probe, dropping
+    // `process` stops and kills the group and reaps the leader.
+    let mut process = GroupProcess::spawn(&mut command).map_err(|_| ProbeFailure::Io)?;
+    // Starting took past the deadline. The process is reclaimed on the way
+    // out, and gets no time of its own.
+    if Instant::now() >= deadline {
+        return Err(ProbeFailure::TimedOut);
+    }
+    let stdout = process
+        .child_mut()
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .into();
+    let mut streams = vec![Stream::open(stdout, limits.stdout_bytes)?];
+    if let Some(limit) = limits.stderr_bytes {
+        let stderr = process
+            .child_mut()
+            .stderr
+            .take()
+            .expect("piped stderr")
+            .into();
+        streams.push(Stream::open(stderr, limit)?);
+    }
+
+    let refusal = loop {
+        for stream in &mut streams {
+            if !stream.ended && stream.read_available()? == Read::Ended {
+                stream.ended = true;
+            }
+        }
+        // Asked on every round, and before the clock is read: a decision is
+        // made only on what was seen by then.
+        let leader_ended = process.observe_exit().map_err(|_| ProbeFailure::Io)?;
+        if leader_ended
+            && streams.iter().all(|stream| stream.ended)
+            && no_writer_is_back(&mut streams)?
+        {
+            // The clock is read after the last of these observations, so
+            // that everything an acceptance rests on was seen by the deadline.
+            break if Instant::now() < deadline {
+                None
+            } else {
+                Some(ProbeFailure::OutputOpen)
+            };
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break Some(if leader_ended {
+                ProbeFailure::OutputOpen
+            } else {
+                ProbeFailure::TimedOut
+            });
+        }
+        let output_open = streams.iter().any(|stream| !stream.ended);
+        let until = deadline.min(now + if output_open { OUTPUT_POLL } else { EXIT_POLL });
+        wait_for_output(&mut streams, until)?;
+    };
+
+    // The group is stopped and killed whether the probe ended or not: what
+    // the process left running in it is not meant to outlive the probe.
+    let status = process.terminate_and_reap().map_err(|_| ProbeFailure::Io)?;
+    if let Some(refusal) = refusal {
+        return Err(refusal);
+    }
+    // With the group gone nothing in it can write any more. A pipe that still
+    // has a writer, or that received anything since its end was seen, means
+    // the output is not whole.
+    for stream in &mut streams {
+        let before = stream.bytes.len();
+        if stream.read_available()? != Read::Ended || stream.bytes.len() != before {
+            return Err(ProbeFailure::OutputOpen);
+        }
+    }
+    let stderr = if streams.len() == 2 {
+        streams.pop().map(|stream| stream.bytes).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let stdout = streams.pop().map(|stream| stream.bytes).unwrap_or_default();
+    Ok(ProbeOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Runs `command` to its end, or to `limits.timeout`, and reclaims its process
+/// group either way. The output is complete or there is none of it.
+///
+/// The caller's wait for the answer ends by `limits.timeout` plus the time
+/// given to reclaim, counted from the call, apart from the time the system
+/// takes to start the owner thread. Starting a process, and waiting for one
+/// that could not be killed, can stall in the kernel. So one owner runs the
+/// whole probe on a thread of its own, under the same deadline the caller
+/// counts from, and an owner that has not answered in time goes on
+/// reclaiming by itself.
+pub(crate) fn run_bounded_probe(
+    command: Command,
+    limits: &ProbeLimits,
+) -> Result<ProbeOutput, ProbeFailure> {
+    // One deadline, fixed before anything is started, for the caller's wait
+    // and for the owner alike.
+    let answer_by = Instant::now() + limits.timeout + RECLAIM_MARGIN;
+    let deadline = answer_by - RECLAIM_MARGIN;
+    let limits = *limits;
+    let (answer, waited) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("tachi-probe".into())
+        .spawn(move || {
+            let _ = answer.send(supervise(command, &limits, deadline));
+        })
+        .map_err(|_| ProbeFailure::Io)?;
+    match waited.recv_timeout(answer_by.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ProbeFailure::TimedOut),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ProbeFailure::Io),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A stand-in for a vendor binary: a shell script with a directory of
+    /// its own for what it writes.
+    struct StandIn {
+        root: std::path::PathBuf,
+        program: std::path::PathBuf,
+    }
+
+    impl StandIn {
+        fn new(name: &str) -> Self {
+            // A directory per run: a leftover one from an aborted earlier run
+            // must not fail this one (#2340).
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "tachi-bounded-probe-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).expect("stand-in root");
+            let program = root.join("program");
+            Self { root, program }
+        }
+
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.root.join(name)
+        }
+
+        fn write(&self, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&self.program, format!("#!/bin/sh\n{body}\n")).expect("stand-in script");
+            std::fs::set_permissions(&self.program, std::fs::Permissions::from_mode(0o700))
+                .expect("stand-in mode");
+        }
+
+        fn command(&self) -> Command {
+            Command::new(&self.program)
+        }
+
+        /// Removes the stand-in's own directory, and nothing above it.
+        fn remove(&self) {
+            assert_ne!(self.root, std::env::temp_dir());
+            assert!(self.root.starts_with(std::env::temp_dir()));
+            std::fs::remove_dir_all(&self.root).expect("remove stand-in root");
+        }
+    }
+
+    fn limits(timeout: Duration, stdout_bytes: usize, stderr_bytes: Option<usize>) -> ProbeLimits {
+        ProbeLimits {
+            timeout,
+            stdout_bytes,
+            stderr_bytes,
+        }
+    }
+
+    fn alive(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 is only an existence/permission query.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// The pid a stand-in wrote down, once it has.
+    fn pid_from(path: &Path) -> Option<libc::pid_t> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+    }
+
+    /// Waits, for at most `within`, for a process to be gone. The probe's own
+    /// child is reaped before the probe answers, so it must be gone at once. A
+    /// descendant it killed is an orphan, and may stay a zombie until init
+    /// reaps it, so liveness is asked again until it is no.
+    fn wait_until_gone(what: &str, pid_file: &Path, within: Duration) {
+        let deadline = Instant::now() + within;
+        loop {
+            let Some(pid) = pid_from(pid_file) else {
+                return;
+            };
+            assert!(
+                Instant::now() < deadline,
+                "{what} (pid {pid}) is still alive"
+            );
+            if !alive(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn reads_what_a_fast_exit_left_in_the_pipe() {
+        // More than one read holds, with the last line the one that matters.
+        let stand_in = StandIn::new("tail");
+        stand_in.write("head -c 200000 /dev/zero | tr '\\0' x\nprintf '\\nthe end\\n'");
+        let output = run_bounded_probe(
+            stand_in.command(),
+            &limits(Duration::from_secs(5), 300_000, None),
+        )
+        .expect("a probe that ended");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 200_009);
+        assert!(output.stdout.ends_with(b"\nthe end\n"));
+        assert!(output.stderr.is_empty());
+        stand_in.remove();
+    }
+
+    #[test]
+    fn the_status_is_the_leaders_and_stderr_is_read_only_when_asked_for() {
+        let stand_in = StandIn::new("status");
+        stand_in.write("printf 'note' >&2\nexit 7");
+        let output = run_bounded_probe(
+            stand_in.command(),
+            &limits(Duration::from_secs(5), 1024, Some(1024)),
+        )
+        .expect("a probe that ended");
+        assert_eq!(output.status.code(), Some(7));
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"note");
+        stand_in.remove();
+
+        let stand_in = StandIn::new("status-no-stderr");
+        stand_in.write("printf 'note' >&2\nexit 7");
+        let output = run_bounded_probe(
+            stand_in.command(),
+            &limits(Duration::from_secs(5), 1024, None),
+        )
+        .expect("a probe that ended");
+        assert_eq!(output.status.code(), Some(7));
+        assert!(output.stderr.is_empty());
+        stand_in.remove();
+    }
+
+    #[test]
+    fn output_past_the_limit_is_refused_and_nothing_is_left_behind() {
+        let stand_in = StandIn::new("over-limit");
+        let pid_file = stand_in.path("leader");
+        stand_in.write("echo $$ > \"$1\"\nwhile :; do printf 'xxxxxxxxxx'; done");
+        let mut command = stand_in.command();
+        command.arg(&pid_file);
+        let failure = run_bounded_probe(command, &limits(Duration::from_secs(10), 1_000, None))
+            .err()
+            .expect("output past the limit gives nothing");
+        assert!(matches!(failure, ProbeFailure::OverLimit), "{failure:?}");
+        wait_until_gone(
+            "a leader that printed past the limit",
+            &pid_file,
+            Duration::from_secs(2),
+        );
+        stand_in.remove();
+    }
+
+    #[test]
+    fn a_hanging_process_is_given_up_on_at_the_deadline_and_nothing_is_left_behind() {
+        let stand_in = StandIn::new("hanging");
+        let pid_file = stand_in.path("leader");
+        stand_in.write("echo $$ > \"$1\"\nexec sleep 20");
+        let mut command = stand_in.command();
+        command.arg(&pid_file);
+        let started = Instant::now();
+        let failure = run_bounded_probe(command, &limits(Duration::from_secs(1), 1024, None))
+            .err()
+            .expect("a probe past its deadline gives nothing");
+        assert!(matches!(failure, ProbeFailure::TimedOut), "{failure:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must end the probe: {:?}",
+            started.elapsed()
+        );
+        wait_until_gone(
+            "a leader that had to be killed",
+            &pid_file,
+            Duration::from_secs(2),
+        );
+        stand_in.remove();
+    }
+
+    #[test]
+    fn a_writer_that_outlives_the_leader_is_waited_for() {
+        // The leader prints its part, leaves a writer behind and ends. What it
+        // left behind finishes the output and ends by itself, so the output
+        // is whole. The leader prints before it starts the writer, so the
+        // order of the two parts does not depend on scheduling.
+        let stand_in = StandIn::new("late-writer");
+        stand_in.write("printf 'tool 1.2'\n(sleep 0.1; printf '.3\\n') &\nexit 0");
+        let output = run_bounded_probe(
+            stand_in.command(),
+            &limits(Duration::from_secs(5), 1024, None),
+        )
+        .expect("the output ended by itself");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"tool 1.2.3\n");
+        stand_in.remove();
+    }
+
+    #[test]
+    fn output_still_open_at_the_deadline_is_refused_and_nothing_is_left_behind() {
+        let stand_in = StandIn::new("orphan");
+        let marker = stand_in.path("leaked");
+        let pid_file = stand_in.path("descendant");
+        stand_in.write(&format!(
+            "(sleep 20; echo leaked > '{}') &\necho $! > '{}'\nprintf 'done'\nexit 0",
+            marker.display(),
+            pid_file.display()
+        ));
+        let started = Instant::now();
+        let failure = run_bounded_probe(
+            stand_in.command(),
+            &limits(Duration::from_secs(2), 1024, None),
+        )
+        .err()
+        .expect("output that never ends gives nothing");
+        // The leader ended well and printed its part. Killing what holds the
+        // pipe would make that part look whole, so it is not handed out.
+        assert!(matches!(failure, ProbeFailure::OutputOpen), "{failure:?}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "the writer gets the whole deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must end the probe: {:?}",
+            started.elapsed()
+        );
+        wait_until_gone(
+            "a descendant left behind by its leader",
+            &pid_file,
+            // Short of the 20 seconds the descendant would otherwise sleep.
+            Duration::from_secs(10),
+        );
+        assert!(!marker.exists(), "the descendant outlived the probe");
+        stand_in.remove();
+    }
+
+    /// Run again by the test below, as a descendant that leaves the group and
+    /// then holds on to the probe's pipe.
+    #[test]
+    fn pipe_holder() {
+        let Some(pid_file) = std::env::var_os("TACHI_BOUNDED_PROBE_HOLDER_PID") else {
+            return;
+        };
+        // SAFETY: setsid starts a session; it passes no pointers and aliases
+        // no memory. This process is not a group leader, so it succeeds.
+        unsafe { libc::setsid() };
+        std::fs::write(Path::new(&pid_file), std::process::id().to_string()).unwrap();
+        if let Some(ready) = std::env::var_os("TACHI_BOUNDED_PROBE_HOLDER_READY") {
+            std::fs::write(Path::new(&ready), b"ready").unwrap();
+        }
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_pipe_held_from_outside_the_group_is_given_up_on() {
+        let stand_in = StandIn::new("escaped");
+        let pid_file = stand_in.path("holder");
+        let ready = stand_in.path("escaped");
+        // The leader waits until the holder is out of the group, then ends.
+        stand_in.write(&format!(
+            "\"$1\" --exact bounded_probe::tests::pipe_holder --nocapture &
+while [ ! -f '{}' ]; do sleep 0.01; done
+printf 'done'
+exit 0",
+            ready.display()
+        ));
+        let mut command = stand_in.command();
+        command
+            .arg(std::env::current_exe().expect("test binary"))
+            .env("TACHI_BOUNDED_PROBE_HOLDER_PID", &pid_file)
+            .env("TACHI_BOUNDED_PROBE_HOLDER_READY", &ready);
+        let started = Instant::now();
+        let failure = run_bounded_probe(command, &limits(Duration::from_secs(4), 1024, None))
+            .err()
+            .expect("an output that never ends gives nothing");
+        assert!(matches!(failure, ProbeFailure::OutputOpen), "{failure:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "a pipe held from outside the group must not hold the probe: {:?}",
+            started.elapsed()
+        );
+        // The holder left the group, so the probe did not end it. It is this
+        // test's to end.
+        let pid = pid_from(&pid_file).expect("the holder wrote its pid");
+        // SAFETY: signals the pid the holder wrote down for this test.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        wait_until_gone("the pipe holder", &pid_file, Duration::from_secs(10));
+        stand_in.remove();
+    }
+
+    /// Run again by the test below, in a process of its own: it changes
+    /// SIGCHLD for the whole process it runs in.
+    #[test]
+    fn probe_with_children_reaped_by_the_kernel() {
+        let (Some(program), Some(marker)) = (
+            std::env::var_os("TACHI_BOUNDED_PROBE_PROGRAM"),
+            std::env::var_os("TACHI_BOUNDED_PROBE_MARKER"),
+        ) else {
+            return;
+        };
+        // SAFETY: sets the SIGCHLD disposition of this process, which exists
+        // for this test and ends with it.
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+        let failure = run_bounded_probe(
+            Command::new(program),
+            &limits(Duration::from_secs(5), 1024, None),
+        )
+        .err()
+        .expect("a probe refused before it starts");
+        assert!(matches!(failure, ProbeFailure::Io), "{failure:?}");
+        assert!(
+            !Path::new(&marker).exists(),
+            "the stand-in must not be started"
+        );
+    }
+
+    #[test]
+    fn a_process_whose_children_do_not_stay_waitable_is_refused_before_it_starts() {
+        let stand_in = StandIn::new("reaped-by-the-kernel");
+        let marker = stand_in.path("started");
+        stand_in.write(&format!("touch '{}'", marker.display()));
+        let status = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "bounded_probe::tests::probe_with_children_reaped_by_the_kernel",
+                "--nocapture",
+            ])
+            .env("TACHI_BOUNDED_PROBE_PROGRAM", &stand_in.program)
+            .env("TACHI_BOUNDED_PROBE_MARKER", &marker)
+            .status()
+            .expect("start the child test process");
+        assert!(status.success(), "the child test process failed");
+        assert!(!marker.exists(), "the stand-in must not be started");
+        stand_in.remove();
+    }
+
+    #[test]
+    fn a_pipe_is_reported_hung_up_only_once_no_writer_holds_it() {
+        use std::os::fd::FromRawFd;
+        let mut fds = [0; 2];
+        // SAFETY: creates a pipe and writes its two descriptors into `fds`.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: `fds[0]` is a fresh descriptor, which this test now owns.
+        let read_end = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: `fds[1]` is a fresh descriptor, which this test now owns.
+        let write_end = unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) };
+        let stream = Stream {
+            fd: read_end,
+            limit: 16,
+            bytes: Vec::new(),
+            ended: false,
+        };
+        assert!(
+            !stream.writers_are_gone().expect("ask the pipe"),
+            "a writer holds the pipe"
+        );
+        drop(write_end);
+        assert!(
+            stream.writers_are_gone().expect("ask the pipe"),
+            "no writer holds the pipe any more"
+        );
+    }
+
+    #[test]
+    fn group_absence_requires_reap_and_does_not_accept_live_or_zombie_members() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "read -r release; exit 7"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut process = GroupProcess::spawn(&mut command).unwrap();
+        let pgid = process.child.id() as libc::pid_t;
+        assert!(process.observe_exit().is_ok_and(|exited| !exited));
+        assert!(
+            !group_is_absent(pgid),
+            "a live process group must not clear a permission failure"
+        );
+
+        drop(process.child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !process.observe_exit().unwrap() {
+            assert!(Instant::now() < deadline, "fixture leader did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !group_is_absent(pgid),
+            "an unreaped zombie (including Darwin EPERM) is not definite absence"
+        );
+
+        // The child has already exited. Reap without further group signals;
+        // successful reap removes the last member and preserves its exit code.
+        process.owns_root = false;
+        assert_eq!(process.child.wait().unwrap().code(), Some(7));
+        assert!(group_is_absent(pgid));
+    }
+
+    #[test]
+    fn lost_child_ownership_disarms_all_later_group_signals() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let mut process = GroupProcess::spawn(&mut command).unwrap();
+        process.child.wait().unwrap();
+        assert_eq!(
+            process.observe_exit().unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert!(!process.owns_root);
+        assert!(process
+            .terminate_and_reap()
+            .unwrap_err()
+            .to_string()
+            .contains("ownership was lost"));
+    }
+}
