@@ -158,10 +158,20 @@ canonical_db_path() {
   esac
 }
 
+dotenv_may_override_db_scope() {
+  local path="$1" rc=0
+  [[ -e "$path" || -L "$path" ]] || return 1
+  [[ ! -L "$path" && -f "$path" && -r "$path" ]] || return 0
+  LC_ALL=C grep -q 'MEMORY_DB_PATH' "$path" 2>/dev/null || rc=$?
+  # Only exit 1 proves MEMORY_DB_PATH is absent without reading or printing secrets.
+  [[ "$rc" -ne 1 ]]
+}
+
 check_launch_agent_db() {
   local expected="$1" source="$2" domain="$3" arg db="" absolute resolved domain_print
   local user_home="" app_home="" sigil_home="" legacy_home="" environment_db="" memory_db_set=0
   local program="" cwd=/ workspace path
+  local has_daemon=0 has_no_project_db=0 only_serve_flags=1
   local -a declared=() launch_arguments=() launch_metadata=()
   local launch_environment_seen=0
   shift 3
@@ -185,7 +195,18 @@ check_launch_agent_db() {
         if (($#)); then shift; fi
         ;;
       --global-db=*) arg=${arg#*=} ;;
-      *) continue ;;
+      --daemon) has_daemon=1; continue ;;
+      --no-project-db) has_no_project_db=1; continue ;;
+      --allow-schema-migration)
+        existing_allow_schema_migration=1
+        continue
+        ;;
+      --port)
+        if (($#)) && [[ -n "$1" ]]; then shift; else only_serve_flags=0; fi
+        continue
+        ;;
+      --port=*) continue ;;
+      *) only_serve_flags=0; continue ;;
     esac
     if [[ -z "$arg" || -n "$db" ]]; then
       printf '❌ %s has an empty or repeated --global-db\n' "$source" >&2
@@ -258,18 +279,35 @@ check_launch_agent_db() {
     return 1
   fi
   if [[ -z "$db" ]]; then
-    # Dotenv or the manifest can override implicit paths. Require an explicit
-    # argument when those sources may contribute, without reading secrets.
-    local -a config=("$app_home/config.env" "$user_home/.sigil/config.env")
-    if ((!memory_db_set)); then
-      config+=("$app_home/manifest.json" "$app_home/secrets.env" "$user_home/.secrets/master.env")
+    if ((!only_serve_flags)); then
+      printf '❌ Cannot prove %s DB scope with unrecognized daemon arguments. Use an explicit --global-db.\n' "$source" >&2
+      return 1
     fi
-    for path in "${config[@]}"; do
-      if [[ -e "$path" || -L "$path" ]]; then
+    # Dotenv or the manifest can override implicit paths. Prove dotenv files
+    # cannot set MEMORY_DB_PATH without reading secrets into shell memory, and
+    # skip manifest.json only when `--daemon --no-project-db` serve flags match
+    # `should_defer_manifest_startup`.
+    local -a dotenv_files=(
+      "$app_home/config.env"
+      "$user_home/.tachi/config.env"
+      "$user_home/.sigil/config.env"
+      "$app_home/secrets.env"
+      "$user_home/.tachi/secrets.env"
+      "$user_home/.secrets/master.env"
+    )
+    for path in "${dotenv_files[@]}"; do
+      if dotenv_may_override_db_scope "$path"; then
         printf '❌ Cannot prove %s DB scope with implicit configuration at %s. Use an explicit --global-db.\n' "$source" "$path" >&2
         return 1
       fi
     done
+    if ! ((only_serve_flags && has_daemon && has_no_project_db)); then
+      path="$app_home/manifest.json"
+      if [[ -e "$path" || -L "$path" ]]; then
+        printf '❌ Cannot prove %s DB scope with implicit configuration at %s. Use an explicit --global-db.\n' "$source" "$path" >&2
+        return 1
+      fi
+    fi
   fi
   if [[ "$db" == /* ]]; then
     echo absolute
@@ -375,6 +413,13 @@ check_loaded_job_scope() {
     printf '❌ Cannot read the loaded LaunchAgent environment for %s\n' "$target" >&2
     return 1
   fi
+  local loaded_arg
+  for loaded_arg in ${launch_arguments[@]+"${launch_arguments[@]}"}; do
+    case "$loaded_arg" in
+      --) break ;;
+      --allow-schema-migration) existing_allow_schema_migration=1 ;;
+    esac
+  done
 }
 
 launchctl_bootstrap_plist() {
@@ -686,6 +731,7 @@ install_locked_daemon_service() {
   local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"
   local plist="$launch_agents/$label.plist"
   local expected job service_target absolute_db managed_pid="" print_error
+  local existing_allow_schema_migration=0 migration_arg=""
 
   # Ordinary installs use the default Agent surface. Preserve an explicitly
   # configured legacy restriction; daemon startup validates its selector.
@@ -751,6 +797,9 @@ install_locked_daemon_service() {
   # Written beside the target and renamed over it: launchd and the next run
   # of this script never see a half-written plist, and a failed write leaves
   # the previous one in place.
+  if ((existing_allow_schema_migration)); then
+    migration_arg=$'\n    <string>--allow-schema-migration</string>'
+  fi
   mkdir -p "$launch_agents" "$logs_dir" "$(dirname "$global_db")"
   install_plist_tmp=$(mktemp "$launch_agents/$label.plist.XXXXXX")
   if ! cat >"$install_plist_tmp" <<PLIST
@@ -769,7 +818,7 @@ install_locked_daemon_service() {
     <string>$DAEMON_PORT</string>
     <string>--global-db</string>
     <string>$(xml_escape "$global_db")</string>
-    <string>--no-project-db</string>
+    <string>--no-project-db</string>${migration_arg}
   </array>
   <key>WorkingDirectory</key>
   <string>$(xml_escape "$HOME")</string>
