@@ -828,6 +828,45 @@ pub enum HarnessAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only dry-run preflight of a layered instruction bundle against host targets
+    Plan {
+        /// Bundle directory containing `bundle.json` (defaults to `<home>/.tachi/instructions`)
+        #[arg(long, value_name = "PATH")]
+        source_dir: Option<PathBuf>,
+        /// Optional host-local markdown overlay (defaults to `<home>/.tachi/machine.local.md` if present)
+        #[arg(long, value_name = "PATH")]
+        machine_local: Option<PathBuf>,
+        /// Limit to one or more hosts (`constitution`, `codex`, `claude`, `gemini`, `antigravity`, `cursor`)
+        #[arg(long = "host", value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Override target home directory
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render and atomically project a layered instruction bundle onto host targets
+    Sync {
+        /// Bundle directory containing `bundle.json` (defaults to `<home>/.tachi/instructions`)
+        #[arg(long, value_name = "PATH")]
+        source_dir: Option<PathBuf>,
+        /// Optional host-local markdown overlay (defaults to `<home>/.tachi/machine.local.md` if present)
+        #[arg(long, value_name = "PATH")]
+        machine_local: Option<PathBuf>,
+        /// Limit to one or more hosts (`constitution`, `codex`, `claude`, `gemini`, `antigravity`, `cursor`)
+        #[arg(long = "host", value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Override target home directory
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Back up and adopt unmanaged files, symlinks, or locally edited targets
+        #[arg(long)]
+        adopt: bool,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Cross-harness injection-surface doctor (#1307): report-only inventory of

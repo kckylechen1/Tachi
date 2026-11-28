@@ -5,10 +5,21 @@ use tachi_bootstrap::cli::HarnessAction;
 
 use super::instruction_drift_sentinel::{build_instruction_drift_report, InstructionDriftReport};
 use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
+use super::instruction_sync::{
+    inspect_sync_stamp, print_sync_report, read_regular_file_bytes_nofollow, run_plan, run_sync,
+    SyncOptions, SyncStampState,
+};
 use super::setup_wizard::agent_rules::has_legacy_tachi_block;
 use crate::shared_defs::is_managed_agent_rules;
 
-const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
+const SUPPORTED_HOSTS: &[&str] = &[
+    "constitution",
+    "codex",
+    "claude",
+    "gemini",
+    "antigravity",
+    "cursor",
+];
 
 #[derive(Debug, Clone)]
 struct HarnessTargetSpec {
@@ -89,6 +100,49 @@ pub(super) async fn run_harness_command(
             }
             Ok(())
         }
+        HarnessAction::Plan {
+            source_dir,
+            machine_local,
+            hosts,
+            home,
+            json,
+        } => {
+            let report = run_plan(&SyncOptions {
+                source_dir,
+                machine_local,
+                hosts,
+                home,
+                adopt: false,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_sync_report(&report);
+            }
+            Ok(())
+        }
+        HarnessAction::Sync {
+            source_dir,
+            machine_local,
+            hosts,
+            home,
+            adopt,
+            json,
+        } => {
+            let report = run_sync(&SyncOptions {
+                source_dir,
+                machine_local,
+                hosts,
+                home,
+                adopt,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_sync_report(&report);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -106,9 +160,12 @@ fn build_harness_report_with_manifest(
 ) -> Result<HarnessStatusReport, String> {
     let hosts =
         crate::utils::normalize_supported_values(host_filters, SUPPORTED_HOSTS, "harness host")?;
+    let explicit_constitution = host_filters
+        .iter()
+        .any(|host| host.trim().eq_ignore_ascii_case("constitution"));
     let mut specs = Vec::new();
     for host in &hosts {
-        specs.extend(target_specs_for_host(home, host));
+        specs.extend(target_specs_for_host(home, host, explicit_constitution));
     }
 
     let mut targets: Vec<HarnessTargetStatus> = specs.iter().map(inspect_harness_target).collect();
@@ -151,25 +208,59 @@ fn build_harness_report_with_manifest(
     })
 }
 
-fn target_specs_for_host(home: &Path, host: &str) -> Vec<HarnessTargetSpec> {
+fn target_specs_for_host(
+    home: &Path,
+    host: &str,
+    explicit_constitution: bool,
+) -> Vec<HarnessTargetSpec> {
     match host {
+        "constitution" => {
+            let dir = home.join(".agents").join("constitution");
+            if explicit_constitution || dir.exists() {
+                vec![HarnessTargetSpec {
+                    host: "constitution",
+                    kind: "constitution",
+                    path: dir.join("core.md"),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
         "codex" => vec![HarnessTargetSpec {
             host: "codex",
             kind: "agent_md",
             path: home.join(".codex").join("AGENTS.md"),
         }],
-        "claude" => vec![
-            HarnessTargetSpec {
-                host: "claude",
-                kind: "claude_md",
-                path: home.join(".claude").join("CLAUDE.md"),
-            },
-            HarnessTargetSpec {
-                host: "claude",
-                kind: "agent_md",
-                path: home.join(".claude").join("AGENTS.md"),
-            },
-        ],
+        "claude" => {
+            let claude_root = home.join(".claude");
+            let mut specs = vec![
+                HarnessTargetSpec {
+                    host: "claude",
+                    kind: "claude_md",
+                    path: claude_root.join("CLAUDE.md"),
+                },
+                HarnessTargetSpec {
+                    host: "claude",
+                    kind: "agent_md",
+                    path: claude_root.join("AGENTS.md"),
+                },
+            ];
+            if claude_root.join("agents").exists() {
+                specs.push(HarnessTargetSpec {
+                    host: "claude",
+                    kind: "claude_agent",
+                    path: claude_root.join("agents").join("wizard.md"),
+                });
+            }
+            if claude_root.join("skills").join("dispatch").exists() {
+                specs.push(HarnessTargetSpec {
+                    host: "claude",
+                    kind: "claude_skill",
+                    path: claude_root.join("skills").join("dispatch").join("SKILL.md"),
+                });
+            }
+            specs
+        }
         "gemini" => vec![HarnessTargetSpec {
             host: "gemini",
             kind: "gemini_md",
@@ -188,6 +279,14 @@ fn target_specs_for_host(home: &Path, host: &str) -> Vec<HarnessTargetSpec> {
 fn antigravity_specs(home: &Path) -> Vec<HarnessTargetSpec> {
     let gemini_root = home.join(".gemini");
     let mut specs = Vec::new();
+
+    if gemini_root.join("config").exists() {
+        specs.push(HarnessTargetSpec {
+            host: "antigravity",
+            kind: "agent_md",
+            path: gemini_root.join("config").join("AGENTS.md"),
+        });
+    }
 
     if let Ok(entries) = std::fs::read_dir(&gemini_root) {
         for entry in entries.flatten() {
@@ -221,7 +320,7 @@ fn antigravity_specs(home: &Path) -> Vec<HarnessTargetSpec> {
 
 fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
     let path = spec.path.display().to_string();
-    let Ok(metadata) = std::fs::metadata(&spec.path) else {
+    let Ok(metadata) = std::fs::symlink_metadata(&spec.path) else {
         return HarnessTargetStatus {
             host: spec.host.to_string(),
             kind: spec.kind.to_string(),
@@ -238,12 +337,56 @@ fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
         };
     };
 
-    let content = std::fs::read_to_string(&spec.path).unwrap_or_default();
+    if metadata.file_type().is_symlink() {
+        return HarnessTargetStatus {
+            host: spec.host.to_string(),
+            kind: spec.kind.to_string(),
+            path,
+            exists: true,
+            status: "unmanaged".to_string(),
+            managed: false,
+            mentions_tachi: false,
+            hash: None,
+            bytes: None,
+            lines: None,
+            issues: vec!["symlink_target".to_string()],
+            recommended_action: "adopt_or_replace_symlink_target".to_string(),
+        };
+    }
+
+    if !metadata.file_type().is_file() {
+        return HarnessTargetStatus {
+            host: spec.host.to_string(),
+            kind: spec.kind.to_string(),
+            path,
+            exists: true,
+            status: "unmanaged".to_string(),
+            managed: false,
+            mentions_tachi: false,
+            hash: None,
+            bytes: None,
+            lines: None,
+            issues: vec!["non_regular_target".to_string()],
+            recommended_action: "inspect_non_regular_target".to_string(),
+        };
+    }
+
+    let content = read_regular_file_bytes_nofollow(&spec.path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
     let lower = content.to_ascii_lowercase();
-    let managed = is_managed_agent_rules(&content);
+    let sync_stamp = inspect_sync_stamp(&content);
+    let managed = match &sync_stamp {
+        SyncStampState::ValidClean { .. } | SyncStampState::TamperedOrEdited => true,
+        SyncStampState::Absent => is_managed_agent_rules(&content),
+    };
     let legacy = has_legacy_tachi_block(&content);
     let mentions_tachi = lower.contains("tachi");
     let mut issues = detect_harness_issues(&content);
+    if matches!(sync_stamp, SyncStampState::TamperedOrEdited) {
+        issues.push("instruction_sync_local_edit_drift".to_string());
+    }
 
     let status = if managed {
         "managed"
@@ -611,5 +754,82 @@ mod tests {
         assert_eq!(report.summary.unmanaged, 1);
 
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn harness_status_recognizes_synced_instruction_stamps_and_detects_local_edits() {
+        let root = temp_home("sync-status");
+        let home = root.join("home");
+        let bundle = root.join("bundle");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(bundle.join("constitution")).unwrap();
+        std::fs::create_dir_all(bundle.join("adapters/claude")).unwrap();
+        std::fs::write(bundle.join("constitution/core.md"), "# Core\n").unwrap();
+        std::fs::write(bundle.join("adapters/claude/CLAUDE.md"), "# Claude\n").unwrap();
+        std::fs::write(
+            bundle.join("bundle.json"),
+            r#"{
+  "schema_version": "tachi.instruction_bundle.v1",
+  "revision": "2026-11-28.1",
+  "constitution": {
+    "source": "constitution/core.md",
+    "target": ".agents/constitution/core.md",
+    "max_bytes": 4096
+  },
+  "targets": [
+    {
+      "id": "claude-global-md",
+      "host": "claude",
+      "source": "adapters/claude/CLAUDE.md",
+      "target": ".claude/CLAUDE.md",
+      "include_constitution_import": true,
+      "include_machine_local": false,
+      "max_bytes": 4096
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        run_sync(&SyncOptions {
+            source_dir: Some(bundle),
+            machine_local: None,
+            hosts: vec![],
+            home: Some(home.clone()),
+            adopt: false,
+        })
+        .expect("sync succeeds");
+
+        let clean =
+            build_harness_report(&home, &["constitution".to_string(), "claude".to_string()])
+                .expect("status report");
+        let core = clean
+            .targets
+            .iter()
+            .find(|t| t.kind == "constitution")
+            .unwrap();
+        assert_eq!(core.status, "managed");
+        assert!(core.issues.is_empty());
+
+        let claude_path = home.join(".claude/CLAUDE.md");
+        let edited = format!(
+            "{}# manual edit\n",
+            std::fs::read_to_string(&claude_path).unwrap()
+        );
+        std::fs::write(&claude_path, edited).unwrap();
+
+        let drifted = build_harness_report(&home, &["claude".to_string()]).expect("drifted report");
+        let claude_md = drifted
+            .targets
+            .iter()
+            .find(|t| t.kind == "claude_md")
+            .unwrap();
+        assert_eq!(claude_md.status, "managed");
+        assert!(claude_md
+            .issues
+            .contains(&"instruction_sync_local_edit_drift".to_string()));
+        assert_eq!(claude_md.recommended_action, "review_managed_block");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

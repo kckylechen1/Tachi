@@ -1737,3 +1737,52 @@ fn harness_status_is_read_only_and_rejects_mutation_subcommands_and_flags() {
         );
     }
 }
+
+#[test]
+fn harness_plan_and_sync_parse_bounded_flags() {
+    let plan = Cli::try_parse_from([
+        "tachi",
+        "harness",
+        "plan",
+        "--source-dir",
+        "/tmp/bundle",
+        "--machine-local",
+        "/tmp/machine.local.md",
+        "--host",
+        "claude,codex",
+        "--json",
+    ])
+    .expect("`tachi harness plan` should parse");
+    assert!(matches!(
+        plan.command,
+        Some(Commands::Harness {
+            action: HarnessAction::Plan { json: true, .. }
+        })
+    ));
+
+    let sync = Cli::try_parse_from([
+        "tachi",
+        "harness",
+        "sync",
+        "--source-dir",
+        "/tmp/bundle",
+        "--adopt",
+        "--json",
+    ])
+    .expect("`tachi harness sync --adopt` should parse");
+    assert!(matches!(
+        sync.command,
+        Some(Commands::Harness {
+            action: HarnessAction::Sync {
+                adopt: true,
+                json: true,
+                ..
+            }
+        })
+    ));
+
+    assert!(
+        Cli::try_parse_from(["tachi", "harness", "sync", "--fix"]).is_err(),
+        "`tachi harness sync --fix` must be rejected by clap"
+    );
+}

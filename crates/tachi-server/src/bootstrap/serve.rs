@@ -1460,6 +1460,13 @@ pub(super) fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             args.human,
         );
     }
+    if let Some(Commands::Harness { action }) = cli.command.as_ref() {
+        // Keep harness status/plan/sync strictly scoped to `--home` before
+        // dotenv loading, startup logging, or SQLite directory/legacy-DB setup.
+        return StartupRuntime::new()?
+            .runtime
+            .block_on(super::harness_cli::run_harness_command(action.clone()));
+    }
     if let Some(Commands::Hub { action }) = cli.command.as_ref() {
         // Pure argument rejection before startup touches env files, logs, or stores.
         super::cli_tool::preflight_hub_action(action)?;
