@@ -13,6 +13,48 @@ pub(crate) struct TachiHomeResolution {
     pub(crate) source: TachiHomeSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperatorConfigSource {
+    /// Named by the operator, as an absolute path.
+    ExplicitEnv(&'static str),
+    /// The user's own `~/.tachi`.
+    UserDefault,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OperatorConfigHome {
+    pub(crate) path: PathBuf,
+    pub(crate) source: OperatorConfigSource,
+}
+
+/// The home the operator's `config.env` and `secrets.env` are read from and
+/// written to.
+///
+/// The home the operator named, when they named an absolute one: a relative
+/// one names whatever the working directory holds, and a working directory can
+/// be inside a checkout. Otherwise the user's own `~/.tachi`, and `None` when
+/// there is none: a home merely found from the working directory is not the
+/// operator's, and `./.tachi` would be whatever that directory holds. Nothing
+/// is read from a configuration home that is `None`.
+pub(crate) fn operator_config_home(
+    resolution: &TachiHomeResolution,
+    user_home: Option<&Path>,
+) -> Option<OperatorConfigHome> {
+    if let TachiHomeSource::ExplicitEnv(key) = resolution.source {
+        if resolution.path.is_absolute() {
+            return Some(OperatorConfigHome {
+                path: resolution.path.clone(),
+                source: OperatorConfigSource::ExplicitEnv(key),
+            });
+        }
+    }
+    let home = user_home.filter(|home| home.is_absolute())?;
+    Some(OperatorConfigHome {
+        path: home.join(".tachi"),
+        source: OperatorConfigSource::UserDefault,
+    })
+}
+
 pub(crate) fn resolve_app_home() -> PathBuf {
     std::env::var("TACHI_HOME")
         .ok()

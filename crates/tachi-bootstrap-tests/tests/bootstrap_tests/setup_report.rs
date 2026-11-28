@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn setup_report_detects_readiness_from_local_state() {
     let home = test_fixture_path(format!("tachi-setup-report-{}", uuid::Uuid::new_v4()));
-    let app_home = home.join(".tachi");
+    let app_home = home.join("workspace-data-tachi");
+    let operator_config_home = home.join(".tachi");
     let global_db = app_home.join("global").join("memory.db");
     let project_db = home.join("repo").join(".tachi").join("memory.db");
     let git_root = home.join("repo");
@@ -34,12 +35,22 @@ fn setup_report_detects_readiness_from_local_state() {
     let report = api::build_setup_report(
         &home,
         &app_home,
+        &operator_config_home,
         &global_db,
         Some(&project_db),
         Some(&git_root),
         &env,
     )
     .expect("setup report should build");
+
+    assert_eq!(
+        report.config_env_path,
+        operator_config_home
+            .join("config.env")
+            .display()
+            .to_string(),
+        "setup report must target operator_config_home rather than data app_home"
+    );
 
     assert_eq!(report.items.len(), 6);
     assert!(report.items.iter().any(|item| item.id == "cli_binary"));

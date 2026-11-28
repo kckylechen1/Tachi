@@ -34,6 +34,7 @@ impl AuthorizedMigrationSources {
 pub fn build_setup_report(
     home: &Path,
     app_home: &Path,
+    operator_config_home: &Path,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
@@ -42,6 +43,7 @@ pub fn build_setup_report(
     crate::bootstrap::build_setup_report(
         home,
         app_home,
+        operator_config_home,
         global_db_path,
         project_db_path,
         git_root,

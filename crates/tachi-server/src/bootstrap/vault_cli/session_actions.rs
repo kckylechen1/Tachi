@@ -164,7 +164,6 @@ pub(super) async fn run_session_action(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             let payload = crate::vault_ops::build_vault_list_payload(
                 &store,
-                app_home,
                 None,
                 Default::default(),
                 None,

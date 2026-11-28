@@ -234,9 +234,12 @@ fn persist_profile(profile: HostProfile, app_home: &std::path::Path) -> Result<(
         .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
+/// `operator_config_home` is where the host profile is saved to and reported
+/// from: the operator's configuration home, fixed at startup. It is `None`
+/// when none was found.
 pub(crate) fn run_cli(
     action: tachi_bootstrap::cli::HostAction,
-    app_home: &std::path::Path,
+    operator_config_home: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         tachi_bootstrap::cli::HostAction::Show { json: json_out } => {
@@ -244,7 +247,9 @@ pub(crate) fn run_cli(
             if let Some(object) = status.as_object_mut() {
                 object.insert(
                     "config_path".to_string(),
-                    json!(config_path(app_home).display().to_string()),
+                    operator_config_home.map_or(serde_json::Value::Null, |home| {
+                        json!(config_path(home).display().to_string())
+                    }),
                 );
             }
             if json_out {
@@ -260,7 +265,9 @@ pub(crate) fn run_cli(
                     status["profile"].as_str().unwrap_or("unknown"),
                     status["max_execution_level"].as_str().unwrap_or("unknown"),
                 );
-                println!("config: {}", config_path(app_home).display());
+                if let Some(home) = operator_config_home {
+                    println!("config: {}", config_path(home).display());
+                }
             }
         }
         tachi_bootstrap::cli::HostAction::Set {
@@ -269,19 +276,26 @@ pub(crate) fn run_cli(
         } => {
             let profile = HostProfile::parse(&raw)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-            persist_profile(profile, app_home)
+            let home = operator_config_home.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no home to save the host profile in was found, and none was named. Set TACHI_HOME to an absolute path.",
+                )
+            })?;
+            persist_profile(profile, home)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             let result = json!({
                 "profile": profile.name(),
                 "max_execution_level": profile.max_execution_level().as_str(),
-                "config_path": config_path(app_home),
+                "config_path": config_path(home),
                 "effective_after": "next Tachi process; restart a resident daemon during an approved maintenance window",
             });
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!(
-                    "host profile saved: {} (max {}). Restart a resident daemon during an approved maintenance window before dispatching with it.",
+                    "host profile saved to {}: {} (max {}). Restart a resident daemon during an approved maintenance window before dispatching with it.",
+                    config_path(home).display(),
                     profile.name(),
                     profile.max_execution_level().as_str(),
                 );

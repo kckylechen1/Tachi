@@ -253,20 +253,22 @@ graph TD
 
 ## Configuration
 
-Copy `.env.example` to `.env` in your project root. The server loads it automatically.
+The daemon's configuration comes from your own home directory, outside any checkout: `~/.tachi/secrets.env` for keys, and `~/.tachi/config.env` for URLs, models and everything else. `.env.example` shows the settings. To use another directory for both, set `TACHI_HOME` to an absolute path.
 
 ```bash
-# Semantic search (lexical and graph recall work without it)
+# ~/.tachi/secrets.env: keys
 VOYAGE_API_KEY=your_voyage_key_here
-
-# Recommended: extraction, summaries and distillation
 SILICONFLOW_API_KEY=your_siliconflow_key_here
+
+# ~/.tachi/config.env: everything else
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
 # Optional: override the global DB path
 MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
+
+A project's `.env`, `.tachi/config.env` and `.sigil/config.env` are not applied to the daemon: they are for the other tools you run in the project. For project-scoped CLI invocations (such as `tachi status` in a checkout), startup emits one best-effort stderr notice per file that holds a daemon setting in its first 64 KiB (names only, never values); keep operator config paths and their symlink targets under operator control. Upgrading from a version that loaded them: [docs/UPGRADING.md](docs/UPGRADING.md), Part 2, section 8.
 
 Background extraction, summaries, and daily distillation call the configured OpenAI-compatible API lanes, try a configured fallback provider, and record `LANE_OUTAGE` when the chain is exhausted. Ordinary reasoning tries Claude CLI first, then the configured API. Per-lane overrides (`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`) are documented in `.env.example`.
 

@@ -107,6 +107,7 @@ async fn legacy_global_copy_requires_destination_ownership_and_preserves_existin
     let ctx = StartupContext {
         home: root.path().to_path_buf(),
         app_home: app_home.clone(),
+        operator_config_home: None,
         command: Commands::Serve,
         defer_manifest_startup: true,
         git_root: None,
@@ -244,6 +245,7 @@ fn startup_test_context(root: &Path, app_home: &Path) -> StartupContext {
     StartupContext {
         home: root.to_path_buf(),
         app_home: app_home.to_path_buf(),
+        operator_config_home: None,
         command: Commands::Serve,
         defer_manifest_startup: false,
         git_root: Some(root.to_path_buf()),
@@ -1036,7 +1038,7 @@ fn workspace_home_notice_is_emitted_only_for_implicit_workspace_selection() {
         workspace_home_selection_notice(crate::path_utils::TachiHomeSource::WorkspaceData, path)
             .as_deref(),
         Some(
-            "[tachi-home] selected workspace home /tmp/repo/data/tachi from cwd ancestry; set TACHI_HOME to pin a different home"
+            "[tachi-home] selected workspace home \"/tmp/repo/data/tachi\" from cwd ancestry; set TACHI_HOME to pin a different home"
         )
     );
     assert_eq!(
@@ -1309,6 +1311,9 @@ fn daily_distill_scheduler_disabled_refusal_names_gate_and_remedy() {
 struct HostProfileEnvFixture {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_cwd: PathBuf,
+    /// The fixture's home is the user's home while the fixture lives, so that
+    /// `~/.tachi` is the fixture's and never the developer's.
+    original_home: Option<std::ffi::OsString>,
     original_host_profile: Option<std::ffi::OsString>,
     original_fixture_key: Option<std::ffi::OsString>,
     home: tempfile::TempDir,
@@ -1322,6 +1327,7 @@ impl HostProfileEnvFixture {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let original_cwd = std::env::current_dir().expect("cwd");
+        let original_home = std::env::var_os("HOME");
         let original_host_profile = std::env::var_os(crate::host_profile::HOST_PROFILE_ENV);
         let original_fixture_key = std::env::var_os("TACHI_TEST_HOST_PROFILE_FIXTURE");
         let home = tempfile::tempdir().expect("home");
@@ -1331,10 +1337,12 @@ impl HostProfileEnvFixture {
         std::fs::create_dir_all(home.path().join(".sigil")).expect("legacy home dir");
         std::fs::create_dir_all(repo.path().join(".tachi")).expect("repo tachi dir");
         std::fs::create_dir_all(repo.path().join(".sigil")).expect("repo sigil dir");
+        std::env::set_var("HOME", home.path());
         std::env::set_current_dir(repo.path()).expect("set synthetic repo cwd");
         Self {
             _lock: lock,
             original_cwd,
+            original_home,
             original_host_profile,
             original_fixture_key,
             home,
@@ -1374,37 +1382,55 @@ impl HostProfileEnvFixture {
         std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, "home_data");
     }
 
-    fn load(&self) {
-        load_env_files(
-            self.home.path(),
-            self.app_home.path(),
-            false,
-            true,
-            Some(self.repo.path()),
-        );
+    /// Loads the way startup does for an operator who named `app_home` as the
+    /// configuration home, looking at the checkout's files.
+    fn load(&self) -> Vec<String> {
+        self.load_with(Some(self.app_home.path()), true)
     }
 
-    /// Resolves the app home the way startup does, lets the caller check it,
-    /// and only then loads with it, flagged the way startup flags it.
+    fn load_with(
+        &self,
+        operator_config_home: Option<&Path>,
+        load_project_local_env: bool,
+    ) -> Vec<String> {
+        load_env_files(
+            Some(self.home.path()),
+            operator_config_home,
+            load_project_local_env,
+            Some(self.repo.path()),
+        )
+    }
+
+    /// Resolves the home the way startup does, lets the caller check it, and
+    /// loads with what startup derives from the resolution.
     fn load_with_resolved_app_home(
         &self,
+        load_project_local_env: bool,
         check: impl FnOnce(&std::path::Path, crate::path_utils::TachiHomeSource),
-    ) {
+    ) -> Vec<String> {
+        use crate::path_utils::{operator_config_home, OperatorConfigHome};
         let resolution = crate::path_utils::resolve_tachi_home();
         check(&resolution.path, resolution.source);
+        let operator_config_home: Option<OperatorConfigHome> =
+            operator_config_home(&resolution, Some(self.home.path()));
         load_env_files(
-            self.home.path(),
-            &resolution.path,
-            resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
-            true,
+            Some(self.home.path()),
+            operator_config_home
+                .as_ref()
+                .map(|home| home.path.as_path()),
+            load_project_local_env,
             Some(self.repo.path()),
-        );
+        )
     }
 }
 
 impl Drop for HostProfileEnvFixture {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.original_cwd);
+        match self.original_home.as_ref() {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
         match self.original_host_profile.as_ref() {
             Some(value) => std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, value),
             None => std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV),
@@ -1428,9 +1454,9 @@ impl Drop for RestoreEnv {
     }
 }
 
-/// A project-local file may set ordinary Tachi settings. It does not speak
-/// for the operator's Vault: `TACHI_VAULT_CHILD_ENV=all` from a checkout
-/// would hand every dispatch the project's undeclared secrets.
+/// A checkout's env files are not applied. That covers the Vault export mode,
+/// which would hand every dispatch the project's undeclared secrets, and it
+/// covers an ordinary setting just the same.
 #[test]
 fn project_local_env_does_not_set_vault_authority() {
     let fixture = HostProfileEnvFixture::new();
@@ -1451,27 +1477,32 @@ fn project_local_env_does_not_set_vault_authority() {
         "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=repo\n",
     );
 
-    fixture.load();
+    let notes = fixture.load();
 
     assert!(
         std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
-        "a project-local file must not choose what the Vault exports to dispatches"
+        "a checkout's file must not choose what the Vault exports to dispatches"
     );
-    // Only the export mode is refused. Other settings still load.
+    assert!(
+        std::env::var_os("TACHI_VAULT_PROBE_FIXTURE").is_none(),
+        "no setting comes from a checkout's file, the export mode least of all"
+    );
     assert_eq!(
-        std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
-        Ok("repo")
+        notes.len(),
+        1,
+        "the file is named once, for the two settings it holds: {notes:?}"
     );
 }
 
 /// An app home that `resolve_tachi_home` finds inside a checkout is content a
-/// repository can hold too. Its env files take the same refusal, and keep
-/// loading the way a whole-file load does, byte order mark included.
+/// repository can hold. It stays a data home: its `secrets.env` and
+/// `config.env` are not read. The operator's configuration comes from the
+/// user's own `~/.tachi` then, whichever way project loading is set.
 #[test]
-fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
+fn a_checkout_found_home_is_not_read_for_configuration() {
     let fixture = HostProfileEnvFixture::new();
     // Every name the resolver honors. With one of them left set, the test
-    // would load the operator's real app home before it failed.
+    // would resolve somewhere else before it failed.
     let _restore_tachi_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
     let _restore_sigil_home = RestoreEnv("SIGIL_HOME", std::env::var_os("SIGIL_HOME"));
     let _restore_app_home = RestoreEnv("TACHI_APP_HOME", std::env::var_os("TACHI_APP_HOME"));
@@ -1488,6 +1519,16 @@ fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
         std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
     );
     std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
+    let _restore_found_secrets = RestoreEnv(
+        "TACHI_FOUND_SECRETS_MARKER",
+        std::env::var_os("TACHI_FOUND_SECRETS_MARKER"),
+    );
+    std::env::remove_var("TACHI_FOUND_SECRETS_MARKER");
+    let _restore_found_config = RestoreEnv(
+        "TACHI_FOUND_CONFIG_MARKER",
+        std::env::var_os("TACHI_FOUND_CONFIG_MARKER"),
+    );
+    std::env::remove_var("TACHI_FOUND_CONFIG_MARKER");
     // The layout `resolve_tachi_home` looks for above the cwd.
     let app_home = fixture.repo.path().join("data").join("tachi");
     fixture.write_env(
@@ -1496,48 +1537,110 @@ fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
     );
     fixture.write_env(
         app_home.join("secrets.env"),
-        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=secrets\n",
+        "TACHI_VAULT_CHILD_ENV=all\nTACHI_FOUND_SECRETS_MARKER=from_found_secrets\n",
     );
     fixture.write_env(
         app_home.join("config.env"),
         "\u{feff}TACHI_HOST_PROFILE=home_data\n\
          TACHI_VAULT_CHILD_ENV=all\n\
-         TACHI_VAULT_PROBE_FIXTURE=app_home\n",
+         TACHI_FOUND_CONFIG_MARKER=from_found_config\n",
     );
-
-    // Checked before anything is loaded: a resolution that is not the
-    // fixture's must not get as far as loading its files. Both sides are
-    // canonicalized: the resolver joins the cwd without canonicalizing it,
-    // and on Windows `canonicalize` spells a path with a `\\?\` prefix, which
-    // does not compare equal to the plain spelling.
+    // What the user's own home says.
+    fixture.write_env(
+        fixture.home.path().join(".tachi").join("config.env"),
+        "TACHI_HOST_PROFILE=development\nTACHI_VAULT_PROBE_FIXTURE=users_own\n",
+    );
     let canonical_app_home = std::fs::canonicalize(&app_home).expect("the fixture's app home");
-    fixture.load_with_resolved_app_home(|resolved, source| {
-        assert_eq!(
-            source,
-            crate::path_utils::TachiHomeSource::WorkspaceData,
-            "the fixture must be resolved the way a checkout-found app home is"
-        );
-        let resolved = std::fs::canonicalize(resolved).expect("the resolved app home exists");
-        assert_eq!(
-            resolved, canonical_app_home,
-            "the resolved app home must be the fixture's"
-        );
-    });
 
+    for load_project_local_env in [false, true] {
+        fixture.load_with_resolved_app_home(load_project_local_env, |resolved, source| {
+            assert_eq!(
+                source,
+                crate::path_utils::TachiHomeSource::WorkspaceData,
+                "the fixture must be resolved the way a checkout-found app home is"
+            );
+            // Both sides are canonicalized: the resolver joins the cwd without
+            // canonicalizing it, and on Windows `canonicalize` spells a path
+            // with a `\\?\` prefix, which does not compare equal to the
+            // plain spelling.
+            let resolved = std::fs::canonicalize(resolved).expect("the resolved app home exists");
+            assert_eq!(
+                resolved, canonical_app_home,
+                "the resolved app home must be the fixture's"
+            );
+        });
+
+        assert!(
+            std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
+            "an app home found in a checkout must not choose what the Vault exports"
+        );
+        assert!(
+            std::env::var_os("TACHI_FOUND_SECRETS_MARKER").is_none(),
+            "an ordinary setting in a found-home secrets.env must not be loaded"
+        );
+        assert!(
+            std::env::var_os("TACHI_FOUND_CONFIG_MARKER").is_none(),
+            "an ordinary setting in a found-home config.env must not be loaded"
+        );
+        assert_eq!(
+            std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
+            Ok("users_own"),
+            "configuration comes from the user's own home, not from a checkout"
+        );
+        assert_eq!(
+            std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+            Ok("development"),
+            "and so does the host profile"
+        );
+    }
+}
+
+#[test]
+fn launching_from_user_home_applies_operator_config_without_ignored_notice() {
+    let fixture = HostProfileEnvFixture::new();
+    let _restore_marker = RestoreEnv(
+        "TACHI_USER_HOME_CWD_MARKER",
+        std::env::var_os("TACHI_USER_HOME_CWD_MARKER"),
+    );
+    std::env::remove_var("TACHI_USER_HOME_CWD_MARKER");
+    let operator_home = fixture.home.path().join(".tachi");
+    fixture.write_env(
+        operator_home.join("config.env"),
+        "TACHI_USER_HOME_CWD_MARKER=applied_from_home\n",
+    );
+    std::env::set_current_dir(fixture.home.path()).expect("chdir to user home");
+
+    let notes = load_env_files(
+        Some(fixture.home.path()),
+        Some(operator_home.as_path()),
+        true,
+        None,
+    );
+
+    assert_eq!(
+        std::env::var("TACHI_USER_HOME_CWD_MARKER").as_deref(),
+        Ok("applied_from_home"),
+        "operator config.env must still be applied when cwd is user_home"
+    );
     assert!(
-        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
-        "an app home found in a checkout must not choose what the Vault exports"
+        notes.is_empty(),
+        "operator's own ~/.tachi/config.env must not be reported as an ignored checkout file: {notes:?}"
     );
-    // Both files still load; `config.env` still overrides `secrets.env`.
-    assert_eq!(
-        std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
-        Ok("app_home")
-    );
-    // The mark on the first line disappears, as it does for a whole-file load.
-    assert_eq!(
-        std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
-        Ok("home_data")
-    );
+}
+
+#[test]
+fn startup_notice_emission_does_not_panic_on_broken_pipe() {
+    struct BrokenPipeWriter;
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    emit_startup_notice_to(BrokenPipeWriter, "[startup] advisory notice");
 }
 
 #[test]
@@ -1623,30 +1726,51 @@ fn invalid_app_home_profile_is_not_repaired_by_repo_profile() {
     );
 }
 
+/// A checkout's file sets nothing, whether the operator set the same setting
+/// or left it alone.
 #[test]
-fn project_local_non_host_env_still_loads() {
+fn project_local_non_host_env_is_not_applied_either_way() {
     let fixture = HostProfileEnvFixture::new();
+    let _restore_probe = RestoreEnv(
+        "TACHI_TEST_HOST_PROFILE_FIXTURE",
+        std::env::var_os("TACHI_TEST_HOST_PROFILE_FIXTURE"),
+    );
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "TACHI_TEST_HOST_PROFILE_FIXTURE=repo_local_loaded\nTACHI_PROJECT=another-library\n",
+    );
+
+    std::env::set_var("TACHI_TEST_HOST_PROFILE_FIXTURE", "from-operator");
+    fixture.write_env(
+        fixture.app_home.path().join("config.env"),
+        "TACHI_HOST_PROFILE=development\nTACHI_TEST_HOST_PROFILE_FIXTURE=from-operator\n",
+    );
+    fixture.load();
+    assert_eq!(
+        std::env::var("TACHI_TEST_HOST_PROFILE_FIXTURE").as_deref(),
+        Ok("from-operator"),
+        "the operator's setting stands"
+    );
+
     std::env::remove_var("TACHI_TEST_HOST_PROFILE_FIXTURE");
     fixture.write_env(
         fixture.app_home.path().join("config.env"),
         "TACHI_HOST_PROFILE=development\n",
     );
-    fixture.write_env(
-        fixture.repo.path().join(".tachi/config.env"),
-        "TACHI_TEST_HOST_PROFILE_FIXTURE=repo_local_loaded\n",
-    );
-
     fixture.load();
-
-    assert_eq!(
-        std::env::var("TACHI_TEST_HOST_PROFILE_FIXTURE").as_deref(),
-        Ok("repo_local_loaded"),
-        "project-local non-host keys must still load"
+    assert!(
+        std::env::var_os("TACHI_TEST_HOST_PROFILE_FIXTURE").is_none(),
+        "a setting the operator left alone stays unset"
+    );
+    assert!(
+        std::env::var_os("TACHI_PROJECT").is_none(),
+        "a checkout's file does not pin the project"
     );
     assert_eq!(
         std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
-        Ok("development")
+        Ok("development"),
+        "the operator's home still supplies the host profile"
     );
 }
 
@@ -2004,42 +2128,55 @@ fn opened_daemon_wal_paths_resolves_symlinked_global_db_to_canonical_target() {
     assert_eq!(opened_daemon_wal_paths(&server), vec![canonical_real]);
 }
 
+/// None of the four places a checkout keeps env files is applied: not
+/// `.tachi/config.env`, not `.sigil/config.env`, not `.env` in the working
+/// directory, not `.env` at the git root. Not a setting the operator left
+/// alone, and not one the operator set, where the operator's stands.
 #[test]
-fn load_env_files_filters_execution_environment_variables_from_project_files() {
+fn checkout_files_set_nothing_from_any_of_the_four_places() {
     let fixture = HostProfileEnvFixture::new();
-    let _guard_safe = EnvRestore::remove("TACHI_TEST_PROJECT_SAFE_VAR");
-    let _guard_preload = EnvRestore::remove("LD_PRELOAD");
-    let _guard_dyld = EnvRestore::remove("DYLD_INSERT_LIBRARIES");
-    let _guard_node = EnvRestore::remove("NODE_OPTIONS");
-    let _guard_git = EnvRestore::remove("GIT_SSH_COMMAND");
-    let _guard_lower = EnvRestore::remove("ld_preload");
-
-    fixture.write_env(
-        fixture.repo.path().join(".tachi/config.env"),
-        "TACHI_HOST_PROFILE=development\nLD_PRELOAD=/tmp/evil.so\nDYLD_INSERT_LIBRARIES=/tmp/evil.dylib\nTACHI_TEST_PROJECT_SAFE_VAR=loaded\n",
-    );
-    fixture.write_env(
+    // Below the git root, so that the working directory's `.env` and the
+    // root's are two files.
+    let nested = fixture.repo.path().join("nested");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::env::set_current_dir(&nested).expect("work below the git root");
+    let places = [
+        nested.join(".tachi").join("config.env"),
+        nested.join(".sigil").join("config.env"),
+        nested.join(".env"),
         fixture.repo.path().join(".env"),
-        "NODE_OPTIONS=--require=/tmp/evil.js\nGIT_SSH_COMMAND=evil\nld_preload=/tmp/lower.so\n",
+    ];
+    let _restore_probe = RestoreEnv(
+        "TACHI_TEST_CHECKOUT_PROBE",
+        std::env::var_os("TACHI_TEST_CHECKOUT_PROBE"),
     );
+    let _restore_preload = RestoreEnv("LD_PRELOAD", std::env::var_os("LD_PRELOAD"));
+    std::env::remove_var("LD_PRELOAD");
 
-    fixture.load();
-
-    assert_eq!(
-        std::env::var("TACHI_TEST_PROJECT_SAFE_VAR").as_deref(),
-        Ok("loaded")
-    );
-    for forbidden in [
-        "LD_PRELOAD",
-        "DYLD_INSERT_LIBRARIES",
-        "NODE_OPTIONS",
-        "GIT_SSH_COMMAND",
-        "ld_preload",
-    ] {
-        assert!(
-            std::env::var_os(forbidden).is_none(),
-            "project env file must not inject {forbidden}"
+    for place in &places {
+        std::env::remove_var("TACHI_TEST_CHECKOUT_PROBE");
+        fixture.write_env(
+            place.clone(),
+            "TACHI_TEST_CHECKOUT_PROBE=from-checkout\nLD_PRELOAD=/tmp/evil.so\n",
         );
+        fixture.load();
+        assert!(
+            std::env::var_os("TACHI_TEST_CHECKOUT_PROBE").is_none(),
+            "the operator left it alone, and {place:?} set it"
+        );
+        assert!(
+            std::env::var_os("LD_PRELOAD").is_none(),
+            "{place:?} must not say what a process loads"
+        );
+
+        std::env::set_var("TACHI_TEST_CHECKOUT_PROBE", "from-operator");
+        fixture.load();
+        assert_eq!(
+            std::env::var("TACHI_TEST_CHECKOUT_PROBE").as_deref(),
+            Ok("from-operator"),
+            "the operator set it, and {place:?} overrode it"
+        );
+        std::fs::remove_file(place).expect("remove the file again");
     }
 }
 
@@ -2047,7 +2184,307 @@ fn load_env_files_filters_execution_environment_variables_from_project_files() {
 fn load_env_files_skips_directory_at_project_dotenv_path_without_hanging() {
     let fixture = HostProfileEnvFixture::new();
     std::fs::create_dir_all(fixture.repo.path().join(".env")).expect("create .env directory");
-    fixture.load();
+    let notes = fixture.load();
+    assert!(
+        notes.is_empty(),
+        "a directory is not a file to name: {notes:?}"
+    );
+}
+
+/// Without a user home, and with none named, nothing stands in for them: not
+/// `./`, and not a checkout.
+#[test]
+fn without_a_user_home_nothing_is_read_in_its_place() {
+    let fixture = HostProfileEnvFixture::new();
+    let _restore_probe = RestoreEnv(
+        "TACHI_TEST_NO_HOME_PROBE",
+        std::env::var_os("TACHI_TEST_NO_HOME_PROBE"),
+    );
+    std::env::remove_var("TACHI_TEST_NO_HOME_PROBE");
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "TACHI_TEST_NO_HOME_PROBE=from-checkout\n",
+    );
+    fixture.write_env(
+        fixture.home.path().join(".tachi").join("config.env"),
+        "TACHI_TEST_NO_HOME_PROBE=users-own\n",
+    );
+    fixture.write_env(
+        fixture.home.path().join(".sigil").join("config.env"),
+        "TACHI_TEST_NO_HOME_PROBE=legacy\n",
+    );
+    fixture.write_env(
+        fixture.home.path().join(".secrets").join("master.env"),
+        "TACHI_TEST_NO_HOME_PROBE=master\n",
+    );
+
+    let notes = load_env_files(None, None, true, Some(fixture.repo.path()));
+
+    assert!(
+        std::env::var_os("TACHI_TEST_NO_HOME_PROBE").is_none(),
+        "with no home to read from, none is invented"
+    );
+    assert_eq!(
+        notes.len(),
+        1,
+        "only the checkout's file is named: {notes:?}"
+    );
+}
+
+/// A checkout file that holds a daemon setting is named once, with the names
+/// of the settings and never a value. A file that holds none is not named.
+/// With project loading off no file is opened, so none is named.
+#[test]
+fn a_checkout_file_with_daemon_settings_is_named_once_and_never_a_value() {
+    let fixture = HostProfileEnvFixture::new();
+    fixture.write_env(
+        fixture.repo.path().join(".env"),
+        "DATABASE_URL=postgres://other-tool\n\
+         VOYAGE_API_KEY=sk-live-value-must-not-be-printed\n\
+         SILICONFLOW_BASE_URL=https://example.invalid\n\
+         TACHI_PROJECT=x\n",
+    );
+    fixture.write_env(
+        fixture.repo.path().join(".sigil/config.env"),
+        "# nothing but a comment\n",
+    );
+
+    let notes = fixture.load();
+
+    assert_eq!(
+        notes.len(),
+        1,
+        "a file without a daemon setting is not named: {notes:?}"
+    );
+    let line = &notes[0];
+    let shown = std::fs::canonicalize(fixture.repo.path())
+        .expect("canonical repo")
+        .join(".env");
+    assert!(
+        line.starts_with(&format!("[startup] {shown:?} is in a checkout")),
+        "{line}"
+    );
+    for name in ["VOYAGE_API_KEY", "SILICONFLOW_BASE_URL", "TACHI_PROJECT"] {
+        assert!(line.contains(name), "{name} is named: {line}");
+    }
+    assert!(
+        !line.contains("sk-live-value-must-not-be-printed"),
+        "a value is never on the line: {line}"
+    );
+    assert!(
+        !line.contains("DATABASE_URL"),
+        "another tool's setting is none of the daemon's business: {line}"
+    );
+    assert!(
+        line.contains(&format!("{:?}", fixture.app_home.path().join("config.env"))),
+        "where the settings go: {line}"
+    );
+    assert!(
+        line.contains(&format!(
+            "{:?}",
+            fixture.app_home.path().join("secrets.env")
+        )),
+        "where keys go: {line}"
+    );
+
+    assert!(
+        fixture
+            .load_with(Some(fixture.app_home.path()), false)
+            .is_empty(),
+        "with project loading off the files are not opened"
+    );
+}
+
+/// Startup fixes where the operator's configuration is read from before any
+/// file is loaded: the home the operator named when that is absolute, and
+/// otherwise the user's own. A home found in a checkout contributes no file,
+/// and a relative name is not a home. What was fixed does not move when the
+/// environment changes afterwards.
+#[test]
+fn startup_fixes_the_operators_configuration_before_anything_is_loaded() {
+    use crate::path_utils::TachiHomeSource;
+    use crate::provider_config::{
+        forget_operator_sources_for_test, operator_sources, OperatorConfigSources,
+    };
+    struct Forget;
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            forget_operator_sources_for_test();
+        }
+    }
+    let _forget = Forget;
+    forget_operator_sources_for_test();
+
+    let fixture = HostProfileEnvFixture::new();
+    let _restore_tachi_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
+    let _restore_sigil_home = RestoreEnv("SIGIL_HOME", std::env::var_os("SIGIL_HOME"));
+    let _restore_app_home = RestoreEnv("TACHI_APP_HOME", std::env::var_os("TACHI_APP_HOME"));
+    for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
+        std::env::remove_var(key);
+    }
+    let users_own = fixture.home.path().join(".tachi");
+    let legacy = fixture.home.path().join(".sigil").join("config.env");
+    // A home a checkout holds. Its files are not the operator's.
+    let found = fixture.repo.path().join("data").join("tachi");
+    fixture.write_env(found.join("global").join(memcore::MEMORY_DB_FILENAME), "");
+    fixture.write_env(
+        found.join("config.env"),
+        "EXTRACT_API_KEY=vault:FROM_CHECKOUT\n",
+    );
+
+    let resolution = crate::path_utils::resolve_tachi_home();
+    assert_eq!(resolution.source, TachiHomeSource::WorkspaceData);
+    let (operator, notices) = fix_operator_configuration(Some(fixture.home.path()), &resolution);
+    assert_eq!(
+        operator.expect("the user's own home stands in").path,
+        users_own,
+        "a home found in a checkout is a data home"
+    );
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("is a data home"), "{notices:?}");
+    assert_eq!(
+        operator_sources(),
+        Some(OperatorConfigSources {
+            config_files: vec![users_own.join("config.env"), legacy.clone()],
+        })
+    );
+
+    // An operator who named an absolute home: that home replaces the user's
+    // own, and nothing needs saying.
+    let _named = EnvRestore::set_path("TACHI_HOME", fixture.app_home.path());
+    let resolution = crate::path_utils::resolve_tachi_home();
+    assert_eq!(
+        resolution.source,
+        TachiHomeSource::ExplicitEnv("TACHI_HOME")
+    );
+    forget_operator_sources_for_test();
+    let (operator, notices) = fix_operator_configuration(Some(fixture.home.path()), &resolution);
+    assert_eq!(
+        operator.map(|home| home.path),
+        Some(fixture.app_home.path().to_path_buf())
+    );
+    assert!(notices.is_empty(), "{notices:?}");
+    assert_eq!(
+        operator_sources(),
+        Some(OperatorConfigSources {
+            config_files: vec![fixture.app_home.path().join("config.env"), legacy],
+        })
+    );
+    // And the claims are read from exactly those files.
+    fixture.write_env(
+        fixture.app_home.path().join("config.env"),
+        "EXTRACT_API_KEY=vault:FROM_THE_NAMED_HOME\n",
+    );
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "EXTRACT_API_KEY=vault:FROM_CHECKOUT_TOO\n",
+    );
+    let claims = || {
+        crate::provider_config::collect_config_env_values()
+            .get("EXTRACT_API_KEY")
+            .map(String::as_str)
+            .map(str::to_string)
+    };
+    assert_eq!(claims(), Some("vault:FROM_THE_NAMED_HOME".to_string()));
+
+    // A relative name is whatever the working directory holds. It is not
+    // where configuration is read from, and the operator is told.
+    let _relative = EnvRestore::set("TACHI_HOME", "data/relative");
+    let resolution = crate::path_utils::resolve_tachi_home();
+    assert_eq!(
+        resolution.source,
+        TachiHomeSource::ExplicitEnv("TACHI_HOME")
+    );
+    forget_operator_sources_for_test();
+    let (operator, notices) = fix_operator_configuration(Some(fixture.home.path()), &resolution);
+    assert_eq!(
+        operator.expect("the user's own home stands in").path,
+        users_own
+    );
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("is relative"), "{notices:?}");
+}
+
+/// `tachi host set` saves to the operator's configuration home, never to a
+/// home found in a checkout, and refuses when there is none.
+#[test]
+fn host_set_writes_the_operators_configuration_home_only() {
+    use tachi_bootstrap::cli::HostAction;
+    let fixture = HostProfileEnvFixture::new();
+    let found = fixture.repo.path().join("data").join("tachi");
+    std::fs::create_dir_all(&found).expect("a home a checkout holds");
+
+    crate::host_profile::run_cli(
+        HostAction::Set {
+            profile: "home_data".to_string(),
+            json: true,
+        },
+        Some(fixture.app_home.path()),
+    )
+    .expect("the profile is saved to the operator's home");
+
+    let saved = std::fs::read_to_string(fixture.app_home.path().join("config.env"))
+        .expect("the operator's config.env");
+    assert!(saved.contains("TACHI_HOST_PROFILE=home_data"), "{saved}");
+    assert!(
+        !found.join("config.env").exists(),
+        "nothing is written into a checkout"
+    );
+
+    let error = crate::host_profile::run_cli(
+        HostAction::Set {
+            profile: "development".to_string(),
+            json: false,
+        },
+        None,
+    )
+    .expect_err("without a configuration home there is nowhere to save");
+    assert!(error.to_string().contains("TACHI_HOME"), "{error}");
+}
+
+/// `tachi setup` reports, and the wizard writes, the operator's configuration
+/// home, and refuses when there is none.
+#[tokio::test]
+async fn setup_reports_and_writes_the_operators_configuration_home() {
+    let fixture = HostProfileEnvFixture::new();
+    let found = fixture.repo.path().join("data").join("tachi");
+    let global_db = fixture.home.path().join("global").join("tachi-memory.db");
+    let report = crate::bootstrap::setup::build_setup_report(
+        fixture.home.path(),
+        &found,
+        fixture.app_home.path(),
+        &global_db,
+        None,
+        None,
+        &std::collections::HashMap::new(),
+    )
+    .expect("the report builds");
+    assert_eq!(report.app_home, found.display().to_string());
+    assert_eq!(
+        report.config_env_path,
+        fixture
+            .app_home
+            .path()
+            .join("config.env")
+            .display()
+            .to_string(),
+        "configuration is reported where it is read from and written to"
+    );
+
+    let error = crate::bootstrap::setup::run_setup_command(
+        true,
+        false,
+        true,
+        fixture.home.path(),
+        &found,
+        None,
+        &global_db,
+        None,
+        None,
+    )
+    .await
+    .expect_err("without a configuration home setup has nowhere to write");
+    assert!(error.to_string().contains("TACHI_HOME"), "{error}");
 }
 
 mod legacy_copy;

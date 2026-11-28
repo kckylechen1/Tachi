@@ -120,6 +120,25 @@ New dispatches no longer call a server-side model to generate a plan. Supply the
 - Native profiles retain their fixed review/execute stages and continue to exclude the legacy planner regardless of its environment switches.
 - Historical `status.json#/model_plan` content, invocation receipts and `plan_failure` facts remain readable. They are not regenerated or migrated, and a committed planner failure still prevents a contradictory completion.
 
+### 8. A checkout's env files no longer configure the daemon
+
+Tachi no longer applies a project's `.env`, `.tachi/config.env` or `.sigil/config.env` to the daemon, for any command. Nor does it read `secrets.env` or `config.env` from a `data/tachi` home that it found by walking up from the working directory: that home holds data (databases, logs, runs), not configuration. Before, a checkout could set provider keys and endpoints, `MEMORY_DB_PATH`, `TACHI_PROJECT`, and any other `TACHI_*` setting the daemon reads.
+
+What to do before upgrading:
+
+- Move the provider keys you use to the operator's `secrets.env` (normally `~/.tachi/secrets.env`, outside the checkout), and keep it owner-only (`chmod 600`). Remove any stale duplicate definitions of those keys from the operator's `config.env`, `~/.sigil/config.env`, and `~/.secrets/master.env`: for ordinary variables, operator precedence from highest to lowest is `~/.sigil/config.env > operator config.env > process env > ~/.secrets/master.env > operator secrets.env` (because both `config.env` files load with override, whereas `~/.secrets/master.env` and `secrets.env` do not override already-set variables). `TACHI_HOST_PROFILE` is handled separately: startup clears any inherited process value and pins the canonical value from operator `config.env` (falling back to `~/.sigil/config.env` if absent there).
+- Move provider URLs, models, lane and fallback overrides, and any `MEMORY_DB_PATH` to the operator's `config.env` (normally `~/.tachi/config.env`) or to the service environment. If you set `MEMORY_DB_PATH` or other overrides in the service environment, remove any stale definitions of those variables from both operator `config.env` and `~/.sigil/config.env` so they do not override the service environment. Do not copy the whole project file: it usually holds settings for other tools.
+- To use another directory for both, set `TACHI_HOME` to an absolute path. A relative one is not where configuration is read from, and startup says so. Keep trusted operator paths (`~/.tachi`, `~/.sigil`, `~/.secrets`, or an explicit absolute `TACHI_HOME`) and any symlink targets under operator control — do not symlink them into an untrusted checkout.
+- If you relied on a `TACHI_PROJECT` pin in a checkout's `.tachi/config.env`, configure the registered project or workspace binding for that project instead (see "Workspace binding" above). A pin in the operator's environment is the default for every checkout the daemon serves, not a binding for one of them.
+- Start the daemon from a clean environment. A shell or an IDE that already loaded the project's `.env` has put those settings into the daemon's environment, and Tachi cannot tell them from its own configuration.
+- Restart the daemon and reconnect the client. For commands that inspect a project checkout (such as running `tachi status` inside a project directory), startup emits one best-effort stderr notice per checkout file that holds a daemon setting in its first 64 KiB, listing only setting names and never values. Note that the installed macOS LaunchAgent passes `--no-project-db` and therefore does not scan checkout files on restart.
+
+These settings apply to the whole daemon, not to one repository. After the restart, check `tachi status` for the provider state and for the selected global database.
+
+`tachi host set` and `tachi setup` write to the same directory the daemon reads configuration from.
+
+What this does not change: other files a checkout holds keep their own effects. `staff.json` in the data home admits providers, `manifest.json` and `routing.json` there select the global database and the routing, a project's `.tachi/vault.env` bindings are handed to a dispatch, and `.tachi/credentials` profiles are used by a dispatch that names them.
+
 ---
 
 ## Retired and removed surfaces
