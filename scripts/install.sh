@@ -170,8 +170,15 @@ daemon_status_for_scope() {
 # occur there, so a line holds one field. The status reads a value only as
 # one of its plain words, and no short escape can spell one of them, so the
 # value as written decides exactly as the decoded one would.
+#
+# Both awk runs are pinned to the C locale. In a UTF-8 locale awk compares
+# strings by their collation there: a name with a soft hyphen in it, `st­ate`,
+# compared equal to `state` and stood in for it. The C locale compares bytes.
+# It does not check that the text is valid UTF-8. Nothing is decided on a byte
+# that is not compared exactly, so such a byte can only keep a value from
+# matching.
 json_object_fields() {
-  awk '
+  LC_ALL=C awk '
     function ws(c) {
       while (i <= n) {
         c = substr(s, i, 1)
@@ -287,7 +294,7 @@ json_object_fields() {
 # The value of a top-level field of decoded status fields, when that field is
 # of the given type.
 daemon_status_field() {
-  awk -F '\t' -v name="$2" -v type="$3" '$1 == name && $2 == type { print $3; exit }' <<<"$1"
+  LC_ALL=C awk -F '\t' -v name="$2" -v type="$3" '$1 == name && $2 == type { print $3; exit }' <<<"$1"
 }
 
 # What may be done about whatever holds this DB scope, from one read-only

@@ -353,6 +353,26 @@ sleep() { :; }
                 self.assertIn("cannot tell what holds this DB scope", result.stdout)
                 self.assertEqual(self.call_log(), [], "nothing was signalled")
 
+    def test_a_name_that_only_collates_like_state_is_not_state(self) -> None:
+        # In a UTF-8 locale a name with a soft hyphen or a zero-width space in
+        # it collates like `state`. It must neither stand in for a missing
+        # state nor hide the real one.
+        for status in (
+            '{"st\u00adate":"none","state":"unavailable"}',
+            '{"st\u00adate":"none"}',
+            '{"st\u200bate":"none","state":"unavailable"}',
+        ):
+            with self.subTest(status=status):
+                self.calls.unlink(missing_ok=True)
+                self.status.write_text(status, encoding="utf-8")
+                result = self.run_bash(
+                    self.stop_driver(),
+                    {"TACHI_FAKE": str(self.fake_bin / "tachi"), "LC_ALL": "en_US.UTF-8"},
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("cannot tell what holds this DB scope", result.stdout)
+                self.assertEqual(self.call_log(), [], "nothing was signalled")
+
     def test_a_cut_short_answer_is_not_read_as_free(self) -> None:
         for status in (
             '{"state": "none"',
