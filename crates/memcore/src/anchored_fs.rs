@@ -11,6 +11,7 @@ mod imp {
     use std::io::{self, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Component, Path};
     use std::sync::Arc;
 
@@ -180,21 +181,67 @@ mod imp {
             name: &OsStr,
             accept: impl FnOnce(&[u8]) -> bool,
         ) -> io::Result<Option<bool>> {
+            self.remove_file_if_matching(name, None, None, Some(accept))
+        }
+
+        /// Remove a captured regular file only if its identity and optional
+        /// contents match the caller's record. A supplied capture name
+        /// allows a retry to find the entry after process interruption.
+        pub fn remove_file_if_matching(
+            &self,
+            name: &OsStr,
+            identity: Option<(u64, u64)>,
+            capture_name: Option<&OsStr>,
+            accept: Option<impl FnOnce(&[u8]) -> bool>,
+        ) -> io::Result<Option<bool>> {
+            let resume = match capture_name {
+                Some(capture) => self.entry_kind(capture)? != EntryKind::Missing,
+                None => false,
+            };
             let name = c_name(name)?;
-            let captured = CString::new(format!(
-                ".tachi-rollback-{}",
-                uuid::Uuid::new_v4().as_simple()
-            ))
-            .expect("generated rollback name has no interior NUL");
-            match rename_noreplace_at(self.fd.as_ref(), &name, &captured) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
+            let captured = match capture_name {
+                Some(capture) => c_name(capture)?,
+                None => CString::new(format!(
+                    ".tachi-rollback-{}",
+                    uuid::Uuid::new_v4().as_simple()
+                ))
+                .expect("generated rollback name has no interior NUL"),
+            };
+            if captured == name {
+                return Err(io::Error::other("capture name equals file name"));
+            }
+            if !resume {
+                if let Some(expected) = identity {
+                    match self.open_regular_file(&name)? {
+                        Some((_, metadata)) if (metadata.dev(), metadata.ino()) == expected => {}
+                        None if self.entry_kind(OsStr::from_bytes(name.as_bytes()))?
+                            == EntryKind::Missing =>
+                        {
+                            return Ok(None);
+                        }
+                        _ => return Ok(Some(false)),
+                    }
+                }
+                match rename_noreplace_at(self.fd.as_ref(), &name, &captured) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(error),
+                }
             }
 
-            let verdict = self
-                .captured_file_contents(&captured)
-                .map(|contents| contents.is_some_and(|contents| accept(&contents)));
+            let verdict = (|| {
+                let Some((mut file, metadata)) = self.open_regular_file(&captured)? else {
+                    return Ok(false);
+                };
+                if identity.is_some_and(|expected| expected != (metadata.dev(), metadata.ino())) {
+                    return Ok(false);
+                }
+                let Some(accept) = accept else {
+                    return Ok(true);
+                };
+                const MAX_CAPTURED_FILE_BYTES: usize = 4 * 1024 * 1024;
+                Self::read_bounded(&mut file, MAX_CAPTURED_FILE_BYTES).map(|bytes| accept(&bytes))
+            })();
             match verdict {
                 Ok(true) => {
                     // SAFETY: captured is one component under the anchored directory;
@@ -207,6 +254,8 @@ mod imp {
                     self.sync()?;
                     Ok(Some(true))
                 }
+                Ok(false) if resume => Ok(Some(false)),
+                Err(inspect_error) if resume => Err(inspect_error),
                 Ok(false) => self.restore(&captured, &name, None).map(|()| Some(false)),
                 Err(inspect_error) => match self.restore(&captured, &name, Some(&inspect_error)) {
                     Ok(()) => Err(inspect_error),
@@ -260,6 +309,68 @@ mod imp {
             }
         }
 
+        /// Restore a verified backup to its original name in this directory.
+        pub fn restore_file_if_matching(
+            &self,
+            backup: &OsStr,
+            destination: &OsStr,
+            identity: (u64, u64),
+            capture: Option<&OsStr>,
+        ) -> io::Result<()> {
+            let source = match capture {
+                Some(capture) if self.entry_kind(capture)? != EntryKind::Missing => capture,
+                _ => backup,
+            };
+            if !self.file_matches(source, identity)? {
+                return Err(io::Error::other("credential backup identity changed"));
+            }
+            match self.entry_kind(destination)? {
+                EntryKind::Missing => self.restore(&c_name(source)?, &c_name(destination)?, None),
+                EntryKind::RegularFile if self.file_matches(destination, identity)? => {
+                    // Before publication both names can still refer to the old inode.
+                    match self.remove_file_if_matching(
+                        backup,
+                        Some(identity),
+                        capture,
+                        None::<fn(&[u8]) -> bool>,
+                    )? {
+                        Some(true) => Ok(()),
+                        _ => Err(io::Error::other(
+                            "credential backup changed during recovery",
+                        )),
+                    }
+                }
+                _ => Err(io::Error::other(
+                    "credential restore destination is occupied",
+                )),
+            }
+        }
+
+        /// Confirm that the original inode is in place and sync its directory.
+        pub fn sync_file_if_matching(
+            &self,
+            name: &OsStr,
+            identity: (u64, u64),
+            capture: Option<&OsStr>,
+        ) -> io::Result<bool> {
+            if let Some(capture) = capture {
+                if self.entry_kind(capture)? != EntryKind::Missing {
+                    return Ok(false);
+                }
+            }
+            if !self.file_matches(name, identity)? {
+                return Ok(false);
+            }
+            self.sync()?;
+            Ok(true)
+        }
+
+        fn file_matches(&self, name: &OsStr, identity: (u64, u64)) -> io::Result<bool> {
+            self.open_regular_file(&c_name(name)?).map(|file| {
+                file.is_some_and(|(_, metadata)| (metadata.dev(), metadata.ino()) == identity)
+            })
+        }
+
         /// Read `name` only when it is a regular file (never following a
         /// symlink, never blocking on a FIFO), bounded to `max_bytes`.
         /// `Ok(None)` when missing or not a regular file.
@@ -271,18 +382,22 @@ mod imp {
             self.read_regular_file_c(&c_name(name)?, max_bytes)
         }
 
-        /// `Ok(None)` when the captured entry is not a regular file.
-        fn captured_file_contents(&self, name: &CString) -> io::Result<Option<Vec<u8>>> {
-            const MAX_CAPTURED_FILE_BYTES: usize = 4 * 1024 * 1024;
-            self.read_regular_file_c(name, MAX_CAPTURED_FILE_BYTES)
-                .map(|result| result.map(|(_, bytes)| bytes))
-        }
-
         fn read_regular_file_c(
             &self,
             name: &CString,
             max_bytes: usize,
         ) -> io::Result<Option<(std::fs::Metadata, Vec<u8>)>> {
+            self.open_regular_file(name)?
+                .map(|(mut file, metadata)| {
+                    Self::read_bounded(&mut file, max_bytes).map(|bytes| (metadata, bytes))
+                })
+                .transpose()
+        }
+
+        fn open_regular_file(
+            &self,
+            name: &CString,
+        ) -> io::Result<Option<(File, std::fs::Metadata)>> {
             // SAFETY: name is one component under a live descriptor. O_NOFOLLOW
             // refuses a symlink; O_NONBLOCK keeps a FIFO or device from waiting
             // for a writer.
@@ -303,25 +418,27 @@ mod imp {
                 return Err(error);
             }
             // SAFETY: fd is fresh and exclusively owned.
-            let mut file = unsafe { File::from_raw_fd(fd) };
+            let file = unsafe { File::from_raw_fd(fd) };
             let metadata = file.metadata()?;
             if !metadata.is_file() {
                 return Ok(None);
             }
+            Ok(Some((file, metadata)))
+        }
+
+        fn read_bounded(file: &mut File, max_bytes: usize) -> io::Result<Vec<u8>> {
             let limit = u64::try_from(max_bytes)
                 .unwrap_or(u64::MAX)
                 .saturating_add(1);
             let mut observed = Vec::new();
-            Read::by_ref(&mut file)
-                .take(limit)
-                .read_to_end(&mut observed)?;
+            file.take(limit).read_to_end(&mut observed)?;
             if observed.len() > max_bytes {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("file exceeds maximum size of {max_bytes} bytes"),
                 ));
             }
-            Ok(Some((metadata, observed)))
+            Ok(observed)
         }
 
         /// Put a captured entry back under its original name. `cause` names the
@@ -347,7 +464,7 @@ mod imp {
             }
         }
 
-        fn sync(&self) -> io::Result<()> {
+        pub fn sync(&self) -> io::Result<()> {
             // SAFETY: dup returns a fresh descriptor or -1.
             let fd = unsafe { libc::dup(self.fd.as_ref().as_raw_fd()) };
             if fd < 0 {

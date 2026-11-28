@@ -25,7 +25,7 @@ use std::{
     collections::HashSet,
     sync::{Arc, Barrier, Mutex, OnceLock},
 };
-use tachi_credential_profile::cleanup_ephemeral_credential_materializations;
+use tachi_credential_profile::cleanup_ephemeral_credential_materializations_for_run;
 use tachi_dispatch::{
     model_lineage_id, provider_model_parts, DispatchAcknowledgement, DispatchIdentityEffective,
     DispatchIdentityReceipt, UNKNOWN_IDENTITY,
@@ -248,6 +248,7 @@ pub(super) struct BackgroundDispatchContext {
 struct BackgroundEarlyExitCleanup {
     server: MemoryServer,
     workspace_dir: PathBuf,
+    dispatch_id: String,
     flow_dispatch_slot: Option<DispatchDedupeReservation>,
     postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     armed: bool,
@@ -257,12 +258,14 @@ impl BackgroundEarlyExitCleanup {
     fn new(
         server: MemoryServer,
         workspace_dir: PathBuf,
+        dispatch_id: String,
         flow_dispatch_slot: Option<DispatchDedupeReservation>,
         postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     ) -> Self {
         Self {
             server,
             workspace_dir,
+            dispatch_id,
             flow_dispatch_slot,
             postflight_dispatch_lease,
             armed: true,
@@ -287,7 +290,12 @@ impl Drop for BackgroundEarlyExitCleanup {
             return;
         }
         let _ = self.server.with_global_store(|store| {
-            cleanup_ephemeral_credential_materializations(store, &self.workspace_dir, false)
+            cleanup_ephemeral_credential_materializations_for_run(
+                store,
+                &self.workspace_dir,
+                Some(&self.dispatch_id),
+                false,
+            )
         });
         release_flow_dispatch_slot(self.flow_dispatch_slot.take());
     }

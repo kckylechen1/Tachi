@@ -79,6 +79,7 @@ pub(super) fn run_credential_action(
                     &tachi_credential_profile::CredentialApplyOptions {
                         allow_existing,
                         run_dir,
+                        run_generation: None,
                     },
                 );
                 for value in secret_values.values_mut() {
@@ -117,6 +118,7 @@ pub(super) fn run_credential_action(
                 &store,
                 &tachi_credential_profile::CredentialCleanupOptions {
                     run_dir,
+                    run_generation: None,
                     profile,
                     consumer,
                     dry_run: !apply,

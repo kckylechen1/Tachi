@@ -1,4 +1,4 @@
-use super::safety::{checked_run_target, credential_file_mode};
+use super::safety::{checked_run_target, credential_file_mode, RunDirectory};
 use super::types::{
     AllowedConsumers, CredentialMaterializeReport, CredentialMaterializeStepReport,
     CredentialProfile,
@@ -57,7 +57,6 @@ pub(super) fn materializer_has_file_target(kind: &str, target: &str) -> bool {
 fn expand_target(target: &str, run_dir: Option<&Path>) -> String {
     let mut expanded = display_target(target);
     if let Some(run_dir) = run_dir {
-        let run_dir = std::fs::canonicalize(run_dir).unwrap_or_else(|_| run_dir.to_path_buf());
         let run_dir = run_dir.to_string_lossy();
         let credentials_dir = Path::new(run_dir.as_ref())
             .join("credentials")
@@ -97,6 +96,24 @@ pub fn plan_credential_materialization_with_run_dir(
     store: &MemoryStore,
     run_dir: Option<&Path>,
 ) -> Result<CredentialMaterializeReport, String> {
+    plan_with_resolved_run_dir(profile_name, profile, consumer, store, run_dir)
+        .map(|(report, _)| report)
+}
+
+pub(super) fn plan_with_resolved_run_dir(
+    profile_name: &str,
+    profile: &CredentialProfile,
+    consumer: &str,
+    store: &MemoryStore,
+    run_dir: Option<&Path>,
+) -> Result<(CredentialMaterializeReport, Option<RunDirectory>), String> {
+    let resolved = run_dir.map(RunDirectory::resolve).transpose();
+    let canonical_or_granted = resolved
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(|root| root.canonical.as_path())
+        .or(run_dir);
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?
@@ -118,7 +135,7 @@ pub fn plan_credential_materialization_with_run_dir(
 
     for materializer in &profile.materializers {
         let resolved_secret = resolve_source(profile, &materializer.source);
-        let mut target = expand_target(&materializer.target, run_dir);
+        let mut target = expand_target(&materializer.target, canonical_or_granted);
         let problem = match materializer.kind.as_str() {
             "file_copy" | "config_patch" => Some(("retired", format!(
                 "credential materializer '{}' is retired; use env or config_content_env; config_overlay may only create temporary files inside a caller-granted run_dir",
@@ -131,7 +148,7 @@ pub fn plan_credential_materialization_with_run_dir(
             "config_overlay" if is_env_target(&target) => Some(("invalid_target",
                 "config_overlay env targets are retired; use config_content_env".to_string())),
             "config_overlay" => {
-                match checked_run_target(Path::new(&target), run_dir)
+                match checked_run_target(Path::new(&target), resolved.as_ref().map(Option::as_ref).map_err(String::as_str))
                     .and_then(|path| credential_file_mode(materializer.chmod.as_deref()).map(|_| path))
                 {
                     Ok(path) => {
@@ -181,7 +198,7 @@ pub fn plan_credential_materialization_with_run_dir(
         });
     }
 
-    Ok(CredentialMaterializeReport {
+    let report = CredentialMaterializeReport {
         profile: profile_name.to_string(),
         consumer: consumer.to_string(),
         dry_run: true,
@@ -191,7 +208,8 @@ pub fn plan_credential_materialization_with_run_dir(
         missing_secrets,
         denied_secrets,
         warnings,
-    })
+    };
+    Ok((report, resolved.ok().flatten()))
 }
 
 pub fn credential_materialize_report_json(

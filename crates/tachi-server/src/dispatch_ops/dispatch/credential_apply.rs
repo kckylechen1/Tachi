@@ -127,6 +127,7 @@ pub(super) fn apply_materialized_credentials(
         &inputs.assignment.selected_worker,
         inputs.assignment.selected_profile.as_deref(),
         inputs.workspace_dir,
+        inputs.dispatch_id,
     ) {
         Ok(materialized) => materialized,
         Err(err) => {

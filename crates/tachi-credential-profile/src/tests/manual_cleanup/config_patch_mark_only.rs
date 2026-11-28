@@ -43,6 +43,7 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         &store,
         &crate::CredentialCleanupOptions {
             run_dir: None,
+            run_generation: None,
             profile: Some("router_shared".to_string()),
             consumer: Some("router".to_string()),
             dry_run: false,
@@ -61,6 +62,7 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
         &store,
         &crate::CredentialCleanupOptions {
             run_dir: None,
+            run_generation: None,
             profile: Some("router_shared".to_string()),
             consumer: Some("router".to_string()),
             dry_run: false,

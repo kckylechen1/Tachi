@@ -34,6 +34,7 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
         &store,
         &crate::CredentialCleanupOptions {
             run_dir: None,
+            run_generation: None,
             profile: Some("codex_shared".to_string()),
             consumer: Some("codex_cli".to_string()),
             dry_run: true,
@@ -51,6 +52,7 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
         &store,
         &crate::CredentialCleanupOptions {
             run_dir: None,
+            run_generation: None,
             profile: Some("codex_shared".to_string()),
             consumer: Some("codex_cli".to_string()),
             dry_run: false,

@@ -24,7 +24,9 @@ pub const CREDENTIAL_MATERIALIZATION_NAMESPACE: &str = "credential_materializati
 
 pub use apply::apply_credential_materialization;
 pub use cleanup::{
-    cleanup_ephemeral_credential_materializations, cleanup_managed_credential_materializations,
+    cleanup_ephemeral_credential_materializations,
+    cleanup_ephemeral_credential_materializations_for_run,
+    cleanup_managed_credential_materializations,
 };
 pub use doctor::doctor_credential_profile;
 pub use io::{default_credentials_dir, find_credential_profile, load_credential_profile_from_path};

@@ -50,6 +50,7 @@ fn credential_materialize_apply_writes_config_overlay_file_0600() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(out_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect("apply config overlay file materialization");

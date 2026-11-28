@@ -50,25 +50,46 @@ fn seed_legacy_materialization(
     #[cfg(unix)]
     std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))
         .expect("restrict historical fixture");
-    crate::managed::record_managed_materialization(
-        store,
+    seed_legacy_row(store, profile_name, consumer, profile, content);
+}
+
+fn seed_legacy_row(
+    store: &memcore::MemoryStore,
+    profile_name: &str,
+    consumer: &str,
+    profile: &crate::CredentialProfile,
+    content: &str,
+) {
+    let step = &profile.materializers[0];
+    let resolved_secret = crate::plan::resolve_source(profile, &step.source);
+    let key = crate::managed::legacy_materialization_key(
         profile_name,
         consumer,
-        &crate::CredentialMaterializeStepReport {
-            materializer_type: materializer.kind.clone(),
-            source: materializer.source.clone(),
-            resolved_secret: crate::plan::resolve_source(profile, &materializer.source),
-            target: materializer.target.clone(),
-            output: format!("{}:{}", materializer.kind, materializer.target),
-            status: "written".to_string(),
-            redacted: true,
-            would_write: false,
-            applied: true,
-            chmod: materializer.chmod.clone(),
-        },
-        content,
-    )
-    .expect("seed historical managed metadata");
+        &step.kind,
+        &resolved_secret,
+        &step.target,
+    );
+    let metadata = serde_json::json!({
+        "version": 1,
+        "profile": profile_name,
+        "consumer": consumer,
+        "materializer_type": step.kind,
+        "source": step.source,
+        "resolved_secret": resolved_secret,
+        "target": step.target,
+        "content_hash": crate::managed::managed_materialization_content_hash(
+            profile_name, consumer, &step.target, content
+        ),
+        "chmod": step.chmod,
+        "managed_at": "2026-06-08T00:00:00Z",
+    });
+    store
+        .set_state(
+            crate::CREDENTIAL_MATERIALIZATION_NAMESPACE,
+            &key,
+            &metadata.to_string(),
+        )
+        .expect("seed historical managed metadata");
 }
 
 fn seed_legacy_auth_file(store: &memcore::MemoryStore, profile: &crate::CredentialProfile) {

@@ -57,6 +57,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         early_exit_cleanup: BackgroundEarlyExitCleanup::new(
             server_clone.clone(),
             workspace_dir_for_spawn.clone(),
+            d_id.clone(),
             flow_dispatch_slot_for_spawn,
             postflight_dispatch_lease,
         ),
@@ -1031,9 +1032,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     Err("injected managed credential cleanup failure".to_string())
                 } else {
                     server_clone.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(
+                        cleanup_ephemeral_credential_materializations_for_run(
                             store,
                             &workspace_dir_for_spawn,
+                            Some(&d_id),
                             false,
                         )
                     })
@@ -1041,9 +1043,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 #[cfg(not(test))]
                 {
                     server_clone.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(
+                        cleanup_ephemeral_credential_materializations_for_run(
                             store,
                             &workspace_dir_for_spawn,
+                            Some(&d_id),
                             false,
                         )
                     })

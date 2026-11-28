@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tachi_credential_profile::{
-    apply_credential_materialization, cleanup_ephemeral_credential_materializations,
+    apply_credential_materialization, cleanup_ephemeral_credential_materializations_for_run,
     credential_materialize_report_json, default_credentials_dir, find_credential_profile,
     plan_credential_materialization_with_run_dir, profile_secret_names, CredentialApplyOptions,
     CredentialMaterializeReport,
@@ -1230,7 +1230,18 @@ async fn launch_canonical_dispatch(
         managed_authority_refs,
     } = match post_init {
         Ok(ready) => *ready,
-        Err(error) => {
+        Err(mut error) => {
+            drop(McpCleanup(
+                mcp_config_path.as_deref().map(Path::to_path_buf),
+            ));
+            crate::executor_offload::block_off_core(|| {
+                append_dispatch_credential_cleanup_error(
+                    server,
+                    &workspace_dir,
+                    &dispatch_id,
+                    &mut error,
+                );
+            });
             close_kanban_row_on_early_exit(
                 server,
                 &dispatch_id,
@@ -1258,7 +1269,12 @@ async fn launch_canonical_dispatch(
         Ok(registration) => registration,
         Err(error) => {
             let _ = server.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                cleanup_ephemeral_credential_materializations_for_run(
+                    store,
+                    &workspace_dir,
+                    Some(&dispatch_id),
+                    false,
+                )
             });
             release_flow_dispatch_slot(flow_dispatch_slot);
             close_kanban_row_on_early_exit(
@@ -1376,7 +1392,12 @@ async fn launch_canonical_dispatch(
                     })),
                 );
                 let _ = server.with_global_store(|store| {
-                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    cleanup_ephemeral_credential_materializations_for_run(
+                        store,
+                        &workspace_dir,
+                        Some(&dispatch_id),
+                        false,
+                    )
                 });
                 release_flow_dispatch_slot(flow_dispatch_slot);
                 close_kanban_row_on_early_exit(
@@ -1423,7 +1444,12 @@ async fn launch_canonical_dispatch(
                 Ok(path) => path,
                 Err(error) => {
                     let _ = server.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                        cleanup_ephemeral_credential_materializations_for_run(
+                            store,
+                            &workspace_dir,
+                            Some(&dispatch_id),
+                            false,
+                        )
                     });
                     release_flow_dispatch_slot(flow_dispatch_slot);
                     if let Some(guard) = managed_run_guard {
@@ -1448,7 +1474,12 @@ async fn launch_canonical_dispatch(
                 Ok(lease) => lease,
                 Err(error) => {
                     let _ = server.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                        cleanup_ephemeral_credential_materializations_for_run(
+                            store,
+                            &workspace_dir,
+                            Some(&dispatch_id),
+                            false,
+                        )
                     });
                     release_flow_dispatch_slot(flow_dispatch_slot);
                     if let Some(guard) = managed_run_guard {
@@ -1486,7 +1517,12 @@ async fn launch_canonical_dispatch(
                 {
                     let release_error = dispatch_lease.release_without_spawn().err();
                     let _ = server.with_global_store(|store| {
-                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                        cleanup_ephemeral_credential_materializations_for_run(
+                            store,
+                            &workspace_dir,
+                            Some(&dispatch_id),
+                            false,
+                        )
                     });
                     release_flow_dispatch_slot(flow_dispatch_slot);
                     if let Some(guard) = managed_run_guard {

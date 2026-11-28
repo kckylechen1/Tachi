@@ -9,7 +9,12 @@ pub(super) fn record_execution_backend_finalize_failure(
     // and worker spawn. Only the current run's ephemeral outputs are eligible.
     drop(McpCleanup(mcp_config_path.map(Path::to_path_buf)));
     let cleanup = server.with_global_store(|store| {
-        cleanup_ephemeral_credential_materializations(store, ctx.workspace_dir, false)
+        cleanup_ephemeral_credential_materializations_for_run(
+            store,
+            ctx.workspace_dir,
+            Some(ctx.dispatch_id),
+            false,
+        )
     });
     let error = match cleanup {
         Ok(report) if report.errors.is_empty() => ctx.error.to_string(),

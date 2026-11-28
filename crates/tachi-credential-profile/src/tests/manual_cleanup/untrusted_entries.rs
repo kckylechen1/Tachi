@@ -13,6 +13,7 @@ fn cleanup_codex_shared(
         store,
         &crate::CredentialCleanupOptions {
             run_dir: None,
+            run_generation: None,
             profile: Some("codex_shared".to_string()),
             consumer: Some("codex_cli".to_string()),
             dry_run: false,

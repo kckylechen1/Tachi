@@ -7,19 +7,84 @@
 //! but never a symlink that holds the target name itself.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection, TargetLocation,
+    LiveRunRoot, ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection,
+    TargetLocation,
 };
-use memcore::anchored_fs::{AnchoredDirectory, EntryKind};
+use memcore::anchored_fs::{AnchoredDirectory, DirectoryIdentity, EntryKind};
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
-pub(super) fn locate(
+pub(super) fn locate_bound(
+    root: &LiveRunRoot,
+    identity: DirectoryIdentity,
+    relative: &Path,
+    capture: Option<&OsStr>,
+) -> Result<TargetLocation, String> {
+    if root.identity != identity {
+        return Err("recorded directory identity differs from run_dir".into());
+    }
+    Ok(locate_in_run_dir(&root.held, relative, capture))
+}
+
+pub(super) fn locate_bound_for_operator(
     metadata: &ManagedCredentialMaterialization,
-    run_dir: Option<&Path>,
-) -> TargetLocation {
-    locate_path(Path::new(&metadata.target), run_dir)
+    identity: DirectoryIdentity,
+    relative: &Path,
+    mark_only: bool,
+    capture: Option<&OsStr>,
+) -> Result<TargetLocation, String> {
+    let root = metadata
+        .run_root_canonical
+        .as_deref()
+        .ok_or("missing recorded run_dir")?;
+    let held = match AnchoredDirectory::open_absolute(Path::new(root)) {
+        Ok(held) => held,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return if mark_only {
+                Ok(TargetLocation::Missing)
+            } else {
+                Err("recorded run_dir is absent; cannot confirm directory was not renamed without --mark-only".into())
+            };
+        }
+        Err(err) => return Err(format!("cannot open recorded run_dir: {err}")),
+    };
+    if held
+        .identity()
+        .map_err(|err| format!("identify recorded run_dir: {err}"))?
+        != identity
+    {
+        return Err("recorded run_dir now has a different directory identity".into());
+    }
+    Ok(locate_in_run_dir(&held, relative, capture))
+}
+
+pub(super) fn locate_legacy(root: &LiveRunRoot, target: &Path) -> Result<TargetLocation, String> {
+    let absolute = legacy_platform_path(&root.absolute);
+    if !matches!(root.held.matches_absolute_path(&absolute), Ok(true)) {
+        return Err("legacy target requires run_dir without symlink aliases".into());
+    }
+    let target = legacy_platform_path(target);
+    let relative = target
+        .strip_prefix(&root.canonical)
+        .map_err(|_| "legacy target is outside the canonical run_dir")?;
+    Ok(locate_in_run_dir(&root.held, relative, None))
+}
+
+fn legacy_platform_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    #[cfg(target_os = "macos")]
+    for alias in ["/var", "/tmp", "/etc"] {
+        if let Ok(relative) = path.strip_prefix(alias) {
+            let platform_target = PathBuf::from(format!("/private{alias}"));
+            if std::fs::read_link(alias)
+                .is_ok_and(|link| Path::new("/").join(link) == platform_target)
+            {
+                return std::borrow::Cow::Owned(platform_target.join(relative));
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
 }
 
 fn locate_path(target: &Path, run_dir: Option<&Path>) -> TargetLocation {
@@ -53,7 +118,11 @@ fn locate_path(target: &Path, run_dir: Option<&Path>) -> TargetLocation {
         if let Some(canonical_run_dir) = canonical_run_dir {
             if let Some(rel) = relative_under_run_dir(&resolved_target, run_dir, &canonical_run_dir)
             {
-                return locate_in_run_dir(canonical_run_dir, &rel);
+                return match AnchoredDirectory::open_absolute(&canonical_run_dir) {
+                    Ok(directory) => locate_in_run_dir(&directory, &rel, None),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => TargetLocation::Missing,
+                    Err(err) => TargetLocation::Unremovable(format!("open run_dir: {err}")),
+                };
             }
         }
         return locate_recorded(&resolved_target);
@@ -79,7 +148,11 @@ fn relative_under_run_dir(
         .map(Path::to_path_buf)
 }
 
-fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
+fn locate_in_run_dir(
+    held: &AnchoredDirectory,
+    rel: &Path,
+    capture: Option<&OsStr>,
+) -> TargetLocation {
     let mut components = rel
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
@@ -99,17 +172,8 @@ fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
             rel.display()
         ));
     }
-    let mut directory = match AnchoredDirectory::open_absolute(&canonical_run_dir) {
-        Ok(dir) => dir,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return TargetLocation::Missing,
-        Err(err) => {
-            return TargetLocation::Unremovable(format!(
-                "open run_dir '{}': {err}",
-                canonical_run_dir.display()
-            ))
-        }
-    };
-    let mut opened = canonical_run_dir;
+    let mut directory = held.clone();
+    let mut opened = PathBuf::new();
     for component in components {
         if let Component::Normal(name) = component {
             opened.push(name);
@@ -117,6 +181,20 @@ fn locate_in_run_dir(canonical_run_dir: PathBuf, rel: &Path) -> TargetLocation {
                 Ok(dir) => dir,
                 Err(location) => return location,
             };
+        }
+    }
+    if let Some(capture) = capture {
+        match directory.entry_kind(capture) {
+            Ok(EntryKind::Missing) => {}
+            Ok(_) => {
+                return TargetLocation::Removable(RemovableTarget {
+                    parent: directory,
+                    leaf: leaf.to_os_string(),
+                })
+            }
+            Err(err) => {
+                return TargetLocation::Unremovable(format!("inspect interrupted removal: {err}"))
+            }
         }
     }
     classify(directory, leaf)
@@ -184,7 +262,7 @@ fn open_component(
 
 /// Manual cleanup resolves the operator's own parent path, including its
 /// symlinked ancestors, and refuses only what holds the target name itself.
-fn locate_for_operator(target: &Path) -> TargetLocation {
+pub(super) fn locate_for_operator(target: &Path) -> TargetLocation {
     let Some(leaf) = target.file_name() else {
         return TargetLocation::Unremovable(format!("'{}' does not name a file", target.display()));
     };
@@ -213,7 +291,7 @@ fn locate_for_operator(target: &Path) -> TargetLocation {
 /// Classify the leaf by its own directory entry, never through it.
 fn classify(directory: AnchoredDirectory, leaf: &OsStr) -> TargetLocation {
     match directory.entry_kind(leaf) {
-        Ok(EntryKind::Missing) => TargetLocation::Missing,
+        Ok(EntryKind::Missing) => TargetLocation::MissingAt(directory),
         Ok(EntryKind::RegularFile) => TargetLocation::Removable(RemovableTarget {
             parent: directory,
             leaf: leaf.to_os_string(),
@@ -227,7 +305,7 @@ fn classify(directory: AnchoredDirectory, leaf: &OsStr) -> TargetLocation {
 
 pub(super) fn inspect(target: &Path, run_dir: Option<&Path>, max_bytes: usize) -> TargetInspection {
     let removable = match locate_path(target, run_dir) {
-        TargetLocation::Missing => return TargetInspection::Missing,
+        TargetLocation::Missing | TargetLocation::MissingAt(_) => return TargetInspection::Missing,
         TargetLocation::Unremovable(reason) => return TargetInspection::UntrustedEntry { reason },
         TargetLocation::Removable(removable) => removable,
     };
@@ -240,7 +318,7 @@ pub(super) fn inspect(target: &Path, run_dir: Option<&Path>, max_bytes: usize) -
             bytes,
         },
         Ok(None) => match classify(removable.parent, &removable.leaf) {
-            TargetLocation::Missing => TargetInspection::Missing,
+            TargetLocation::Missing | TargetLocation::MissingAt(_) => TargetInspection::Missing,
             TargetLocation::Unremovable(reason) => TargetInspection::UntrustedEntry { reason },
             TargetLocation::Removable(_) => TargetInspection::Unreadable {
                 reason: "target changed during inspection".into(),
@@ -252,11 +330,39 @@ pub(super) fn inspect(target: &Path, run_dir: Option<&Path>, max_bytes: usize) -
     }
 }
 
+pub(super) fn restore(
+    target: &RemovableTarget,
+    backup: &Path,
+    destination: &Path,
+    identity: (u64, u64),
+    capture: Option<&OsStr>,
+) -> io::Result<()> {
+    let dest = destination
+        .file_name()
+        .filter(|dest| *dest != target.leaf && backup.parent() == destination.parent())
+        .ok_or_else(|| io::Error::other("credential restore destination must be a sibling"))?;
+    target
+        .parent
+        .restore_file_if_matching(&target.leaf, dest, identity, capture)
+}
+
+pub(super) fn confirm_original(
+    target: &RemovableTarget,
+    inode: (u64, u64),
+    capture: Option<&OsStr>,
+) -> io::Result<bool> {
+    target
+        .parent
+        .sync_file_if_matching(&target.leaf, inode, capture)
+}
+
 pub(super) fn remove<A: Fn(&[u8]) -> bool>(
     target: &RemovableTarget,
+    identity: Option<(u64, u64)>,
+    capture: Option<&OsStr>,
     require_managed_content: Option<&A>,
 ) -> io::Result<Removal> {
-    let Some(accept) = require_managed_content else {
+    if identity.is_none() && require_managed_content.is_none() {
         return target.parent.remove_entry(&target.leaf).map(|removed| {
             if removed {
                 Removal::Removed
@@ -264,10 +370,17 @@ pub(super) fn remove<A: Fn(&[u8]) -> bool>(
                 Removal::Vanished
             }
         });
-    };
-    Ok(match target.parent.remove_file_if(&target.leaf, accept)? {
-        Some(true) => Removal::Removed,
-        Some(false) => Removal::ForeignContent,
-        None => Removal::Vanished,
-    })
+    }
+    Ok(
+        match target.parent.remove_file_if_matching(
+            &target.leaf,
+            identity,
+            capture,
+            require_managed_content,
+        )? {
+            Some(true) => Removal::Removed,
+            Some(false) => Removal::ForeignContent,
+            None => Removal::Vanished,
+        },
+    )
 }
