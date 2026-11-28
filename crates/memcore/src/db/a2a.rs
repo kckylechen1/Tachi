@@ -23,20 +23,24 @@ pub use coordination::{consume_a2a_for_project, insert_a2a_coordination, list_a2
 mod remote;
 #[cfg(feature = "admin")]
 pub use remote::{
-    insert_remote_rejection, is_retained_task_quota_exceeded, list_remote_tasks, read_remote_task,
-    NewRemoteTask, RemoteJobGrant, RemoteReceiptDetail, RemoteRejectionReason, RemoteTask,
-    RemoteTaskAccess, RemoteTaskEnvelope, RemoteTaskHeader, RemoteTaskInsertOutcome,
-    RemoteTaskPage, RemoteTaskReceipt, A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES,
-    MAX_RETAINED_REMOTE_TASKS_PER_PEER, REMOTE_CLOCK_SKEW_TOLERANCE_SECS,
-    RETAINED_TASK_QUOTA_EXCEEDED,
+    admit_remote_task, insert_remote_rejection, is_retained_task_quota_exceeded, list_remote_tasks,
+    read_remote_task, reconcile_active_remote_runs, reconcile_remote_run_if_expired,
+    record_remote_task_cancel_requested, record_remote_task_cleanup, record_remote_task_started,
+    record_remote_task_terminal, NewRemoteTask, RemoteAdapterKind, RemoteAdmissionDecision,
+    RemoteCleanupStatus, RemoteJobGrant, RemoteLocalAdmissionSpec, RemoteReceiptDetail,
+    RemoteRejectionReason, RemoteRunLifecycleState, RemoteTask, RemoteTaskAccess,
+    RemoteTaskEnvelope, RemoteTaskHeader, RemoteTaskInsertOutcome, RemoteTaskPage,
+    RemoteTaskReceipt, RemoteTaskRun, RemoteTerminalOutcome, RemoteTerminalTransition,
+    A2A_REMOTE_JOB_KIND, MAX_REMOTE_JOB_BYTES, MAX_RETAINED_REMOTE_TASKS_PER_PEER,
+    REMOTE_CLOCK_SKEW_TOLERANCE_SECS, RETAINED_TASK_QUOTA_EXCEEDED,
 };
 #[cfg(feature = "admin")]
 mod submissions;
 #[cfg(feature = "admin")]
 pub use submissions::{
     finish_remote_submission, prepare_remote_submission, read_remote_submission,
-    remote_submission_attempt_is_current, reserve_remote_submission, RemoteSubmission,
-    RemoteSubmissionAttempt, RemoteSubmissionBinding, RemoteSubmissionResult,
+    reconcile_remote_submission, remote_submission_attempt_is_current, reserve_remote_submission,
+    RemoteSubmission, RemoteSubmissionAttempt, RemoteSubmissionBinding, RemoteSubmissionResult,
 };
 
 pub const A2A_COORDINATION_KIND: &str = "coordination/v1";

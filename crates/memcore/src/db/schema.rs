@@ -14,7 +14,7 @@ mod ddl;
 pub(crate) use a2a::validate_a2a_mailbox_v31_schema;
 pub(crate) use a2a::{
     migrate_v42_coordination_mailbox, migrate_v45_remote_mailbox, migrate_v46_remote_submissions,
-    validate_a2a_mailbox_schema,
+    migrate_v47_remote_execution_runs, validate_a2a_mailbox_schema,
 };
 #[cfg(test)]
 pub(crate) mod inventory;

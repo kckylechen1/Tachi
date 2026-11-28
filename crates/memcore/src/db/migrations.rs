@@ -1050,7 +1050,7 @@ mod tests {
         let (mut conn, tmp) = open_test_db();
         // Remove v40 column/sentinels so v40 has real DDL work to perform and roll back.
         conn.execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure', 'v45_remote_job_mailbox', 'v46_remote_submissions')",
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key IN ('v40_work_claim_project_binding', 'v41_host_typed_records', 'v42_coordination_mailbox', 'v43_adjudication_provenance', 'v44_typed_record_erasure', 'v45_remote_job_mailbox', 'v46_remote_submissions', 'v47_remote_execution_runs')",
             params![MIGRATION_NS],
         )
         .unwrap();

@@ -183,3 +183,93 @@ fn only_a_real_authority_change_ends_an_attempt_before_egress() {
     assert_eq!(classify_key_check(Ok(true)), GatewayKeyCheck::Revoked);
     assert_eq!(classify_key_check(Ok(false)), GatewayKeyCheck::Current);
 }
+
+#[test]
+fn validate_task_snapshot_accepts_lifecycle_and_rejects_forged_or_contradictory_snapshots() {
+    let now = jiff::Timestamp::now();
+    let t1 = (now - jiff::SignedDuration::from_secs(10)).to_string();
+    let t2 = (now - jiff::SignedDuration::from_secs(9)).to_string();
+    let t3 = (now - jiff::SignedDuration::from_secs(8)).to_string();
+    let t4 = (now - jiff::SignedDuration::from_secs(7)).to_string();
+    let t5 = (now - jiff::SignedDuration::from_secs(6)).to_string();
+    let (submission, base_rejected) = fixture();
+
+    let mut admitted_task = base_rejected.clone();
+    admitted_task["status"] = json!({"state": "TASK_STATE_SUBMITTED", "timestamp": t2});
+    admitted_task["metadata"][PROVENANCE]["local_claim"] =
+        json!({"claim_id": "rclaim-1", "transition_version": 0});
+    admitted_task["metadata"][PROVENANCE]["local_run_id"] = json!("rrun-1");
+    admitted_task["metadata"][PROVENANCE]["receipts"] = json!([
+        {"receipt_id":"r-1","revision":1,"fact":"received","occurred_at":t1,"actor":"destination","admission_ref":"gw-1","detail":null},
+        {"receipt_id":"r-2","revision":2,"fact":"admitted","occurred_at":t2,"actor":"destination","admission_ref":"gw-1","detail":{
+            "local_run_id":"rrun-1","local_claim_id":"rclaim-1","local_claim_version":0,
+            "adapter_kind":"native_review","policy_profile":"codex_sol_review",
+            "resource_slot":"slot-1","lease_expires_at":t5
+        }}
+    ]);
+    assert_eq!(
+        validate_task_snapshot(&admitted_task, &submission),
+        Some("submitted")
+    );
+
+    let mut cancel_before_start = admitted_task.clone();
+    cancel_before_start["status"] = json!({"state": "TASK_STATE_SUBMITTED", "timestamp": t3});
+    cancel_before_start["metadata"][PROVENANCE]["revision"] = json!(3);
+    cancel_before_start["metadata"][PROVENANCE]["receipts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"receipt_id":"r-3","revision":3,"fact":"cancel_requested","occurred_at":t3,"actor":"destination","admission_ref":"gw-1","detail":{"local_run_id":"rrun-1","requested_by_identity_id":"origin"}}));
+    assert_eq!(
+        validate_task_snapshot(&cancel_before_start, &submission),
+        Some("submitted")
+    );
+    cancel_before_start["status"]["state"] = json!("TASK_STATE_CANCELED");
+    assert_eq!(
+        validate_task_snapshot(&cancel_before_start, &submission),
+        None
+    );
+
+    // Completed without Started must fail.
+    let mut forged_completed = admitted_task.clone();
+    forged_completed["status"] = json!({"state": "TASK_STATE_COMPLETED", "timestamp": t3});
+    forged_completed["metadata"][PROVENANCE]["revision"] = json!(3);
+    forged_completed["metadata"][PROVENANCE]["receipts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"receipt_id":"r-3","revision":3,"fact":"completed","occurred_at":t3,"actor":"destination","admission_ref":"gw-1","detail":{"local_run_id":"rrun-1","outcome":"completed"}}));
+    assert_eq!(validate_task_snapshot(&forged_completed, &submission), None);
+
+    // Valid Started -> Completed -> Cleanup preserves TASK_STATE_COMPLETED & terminal timestamp.
+    let mut completed = admitted_task;
+    completed["status"] = json!({"state": "TASK_STATE_COMPLETED", "timestamp": t4});
+    completed["metadata"][PROVENANCE]["revision"] = json!(5);
+    completed["metadata"][PROVENANCE]["receipts"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"receipt_id":"r-3","revision":3,"fact":"started","occurred_at":t3,"actor":"destination","admission_ref":"gw-1","detail":{"local_run_id":"rrun-1","adapter_kind":"native_review"}}),
+            json!({"receipt_id":"r-4","revision":4,"fact":"completed","occurred_at":t4,"actor":"destination","admission_ref":"gw-1","detail":{"local_run_id":"rrun-1","outcome":"completed"}}),
+            json!({"receipt_id":"r-5","revision":5,"fact":"cleanup","occurred_at":t5,"actor":"destination","admission_ref":"gw-1","detail":{"local_run_id":"rrun-1","cleanup_state":"cleaned","cleaned_at":t5}}),
+        ]);
+    assert_eq!(
+        validate_task_snapshot(&completed, &submission),
+        Some("completed")
+    );
+
+    // Cleanup pointing status.timestamp to t5 instead of terminal t4 fails.
+    completed["status"]["timestamp"] = json!(t5);
+    assert_eq!(validate_task_snapshot(&completed, &submission), None);
+
+    // Mismatched adapter_kind on started receipt must fail.
+    let mut bad_adapter = completed.clone();
+    bad_adapter["status"]["timestamp"] = json!(t4);
+    bad_adapter["metadata"][PROVENANCE]["receipts"][2]["detail"]["adapter_kind"] =
+        json!("dgx2_verify_pr");
+    assert_eq!(validate_task_snapshot(&bad_adapter, &submission), None);
+
+    // Started after lease_expires_at must fail.
+    let mut late_start = completed.clone();
+    late_start["status"]["timestamp"] = json!(t4);
+    late_start["metadata"][PROVENANCE]["receipts"][1]["detail"]["lease_expires_at"] = json!(t2);
+    assert_eq!(validate_task_snapshot(&late_start, &submission), None);
+}

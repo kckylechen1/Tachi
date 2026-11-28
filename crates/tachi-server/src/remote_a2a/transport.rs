@@ -186,6 +186,18 @@ pub(super) async fn serve(
         Some(config.agent_identity_id.clone()),
         true,
     )?;
+    if let Some((Some(identity), connection_id, state)) = server.work_claim_connection() {
+        if state == "self_asserted" {
+            let gateway_actor = memcore::db::a2a::A2aTransitionActor {
+                agent_identity_id: identity,
+                connection_id,
+            };
+            server.with_global_store(|store| {
+                memcore::db::a2a::reconcile_active_remote_runs(store.connection(), &gateway_actor)
+                    .map_err(|error| error.to_string())
+            })?;
+        }
+    }
     println!(
         "{}",
         json!({"remote_gateway_listening":listener.local_addr()?.to_string(),"execution":"unavailable"})

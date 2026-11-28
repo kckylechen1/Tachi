@@ -699,6 +699,215 @@ def _origin_submissions(ctx, origin, origin_config, origin_path, gateway, ca, le
         _private_text(origin_path, json.dumps(original))
 
 
+def _admit_only_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free_port, ca, leaves):
+    """Verify real-TLS AdmitOnly admission, slot cap, cancel, cross-peer isolation, and GetTask reconcile."""
+    admit_root = root / "admit-only"
+    admit_root.mkdir(mode=0o700)
+    gw = Daemon(ctx.daemon.tachi, admit_root / "gateway", free_port())
+    orig = Daemon(ctx.daemon.tachi, admit_root / "origin", free_port())
+    gw.app_home.chmod(0o700)
+    orig.app_home.chmod(0o700)
+    repo = make_fixture_repo(admit_root).resolve()
+    subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin",
+                    "https://github.com/owner/admit.git"], check=True, env=orig.env)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                                   env=orig.env, text=True).strip()
+    subprocess.run(["git", "-C", str(repo), "update-ref", "refs/pull/99/head", head],
+                   check=True, env=orig.env)
+    canonical_project = hashlib.sha256(b"admit-project").hexdigest()
+    domain = "dogfood:remote-admit"
+
+    gw_config = {
+        "schema_version": "tachi.remote_gateway.v1",
+        "agent_identity_id": "agent-mac",
+        "host_id": "host-mac",
+        "issuer_id": "issuer-admit-gw",
+        "trust_domain": domain,
+        "home": str(gw.app_home),
+        "bind": f"127.0.0.1:{gw.port}",
+        "public_endpoint": f"https://localhost:{gw.port}",
+        "certificate": leaves["server"]["certificate"],
+        "private_key": leaves["server"]["private_key"],
+        "peer_ca": str(ca),
+        "execution_mode": "admit_only",
+        "destinations": [{
+            "repository": "owner/admit",
+            "canonical_project": canonical_project,
+            "repo_root": str(repo),
+            "allowed_jobs": ["review_revision", "verify_pr"],
+            "review_profile": "codex_sol_review",
+            "verify_policy": "dgx2_acceptance_v1",
+            "resource_slot": "slot-mac-1",
+            "max_concurrent_runs": 1,
+            "lease_ttl_secs": 600,
+        }],
+        "peers": [
+            {
+                "agent_identity_id": "agent-cloud",
+                "host_id": "host-cloud",
+                "public_key_sha256": leaves["cloud"]["public_key_sha256"],
+                "repositories": [{"repository": "owner/admit", "jobs": ["review_revision", "verify_pr"]}],
+            },
+            {
+                "agent_identity_id": "agent-second",
+                "host_id": "host-second",
+                "public_key_sha256": leaves["second"]["public_key_sha256"],
+                "repositories": [{"repository": "owner/admit", "jobs": ["review_revision", "verify_pr"]}],
+            },
+        ],
+    }
+    orig_config = {
+        "schema_version": "tachi.remote_gateway.v1",
+        "agent_identity_id": "agent-cloud",
+        "host_id": "host-cloud",
+        "issuer_id": "issuer-admit-orig",
+        "trust_domain": domain,
+        "home": str(orig.app_home),
+        "origin_database": str(orig.app_home / "global" / "tachi-memory.db"),
+        "bind": f"127.0.0.1:{orig.port}",
+        "certificate": leaves["cloud"]["certificate"],
+        "private_key": leaves["cloud"]["private_key"],
+        "peer_ca": str(ca),
+        "peers": [{
+            "agent_identity_id": "agent-mac",
+            "host_id": "host-mac",
+            "public_key_sha256": leaves["server"]["public_key_sha256"],
+            "endpoint": f"https://localhost:{gw.port}",
+            "outbound": [{
+                "repository": "owner/admit",
+                "canonical_project": "",
+                "jobs": ["review_revision", "verify_pr"],
+            }],
+        }],
+    }
+    gw_path = admit_root / "gateway.json"
+    orig_path = admit_root / "origin.json"
+    _private_text(gw_path, json.dumps(gw_config))
+    orig.start()
+    alpha = beta = None
+    try:
+        source = McpSession(orig.url, {"X-Tachi-Workspace-Root": str(repo),
+                                       "X-Tachi-Agent-Identity": "agent-cloud"})
+        lease = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+        ok, claim, raw = source.call("tachi_task", action="claim", claim_scope=["src/main.rs"],
+            claim_mode="read_only", claim_role="reviewer", worktree_path=str(repo),
+            expected_head=head, lease_expires_at=lease, issue_ref="owner/admit#rev")
+        ctx.require("admit-only origin obtains WorkClaim", ok, claim if ok else raw)
+        with closing(sqlite3.connect(orig.app_home / "global" / "tachi-memory.db")) as conn:
+            orig_project = conn.execute("SELECT canonical_project FROM session_claims WHERE claim_id=?",
+                                        (claim["claim_id"],)).fetchone()[0]
+        orig_config["peers"][0]["outbound"][0]["canonical_project"] = orig_project
+        _private_text(orig_path, json.dumps(orig_config))
+
+        _start_gateway(ctx, gw, gw_path)
+        gw_db = gw.app_home / "global.db"
+        alpha = _client(ca, gw.port, leaves["cloud"])
+        beta = _client(ca, gw.port, leaves["second"])
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        req_file = admit_root / "job-admit.json"
+        req_payload = {
+            "kind": "tachi.remote_job/v1",
+            "sender": "agent-cloud",
+            "recipient": "agent-mac",
+            "trust_domain": domain,
+            "idempotency_key": "admit-job-1",
+            "nonce": "admit-nonce-1",
+            "issued_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "repository": "owner/admit",
+            "head_sha": head,
+            "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+            "job": "review_revision",
+            "question": "Review committed head in admit_only mode.",
+        }
+        _private_text(req_file, json.dumps(req_payload))
+
+        def orig_cli(*args):
+            res = _run(ctx, orig, f"admit-only cli {' '.join(args)}",
+                       [str(orig.tachi), "a2a", "remote", *args])
+            ctx.require(f"admit-only cli {' '.join(args)} succeeds", res.returncode == 0, _output(res))
+            return json.loads(res.stdout)
+
+        submitted = orig_cli("submit", "--config", str(orig_path), "--request", str(req_file))
+        prov = submitted["remote_receipt"]["metadata"][_PROVENANCE]
+        ctx.check("admit_only admits valid commit into TASK_STATE_SUBMITTED with zero workers spawned",
+                  submitted["current_state"] == "submitted"
+                  and submitted["remote_receipt"]["status"]["state"] == "TASK_STATE_SUBMITTED"
+                  and prov["local_claim"] is not None and prov["local_run_id"] is not None
+                  and [r["fact"] for r in prov["receipts"]] == ["received", "admitted"], submitted)
+        with closing(sqlite3.connect(gw_db)) as conn:
+            run_count = conn.execute("SELECT COUNT(*) FROM a2a_remote_runs").fetchone()[0]
+            claim_count = conn.execute("SELECT COUNT(*) FROM session_claims WHERE state='active'").fetchone()[0]
+            exec_count = conn.execute("SELECT COUNT(*) FROM dispatch_outcomes").fetchone()[0]
+        ctx.check("admit_only creates 1 run, 1 active local claim, and 0 worker dispatches",
+                  run_count == 1 and claim_count == 1 and exec_count == 0,
+                  {"runs": run_count, "claims": claim_count, "dispatches": exec_count})
+
+        replayed = orig_cli("submit", "--config", str(orig_path), "--request", str(req_file))
+        with closing(sqlite3.connect(gw_db)) as conn:
+            after_replay_runs = conn.execute("SELECT COUNT(*) FROM a2a_remote_runs").fetchone()[0]
+        ctx.check("admit_only replay returns original task without creating a second run",
+                  replayed["remote_task_id"] == submitted["remote_task_id"] and after_replay_runs == 1,
+                  replayed)
+
+        wrong_head = {**req_payload, "idempotency_key": "admit-wrong-head", "nonce": "admit-nonce-wh",
+                      "head_sha": "f" * 40}
+        _, wh_res = _rpc(alpha, "SendMessage", _message(wrong_head))
+        wh_task = wh_res.get("result", {}).get("task", {})
+        ctx.check("admit_only rejects missing head_sha cleanly",
+                  wh_task.get("status", {}).get("state") == "TASK_STATE_REJECTED"
+                  and wh_task.get("metadata", {}).get(_PROVENANCE, {}).get("receipts", [{}])[-1].get("detail")
+                      == {"reason": "head_not_found"}, wh_res)
+
+        subprocess.run(["git", "-C", str(repo), "update-ref", "refs/tags/refs/pull/98/head", head],
+                       check=True, env=orig.env)
+        unseeded_pr = {**req_payload, "job": "verify_pr", "pull_request": 98,
+                       "idempotency_key": "admit-pr-unseeded", "nonce": "admit-nonce-pr98"}
+        unseeded_pr.pop("question")
+        _, pr98_res = _rpc(alpha, "SendMessage", _message(unseeded_pr))
+        pr98_task = pr98_res.get("result", {}).get("task", {})
+        ctx.check("admit_only rejects verify_pr when trusted PR head ref is missing or mismatched",
+                  pr98_task.get("status", {}).get("state") == "TASK_STATE_REJECTED"
+                  and pr98_task.get("metadata", {}).get(_PROVENANCE, {}).get("receipts", [{}])[-1].get("detail")
+                      == {"reason": "head_not_found"}, pr98_res)
+
+        slot_full = {**req_payload, "job": "verify_pr", "pull_request": 99,
+                     "idempotency_key": "admit-slot-full", "nonce": "admit-nonce-sf"}
+        slot_full.pop("question")
+        _, sf_res = _rpc(alpha, "SendMessage", _message(slot_full))
+        sf_task = sf_res.get("result", {}).get("task", {})
+        ctx.check("admit_only rejects concurrent excess with resource_exhausted",
+                  sf_task.get("status", {}).get("state") == "TASK_STATE_REJECTED"
+                  and sf_task.get("metadata", {}).get(_PROVENANCE, {}).get("receipts", [{}])[-1].get("detail")
+                      == {"reason": "resource_exhausted"}, sf_res)
+
+        task_id = submitted["remote_task_id"]
+        for method in ("GetTask", "CancelTask"):
+            _, foreign = _rpc(beta, method, {"id": task_id})
+            ctx.check(f"admit_only cross-peer {method} returns TaskNotFound",
+                      foreign.get("error", {}).get("code") == -32001, foreign)
+
+        _, canceled = _rpc(alpha, "CancelTask", {"id": task_id})
+        cancel_res = canceled.get("result", {})
+        ctx.check("admit_only CancelTask adds cancel_requested receipt while keeping TASK_STATE_SUBMITTED",
+                  cancel_res.get("status", {}).get("state") == "TASK_STATE_SUBMITTED"
+                  and [r.get("fact") for r in cancel_res.get("metadata", {}).get(_PROVENANCE, {}).get("receipts", [])]
+                      == ["received", "admitted", "cancel_requested"], canceled)
+
+        reconciled = orig_cli("status", "--config", str(orig_path), "--submission", submitted["submission_id"], "--reconcile")
+        ctx.check("origin status --reconcile updates local snapshot via GetTask without resending",
+                  reconciled["current_state"] == "submitted" and reconciled["attempts"] == 1
+                  and reconciled["remote_receipt"]["metadata"][_PROVENANCE]["revision"] == 3, reconciled)
+    finally:
+        if alpha is not None:
+            alpha.close()
+        if beta is not None:
+            beta.close()
+        gw.stop()
+        orig.stop()
+
+
 def register_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_repo):
     @scenario("remote-admission", "a2a-remote", "identity", shared_daemon=False)
     def remote_admission_enforces_tls_identity_and_revocation(ctx):
@@ -926,6 +1135,11 @@ def register_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_rep
                       and listed.get("result", {}).get("tasks") == []
                       and "error" in replay and _remote_task_rows(db) == task_rows,
                       {"get": readback, "list": listed, "replay": replay})
+            for client in clients:
+                client.close()
+            clients.clear()
+            gateway.stop()
+            _admit_only_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free_port, ca, leaves)
         finally:
             for client in clients:
                 client.close()

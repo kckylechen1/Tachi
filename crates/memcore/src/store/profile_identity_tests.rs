@@ -972,6 +972,7 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
                     | "v43_adjudication_provenance"
                     | "v45_remote_job_mailbox"
                     | "v46_remote_submissions"
+                    | "v47_remote_execution_runs"
             )
         })
         .collect();

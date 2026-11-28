@@ -746,9 +746,8 @@ fn collect_gc_candidates(
                LEFT JOIN a2a_delivery_receipts r
                  ON r.envelope_id=e.envelope_id
                 AND r.state=e.current_state
-                AND r.envelope_version=e.state_version
               WHERE e.body IS NOT NULL
-                AND ((e.current_state IN ('consumed','expired','remote_rejected')
+                AND ((e.current_state IN ('consumed','expired','remote_rejected','remote_completed','remote_failed','remote_canceled')
                       AND unixepoch(r.occurred_at,'+90 days') <= unixepoch(?1))
                      OR (e.kind IN ('coordination/v1','tachi.remote_job/v1') AND unixepoch(e.expires_at,'+90 days') <= unixepoch(?1)))
               ORDER BY r.occurred_at,e.envelope_id LIMIT ?2",
@@ -767,7 +766,7 @@ fn collect_gc_candidates(
             conn, "a2a_remote_submission_body_scrub",
             "SELECT submission_id,current_state,state_version,expires_at,updated_at,body
              FROM a2a_remote_submissions WHERE body IS NOT NULL
-             AND ((current_state IN ('refused','blocked') AND unixepoch(updated_at,'+90 days') <= unixepoch(?1))
+             AND ((current_state IN ('completed','failed','canceled','refused','blocked') AND unixepoch(updated_at,'+90 days') <= unixepoch(?1))
                OR unixepoch(expires_at,'+90 days') <= unixepoch(?1))
              ORDER BY expires_at,submission_id LIMIT ?2",
             vec![Value::Text(as_of.to_string()), Value::Integer(A2A_BODY_SCRUB_BATCH as i64)],

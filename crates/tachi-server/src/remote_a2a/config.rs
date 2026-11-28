@@ -37,6 +37,34 @@ pub(super) struct Peer {
     pub outbound: Vec<OriginGrant>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DestinationExecutionMode {
+    #[default]
+    RefusalOnly,
+    AdmitOnly,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DestinationPolicy {
+    pub repository: String,
+    pub canonical_project: String,
+    pub repo_root: PathBuf,
+    #[serde(skip)]
+    pub canonical_repo_root: PathBuf,
+    #[serde(skip)]
+    pub canonical_git_dir: PathBuf,
+    pub allowed_jobs: Vec<JobKind>,
+    #[serde(default)]
+    pub review_profile: Option<String>,
+    #[serde(default)]
+    pub verify_policy: Option<String>,
+    pub resource_slot: String,
+    pub max_concurrent_runs: u32,
+    pub lease_ttl_secs: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GatewayConfig {
@@ -55,6 +83,10 @@ pub(super) struct GatewayConfig {
     pub peer_ca: PathBuf,
     pub peers: Vec<Peer>,
     pub public_endpoint: Option<String>,
+    #[serde(default)]
+    pub execution_mode: DestinationExecutionMode,
+    #[serde(default)]
+    pub destinations: Vec<DestinationPolicy>,
 }
 
 pub(super) fn identifier(value: &str) -> bool {
@@ -70,7 +102,7 @@ pub(super) fn identifier(value: &str) -> bool {
 impl GatewayConfig {
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         let bytes = read_operator_file(path, true)?;
-        let config: Self = serde_json::from_slice(&bytes)?;
+        let mut config: Self = serde_json::from_slice(&bytes)?;
         if config.schema_version != "tachi.remote_gateway.v1"
             || ![
                 &config.agent_identity_id,
@@ -169,6 +201,7 @@ impl GatewayConfig {
                 }
             }
         }
+        validate_destinations(&mut config.destinations)?;
         Ok(config)
     }
 
@@ -283,4 +316,157 @@ fn protected_path(path: &Path, directory: bool) -> Result<(), Box<dyn Error>> {
         "remote gateway needs a verified OS file-protection adapter on this platform".into(),
     );
     Ok(())
+}
+
+pub(super) fn resolve_pinned_git_dir(
+    repo_root: &Path,
+) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    if !repo_root.is_absolute() {
+        return Err("remote destination repo_root must be an absolute path".into());
+    }
+    let root_meta = std::fs::symlink_metadata(repo_root)?;
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Err("remote destination repo_root must be a real non-symlink directory".into());
+    }
+    let canonical_root = std::fs::canonicalize(repo_root)?;
+    let dot_git = repo_root.join(".git");
+    let git_meta = std::fs::symlink_metadata(&dot_git)?;
+    if git_meta.file_type().is_symlink() || (!git_meta.is_dir() && !git_meta.is_file()) {
+        return Err("remote destination repo_root must contain a real .git entry".into());
+    }
+    let canonical_git_dir = if git_meta.is_dir() {
+        std::fs::canonicalize(&dot_git)?
+    } else {
+        let raw = std::fs::read_to_string(&dot_git)?;
+        let Some(spec) = raw
+            .lines()
+            .next()
+            .and_then(|line| line.trim().strip_prefix("gitdir:"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Err("remote destination .git file is missing a valid gitdir directive".into());
+        };
+        let git_path = Path::new(spec);
+        let resolved = if git_path.is_absolute() {
+            git_path.to_path_buf()
+        } else {
+            canonical_root.join(git_path)
+        };
+        let resolved_meta = std::fs::symlink_metadata(&resolved)?;
+        if resolved_meta.file_type().is_symlink() || !resolved_meta.is_dir() {
+            return Err("remote destination gitdir must resolve to a real directory".into());
+        }
+        std::fs::canonicalize(&resolved)?
+    };
+    Ok((canonical_root, canonical_git_dir))
+}
+
+fn validate_destinations(destinations: &mut [DestinationPolicy]) -> Result<(), Box<dyn Error>> {
+    if destinations.len() > 64 {
+        return Err("remote destination policies exceed bounded profile".into());
+    }
+    let mut repos = HashSet::new();
+    for dest in destinations {
+        if !repository_id(&dest.repository)
+            || !repos.insert(dest.repository.clone())
+            || !identifier(&dest.canonical_project)
+            || !identifier(&dest.resource_slot)
+            || !(1..=16).contains(&dest.max_concurrent_runs)
+            || !(60..=3600).contains(&dest.lease_ttl_secs)
+        {
+            return Err("invalid remote destination policy identity, slot, or limits".into());
+        }
+        let (canonical_root, canonical_git_dir) = resolve_pinned_git_dir(&dest.repo_root)?;
+        dest.canonical_repo_root = canonical_root;
+        dest.canonical_git_dir = canonical_git_dir;
+        let jobs: HashSet<_> = dest.allowed_jobs.iter().collect();
+        if jobs.is_empty() || jobs.len() != dest.allowed_jobs.len() {
+            return Err("remote destination allowed_jobs must be non-empty and unique".into());
+        }
+        if jobs.contains(&JobKind::ReviewRevision) {
+            let Some(profile_name) = dest.review_profile.as_deref() else {
+                return Err("review_revision destination requires review_profile".into());
+            };
+            let Some(profile) = tachi_dispatch::native_session_profile(profile_name) else {
+                return Err("unknown remote review_profile".into());
+            };
+            if profile.writable {
+                return Err("remote review_profile must be read-only".into());
+            }
+        } else if let Some(profile_name) = dest.review_profile.as_deref() {
+            let Some(profile) = tachi_dispatch::native_session_profile(profile_name) else {
+                return Err("unknown remote review_profile".into());
+            };
+            if profile.writable {
+                return Err("remote review_profile must be read-only".into());
+            }
+        }
+        if jobs.contains(&JobKind::VerifyPr) {
+            let Some(verify_policy) = dest.verify_policy.as_deref() else {
+                return Err("verify_pr destination requires verify_policy".into());
+            };
+            if !identifier(verify_policy) {
+                return Err("invalid remote verify_policy identifier".into());
+            }
+        } else if let Some(verify_policy) = dest.verify_policy.as_deref() {
+            if !identifier(verify_policy) {
+                return Err("invalid remote verify_policy identifier".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admit_only_destination_validation_enforces_readonly_profile_real_repo_and_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_repo = dir.path().join("repo");
+        std::fs::create_dir_all(real_repo.join(".git")).unwrap();
+        let valid = DestinationPolicy {
+            repository: "owner/example".into(),
+            canonical_project: "a".repeat(64),
+            repo_root: real_repo.clone(),
+            canonical_repo_root: PathBuf::new(),
+            canonical_git_dir: PathBuf::new(),
+            allowed_jobs: vec![JobKind::ReviewRevision, JobKind::VerifyPr],
+            review_profile: Some("codex_sol_review".into()),
+            verify_policy: Some("dgx2_acceptance_v1".into()),
+            resource_slot: "slot-1".into(),
+            max_concurrent_runs: 2,
+            lease_ttl_secs: 600,
+        };
+        validate_destinations(&mut [valid.clone()]).unwrap();
+
+        let mut writable = valid.clone();
+        writable.review_profile = Some("codex_terra_write".into());
+        assert!(validate_destinations(&mut [writable]).is_err());
+
+        let mut bad_limit = valid.clone();
+        bad_limit.max_concurrent_runs = 0;
+        assert!(validate_destinations(&mut [bad_limit]).is_err());
+
+        let mut bad_ttl = valid.clone();
+        bad_ttl.lease_ttl_secs = 15;
+        assert!(validate_destinations(&mut [bad_ttl]).is_err());
+
+        let mut not_git = valid.clone();
+        let plain_dir = dir.path().join("not-git");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        not_git.repo_root = plain_dir;
+        assert!(validate_destinations(&mut [not_git]).is_err());
+
+        #[cfg(unix)]
+        {
+            let link_repo = dir.path().join("link-repo");
+            std::os::unix::fs::symlink(&real_repo, &link_repo).unwrap();
+            let mut symlinked = valid;
+            symlinked.repo_root = link_repo;
+            assert!(validate_destinations(&mut [symlinked]).is_err());
+        }
+    }
 }

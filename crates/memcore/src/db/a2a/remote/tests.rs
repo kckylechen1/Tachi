@@ -141,6 +141,7 @@ fn request(id: &str, binding: &VerifiedAdmissionBinding) -> NewRemoteTask {
             repository: REPOSITORY.into(),
             job: "review_revision".into(),
             head_sha: "a".repeat(40),
+            pull_request: None,
             origin_claim_id: "origin-claim".into(),
             origin_claim_version: 3,
             destination_host_id: "destination-host".into(),
@@ -205,8 +206,10 @@ fn remote_rejection_has_real_gateway_receipts_and_atomic_local_isolation() {
     }
     assert_eq!(task.receipts[0].detail, None);
     assert_eq!(
-        task.receipts[1].detail.as_ref().unwrap().reason,
-        RemoteRejectionReason::ExecutionUnavailable
+        task.receipts[1].detail,
+        Some(RemoteReceiptDetail::Refusal {
+            reason: RemoteRejectionReason::ExecutionUnavailable
+        })
     );
     let serialized = serde_json::to_value(&task).unwrap();
     assert!(serialized["envelope"].get("body").is_none());
@@ -746,4 +749,557 @@ fn concurrent_same_key_creates_one_task_and_one_receipt_pair() {
         .collect();
     assert_eq!(tasks[0], tasks[1]);
     assert_eq!(counts(&conn), (1, 2));
+}
+
+#[test]
+fn admit_remote_task_allocates_local_claim_run_and_receipts_atomically() {
+    let (_dir, conn, binding, gateway, access) = {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admit.db");
+        enable_extensions();
+        let conn = Connection::open(&path).unwrap();
+        let (binding, gateway, access) = setup(&conn);
+        (dir, conn, binding, gateway, access)
+    };
+    let canonical_project = "d".repeat(64);
+    let spec = RemoteLocalAdmissionSpec {
+        canonical_project: canonical_project.clone(),
+        adapter_kind: RemoteAdapterKind::NativeReview,
+        policy_profile: "codex_sol_review".into(),
+        resource_slot: "slot-mac-review".into(),
+        max_concurrent_runs: 2,
+        lease_ttl_secs: 600,
+        issue_ref: "owner/repo#review_revision".into(),
+        worktree_path: "/fixture/repo".into(),
+        writable: false,
+    };
+    let req = request("admit-1", &binding);
+    let outcome = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req,
+        &RemoteAdmissionDecision::Admit(spec),
+    )
+    .unwrap();
+    let RemoteTaskInsertOutcome::Created(task) = outcome else {
+        panic!("expected Created outcome");
+    };
+    assert_eq!(task.envelope.current_state, "remote_admitted");
+    assert_eq!(task.envelope.state_version, 2);
+    let run = task.run.as_ref().expect("run row must exist");
+    assert_eq!(run.canonical_project, canonical_project);
+    assert_eq!(run.lifecycle_state, RemoteRunLifecycleState::Admitted);
+    assert_eq!(run.cleanup_state, RemoteCleanupStatus::Pending);
+    assert_eq!(task.receipts.len(), 2);
+    assert_eq!(task.receipts[0].receipt.state, "remote_received");
+    assert_eq!(task.receipts[1].receipt.state, "remote_admitted");
+    let claim = crate::db::session_claims::get_claim(&conn, &run.local_claim_id)
+        .unwrap()
+        .expect("local WorkClaim must exist");
+    assert_eq!(claim.state, crate::db::session_claims::ClaimState::Active);
+    assert_eq!(claim.transition_version, 0);
+    assert_eq!(
+        crate::db::session_claims::work_claim_project(&conn, &run.local_claim_id).unwrap(),
+        Some(canonical_project)
+    );
+
+    let replay = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req,
+        &RemoteAdmissionDecision::Reject(RemoteRejectionReason::ExecutionUnavailable),
+    )
+    .unwrap();
+    assert_eq!(replay, RemoteTaskInsertOutcome::Replay(task));
+}
+
+#[test]
+fn admit_remote_task_enforces_resource_slot_limit_and_claim_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("slot-claim.db");
+    enable_extensions();
+    let conn = Connection::open(&path).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let canonical_project = "e".repeat(64);
+    let spec = RemoteLocalAdmissionSpec {
+        canonical_project: canonical_project.clone(),
+        adapter_kind: RemoteAdapterKind::NativeReview,
+        policy_profile: "codex_sol_review".into(),
+        resource_slot: "slot-1".into(),
+        max_concurrent_runs: 1,
+        lease_ttl_secs: 600,
+        issue_ref: "owner/repo#review_revision".into(),
+        worktree_path: "/fixture/repo".into(),
+        writable: false,
+    };
+    let first = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &request("slot-first", &binding),
+        &RemoteAdmissionDecision::Admit(spec.clone()),
+    )
+    .unwrap();
+    assert!(
+        matches!(first, RemoteTaskInsertOutcome::Created(t) if t.envelope.current_state == "remote_admitted")
+    );
+
+    let exhausted = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &request("slot-second", &binding),
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            issue_ref: "owner/repo#other".into(),
+            ..spec.clone()
+        }),
+    )
+    .unwrap();
+    let RemoteTaskInsertOutcome::Created(exhausted_task) = exhausted else {
+        panic!("expected durable rejection");
+    };
+    assert_eq!(exhausted_task.envelope.current_state, "remote_rejected");
+    assert!(exhausted_task.run.is_none());
+    assert_eq!(
+        exhausted_task.receipts[1].detail,
+        Some(RemoteReceiptDetail::Refusal {
+            reason: RemoteRejectionReason::ResourceExhausted
+        })
+    );
+
+    let mut conflicting_head_req = request("conflict-head", &binding);
+    conflicting_head_req.header.head_sha = "b".repeat(40);
+    body(&mut conflicting_head_req, &binding);
+    let conflict = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &conflicting_head_req,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            max_concurrent_runs: 4,
+            ..spec
+        }),
+    )
+    .unwrap();
+    let RemoteTaskInsertOutcome::Created(conflict_task) = conflict else {
+        panic!("expected durable claim conflict");
+    };
+    assert_eq!(conflict_task.envelope.current_state, "remote_rejected");
+    assert!(conflict_task.run.is_none());
+    assert_eq!(
+        conflict_task.receipts[1].detail,
+        Some(RemoteReceiptDetail::Refusal {
+            reason: RemoteRejectionReason::ClaimConflict
+        })
+    );
+}
+
+#[test]
+fn lifecycle_transitions_enforce_revocation_claim_start_terminal_and_cleanup_invariants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.db");
+    enable_extensions();
+    let conn = Connection::open(&path).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let spec = RemoteLocalAdmissionSpec {
+        canonical_project: "f".repeat(64),
+        adapter_kind: RemoteAdapterKind::NativeReview,
+        policy_profile: "codex_sol_review".into(),
+        resource_slot: "slot-life".into(),
+        max_concurrent_runs: 4,
+        lease_ttl_secs: 600,
+        issue_ref: "owner/repo#life".into(),
+        worktree_path: "/fixture/repo".into(),
+        writable: false,
+    };
+
+    // Completed without Started must be refused; Failed from Admitted succeeds.
+    let req_never_started = request("life-admitted", &binding);
+    admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req_never_started,
+        &RemoteAdmissionDecision::Admit(spec.clone()),
+    )
+    .unwrap();
+    assert!(record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &req_never_started.envelope_id,
+        RemoteTerminalOutcome::Completed,
+        Some(&"c".repeat(64)),
+        None,
+        None,
+    )
+    .is_err());
+    let failed = record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &req_never_started.envelope_id,
+        RemoteTerminalOutcome::Failed,
+        None,
+        Some("spawn_failed"),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        failed,
+        RemoteTerminalTransition::Applied(ref run)
+            if run.lifecycle_state == RemoteRunLifecycleState::Failed
+    ));
+
+    // Released local WorkClaim refuses Started.
+    let req_released = request("life-released", &binding);
+    let RemoteTaskInsertOutcome::Created(released_task) = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req_released,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            issue_ref: "owner/repo#released".into(),
+            ..spec.clone()
+        }),
+    )
+    .unwrap() else {
+        panic!();
+    };
+    crate::db::session_claims::release_work_claim(
+        &conn,
+        &released_task.run.as_ref().unwrap().local_claim_id,
+        &gateway.agent_identity_id,
+        0,
+        "operator_release",
+    )
+    .unwrap();
+    assert!(record_remote_task_started(&conn, &gateway, &req_released.envelope_id, None).is_err());
+    let reconciled = reconcile_active_remote_runs(&conn, &gateway).unwrap();
+    assert_eq!(reconciled, vec![req_released.envelope_id.clone()]);
+
+    // Happy path: Admitted -> Started -> Completed -> Cleanup + late terminal noop.
+    let req_ok = request("life-ok", &binding);
+    admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req_ok,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            issue_ref: "owner/repo#ok".into(),
+            ..spec.clone()
+        }),
+    )
+    .unwrap();
+    let started = record_remote_task_started(
+        &conn,
+        &gateway,
+        &req_ok.envelope_id,
+        Some("session:native-1"),
+    )
+    .unwrap();
+    assert_eq!(started.lifecycle_state, RemoteRunLifecycleState::Started);
+    let completed = record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &req_ok.envelope_id,
+        RemoteTerminalOutcome::Completed,
+        Some(&"a".repeat(64)),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        completed,
+        RemoteTerminalTransition::Applied(ref run)
+            if run.lifecycle_state == RemoteRunLifecycleState::Completed
+    ));
+    let late = record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &req_ok.envelope_id,
+        RemoteTerminalOutcome::Failed,
+        None,
+        Some("late_error"),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(late, RemoteTerminalTransition::AlreadyTerminal(_)));
+
+    let cleaned = record_remote_task_cleanup(
+        &conn,
+        &gateway,
+        &req_ok.envelope_id,
+        false,
+        Some("cleanup_busy"),
+    )
+    .unwrap();
+    assert_eq!(cleaned.cleanup_state, RemoteCleanupStatus::Failed);
+    let reread = read_remote_task(&conn, &binding, &access, &req_ok.envelope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reread.envelope.current_state, "remote_completed");
+    assert_eq!(reread.envelope.state_version, 5);
+    assert_eq!(
+        reread.receipts.last().unwrap().receipt.state,
+        "remote_cleanup"
+    );
+
+    // Revoked mTLS sender key refuses Started at launch boundary.
+    let req_revoked = request("life-revoked", &binding);
+    admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req_revoked,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            issue_ref: "owner/repo#revoked".into(),
+            ..spec
+        }),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO identity_admission_verification_revocations
+         (revocation_id,admission_id,issuer_id,evidence_digest,evidence_ref,nonce,revoked_at)
+         VALUES ('rev-life',?1,?2,?3,?4,'rev-life',?5)",
+        params![
+            binding.admission_id,
+            binding.issuer_id,
+            "a".repeat(64),
+            format!("attestation:mtls-peer:{:x}", Sha256::digest(b"origin")),
+            now_utc_iso()
+        ],
+    )
+    .unwrap();
+    assert!(record_remote_task_started(&conn, &gateway, &req_revoked.envelope_id, None).is_err());
+}
+
+#[test]
+fn cancel_requested_is_idempotent_and_isolated_by_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cancel.db");
+    enable_extensions();
+    let conn = Connection::open(&path).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let other_binding = verified(
+        &conn,
+        "other-origin",
+        "other-conn",
+        "workspace:test",
+        "mtls-peer",
+    );
+    let req = request("cancel-1", &binding);
+    admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            canonical_project: "1".repeat(64),
+            adapter_kind: RemoteAdapterKind::NativeReview,
+            policy_profile: "codex_sol_review".into(),
+            resource_slot: "slot-cancel".into(),
+            max_concurrent_runs: 2,
+            lease_ttl_secs: 600,
+            issue_ref: "owner/repo#cancel".into(),
+            worktree_path: "/fixture/repo".into(),
+            writable: false,
+        }),
+    )
+    .unwrap();
+    assert!(record_remote_task_cancel_requested(
+        &conn,
+        &other_binding,
+        &gateway,
+        &access,
+        &req.envelope_id
+    )
+    .unwrap()
+    .is_none());
+    let canceled =
+        record_remote_task_cancel_requested(&conn, &binding, &gateway, &access, &req.envelope_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(canceled.envelope.current_state, "remote_cancel_requested");
+    assert_eq!(canceled.envelope.state_version, 3);
+    let idempotent =
+        record_remote_task_cancel_requested(&conn, &binding, &gateway, &access, &req.envelope_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(idempotent, canceled);
+}
+
+#[test]
+fn expired_admitted_or_canceled_run_reconciles_freeing_slot_for_next_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reconcile-slot.db");
+    enable_extensions();
+    let conn = Connection::open(&path).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let spec = RemoteLocalAdmissionSpec {
+        canonical_project: "2".repeat(64),
+        adapter_kind: RemoteAdapterKind::NativeReview,
+        policy_profile: "codex_sol_review".into(),
+        resource_slot: "slot-reconcile".into(),
+        max_concurrent_runs: 1,
+        lease_ttl_secs: 600,
+        issue_ref: "owner/repo#slot-reconcile".into(),
+        worktree_path: "/fixture/repo".into(),
+        writable: false,
+    };
+    let req1 = request("slot-rec-1", &binding);
+    let RemoteTaskInsertOutcome::Created(task1) = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req1,
+        &RemoteAdmissionDecision::Admit(spec.clone()),
+    )
+    .unwrap() else {
+        panic!("expected Created");
+    };
+    record_remote_task_cancel_requested(&conn, &binding, &gateway, &access, &req1.envelope_id)
+        .unwrap();
+    // Expire the start window of the unstarted cancel_requested run cleanly via DB timestamp.
+    conn.execute(
+        "UPDATE a2a_envelopes SET created_at='1999-01-01T00:00:00.000Z', expires_at='2000-01-01T00:00:00.000Z' WHERE envelope_id=?1",
+        [&req1.envelope_id],
+    )
+    .unwrap();
+    let req2 = request("slot-rec-2", &binding);
+    let RemoteTaskInsertOutcome::Created(task2) = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req2,
+        &RemoteAdmissionDecision::Admit(spec),
+    )
+    .unwrap() else {
+        panic!("expected Created");
+    };
+    assert_eq!(task2.envelope.current_state, "remote_admitted");
+    let failed1 = read_remote_task(&conn, &binding, &access, &task1.envelope.envelope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed1.envelope.current_state, "remote_failed");
+    assert_eq!(
+        failed1.run.as_ref().unwrap().lifecycle_state,
+        RemoteRunLifecycleState::Failed
+    );
+    let released_claim =
+        crate::db::session_claims::get_claim(&conn, &task1.run.unwrap().local_claim_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        released_claim.state,
+        crate::db::session_claims::ClaimState::Released
+    );
+}
+
+#[test]
+fn gc_session_claims_prunes_released_remote_claims_without_fk_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gc-claims.db");
+    enable_extensions();
+    let conn = Connection::open(&path).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let canonical_project = "3".repeat(64);
+    let req = request("gc-claim-run", &binding);
+    let RemoteTaskInsertOutcome::Created(task) = admit_remote_task(
+        &conn,
+        &binding,
+        &gateway,
+        &access,
+        &req,
+        &RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            canonical_project: canonical_project.clone(),
+            adapter_kind: RemoteAdapterKind::NativeReview,
+            policy_profile: "codex_sol_review".into(),
+            resource_slot: "slot-gc".into(),
+            max_concurrent_runs: 1,
+            lease_ttl_secs: 600,
+            issue_ref: "owner/repo#gc".into(),
+            worktree_path: "/fixture/repo".into(),
+            writable: false,
+        }),
+    )
+    .unwrap() else {
+        panic!("expected Created");
+    };
+    record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &req.envelope_id,
+        RemoteTerminalOutcome::Failed,
+        None,
+        Some("spawn_failed"),
+        None,
+    )
+    .unwrap();
+    let remote_claim_id = task.run.unwrap().local_claim_id;
+
+    // Seed an unrelated released claim to confirm whole-batch GC is not blocked.
+    let now = jiff::Timestamp::now();
+    crate::db::session_claims::insert_local_project_work_claim(
+        &conn,
+        &crate::db::session_claims::NewWorkClaim {
+            claim_id: "unrelated-claim".into(),
+            agent_identity_id: gateway.agent_identity_id.clone(),
+            session_client: None,
+            issue_ref: Some("owner/repo#unrelated".into()),
+            flow_id: None,
+            dispatch_id: None,
+            branch: "main".into(),
+            worktree_path: "/fixture/other".into(),
+            declared_file_scope: "src/lib.rs".into(),
+            role: "reviewer".into(),
+            mode: crate::db::session_claims::WorkClaimMode::ReadOnly,
+            expected_head: "a".repeat(40),
+            lease_expires_at: crate::time_compat::millis_z(
+                now + jiff::SignedDuration::from_mins(5),
+            ),
+            created_at: crate::time_compat::millis_z(now),
+        },
+        &gateway.connection_id,
+        &canonical_project,
+    )
+    .unwrap();
+    crate::db::session_claims::release_work_claim(
+        &conn,
+        "unrelated-claim",
+        &gateway.agent_identity_id,
+        0,
+        "done",
+    )
+    .unwrap();
+
+    conn.execute(
+        "UPDATE session_claims SET released_at='2000-01-01T00:00:00.000Z'
+         WHERE claim_id IN (?1,'unrelated-claim')",
+        [&remote_claim_id],
+    )
+    .unwrap();
+    let gc = crate::db::session_claims::gc_session_claims(&conn, now, 30, 1).unwrap();
+    assert_eq!(gc.released_pruned, 2);
+    assert!(
+        crate::db::session_claims::get_claim(&conn, &remote_claim_id)
+            .unwrap()
+            .is_none()
+    );
+    let preserved = read_remote_task(&conn, &binding, &access, &req.envelope_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.run.unwrap().local_claim_id, remote_claim_id);
 }

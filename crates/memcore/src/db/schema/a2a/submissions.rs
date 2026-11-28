@@ -132,7 +132,7 @@ mod tests {
                 "{table}"
             );
         }
-        validate(store.connection()).unwrap();
+        super::validate_a2a_mailbox_schema(store.connection()).unwrap();
         drop(store);
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch("DROP TABLE a2a_remote_submissions")

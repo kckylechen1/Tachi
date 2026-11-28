@@ -44,6 +44,7 @@ catalogue! {
     44, "v44_typed_record_erasure", Portable, |conn, _context, _report| { crate::db::typed_records::migrate_v44(conn) };
     45, "v45_remote_job_mailbox", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v45_remote_mailbox(conn)?; } Ok(()) };
     46, "v46_remote_submissions", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v46_remote_submissions(conn)?; } Ok(()) };
+    47, "v47_remote_execution_runs", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v47_remote_execution_runs(conn)?; } Ok(()) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {
@@ -231,6 +232,7 @@ mod tests {
             (44, MigrationScope::Portable),
             (45, MigrationScope::Product),
             (46, MigrationScope::Product),
+            (47, MigrationScope::Product),
         ];
         for (migration, (expected_index, expected_scope)) in
             MIGRATIONS.iter().zip(expected_scopes.iter())
@@ -245,7 +247,7 @@ mod tests {
         assert_eq!(portable_version(&MIGRATIONS[..1]), 39);
         assert_eq!(expected_version(&MIGRATIONS[..1]), 39);
         assert_eq!(portable_version(MIGRATIONS), 44);
-        assert_eq!(expected_version(MIGRATIONS), 46);
+        assert_eq!(expected_version(MIGRATIONS), 47);
         let keys: std::collections::BTreeSet<_> =
             MIGRATIONS.iter().map(|entry| entry.sentinel).collect();
         assert_eq!(keys.len(), MIGRATIONS.len(), "sentinels are unique");
