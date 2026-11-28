@@ -33,6 +33,7 @@ fn credential_profile_json_parse_retains_legacy_kinds_for_diagnostics() {
     assert_eq!(profile.materializers[1].chmod.as_deref(), Some("0600"));
 }
 
+#[cfg(unix)]
 #[test]
 fn credential_profile_discovery_skips_unrelated_malformed_json() {
     let dir = tempfile::tempdir().expect("temp credential dir");
@@ -60,4 +61,56 @@ fn credential_profile_discovery_skips_unrelated_malformed_json() {
         Some("valid.json")
     );
     assert_eq!(profile.materializers[0].kind, "env");
+}
+
+#[cfg(not(unix))]
+#[test]
+fn credential_profile_discovery_requires_descriptor_anchoring() {
+    let dir = tempfile::tempdir().expect("temp credential dir");
+    let error = crate::find_credential_profile(dir.path(), "profile").unwrap_err();
+    assert!(error.contains("descriptor-anchored filesystem operations are unavailable"));
+}
+
+#[cfg(unix)]
+#[test]
+fn credential_profile_discovery_refuses_symlinked_components_and_leaf() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("project");
+    let project = dir.path().join("project");
+    let outside = dir.path().join("outside");
+    let credentials = project.join(".tachi/credentials");
+    fs::create_dir_all(outside.join("credentials")).unwrap();
+    fs::create_dir(&project).unwrap();
+    let outside_profile = outside.join("credentials/profile.json");
+    fs::write(
+        &outside_profile,
+        r#"{"credential_profiles":{"borrowed":{"provider":"outside"}}}"#,
+    )
+    .unwrap();
+
+    symlink(&outside, project.join(".tachi")).unwrap();
+    assert!(crate::find_credential_profile(&credentials, "borrowed").is_err());
+    fs::remove_file(project.join(".tachi")).unwrap();
+
+    fs::create_dir(project.join(".tachi")).unwrap();
+    symlink(outside.join("credentials"), &credentials).unwrap();
+    assert!(crate::find_credential_profile(&credentials, "borrowed").is_err());
+    fs::remove_file(&credentials).unwrap();
+
+    fs::create_dir(&credentials).unwrap();
+    let leaf = credentials.join("profile.json");
+    symlink(&outside_profile, &leaf).unwrap();
+    assert!(crate::find_credential_profile(&credentials, "borrowed").is_err());
+    assert!(crate::load_credential_profile_from_path(&leaf, "borrowed").is_err());
+
+    fs::remove_file(&leaf).unwrap();
+    fs::copy(outside_profile, &leaf).unwrap();
+    assert_eq!(
+        crate::find_credential_profile(&credentials, "borrowed")
+            .unwrap()
+            .0,
+        leaf
+    );
 }
