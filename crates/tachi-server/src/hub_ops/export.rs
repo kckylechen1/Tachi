@@ -63,6 +63,75 @@ fn hub_file_exports_preserve_private_0600_mode_on_overwrite() {
     );
 }
 
+#[cfg(all(test, unix))]
+#[test]
+fn hub_file_exports_preserve_execute_bits_and_sweep_stale_staging_files() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let out_dir = root.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Existing executable file should retain 0755 across overwrite.
+    let exec_leaf = out_dir.join("run.sh");
+    fs::write(&exec_leaf, "#!/bin/sh\necho old\n").unwrap();
+    fs::set_permissions(&exec_leaf, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Seed one stale (>2h old) UUID v4, one stale non-UUID-v4 lookalike, one non-RFC4122 variant lookalike, and one fresh staging file.
+    let stale_tmp = out_dir.join(format!(".tachi-export-{}", uuid::Uuid::new_v4()));
+    let stale_lookalike = out_dir.join(format!(".tachi-export-{}", "a".repeat(36)));
+    let stale_non_rfc4122 = out_dir.join(".tachi-export-00000000-0000-4000-0000-000000000000");
+    let fresh_tmp = out_dir.join(format!(".tachi-export-{}", uuid::Uuid::new_v4()));
+    fs::write(&stale_tmp, "abandoned").unwrap();
+    fs::write(&stale_lookalike, "user-file").unwrap();
+    fs::write(&stale_non_rfc4122, "non-rfc4122-user-file").unwrap();
+    fs::write(&fresh_tmp, "in-flight").unwrap();
+    let two_hours_ago = jiff::Timestamp::now().as_second() - 7200;
+    let times = [
+        libc::timespec {
+            tv_sec: two_hours_ago,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: two_hours_ago,
+            tv_nsec: 0,
+        },
+    ];
+    for path in [&stale_tmp, &stale_lookalike, &stale_non_rfc4122] {
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is valid NUL-terminated path and `times` is 2-element array.
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(rc, 0, "failed to backdate stale file");
+    }
+
+    let output = ExportDir::open_or_create(out_dir.clone()).unwrap();
+    assert!(!stale_tmp.exists(), "stale staging remnant must be swept");
+    assert!(
+        stale_lookalike.exists(),
+        "non-UUID-v4 lookalike file must never be swept"
+    );
+    assert!(
+        stale_non_rfc4122.exists(),
+        "non-RFC4122 variant lookalike file must never be swept"
+    );
+    assert!(fresh_tmp.exists(), "fresh staging file must not be swept");
+
+    output
+        .write_file("run.sh", "#!/bin/sh\necho new\n")
+        .unwrap();
+    let mode = fs::symlink_metadata(&exec_leaf)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o755,
+        "re-exporting over a 0755 file must preserve execute bits"
+    );
+}
+
 fn claude_cleanup_report(requested: bool) -> serde_json::Value {
     json!({
         "requested": requested,
@@ -458,7 +527,60 @@ mod export_dir_unix {
                 }
                 current
             };
-            Ok(Self { path, fd })
+            let dir = Self { path, fd };
+            dir.sweep_stale_staging_files(3600);
+            Ok(dir)
+        }
+
+        pub(super) fn sweep_stale_staging_files(&self, max_age_secs: i64) {
+            let now_secs = jiff::Timestamp::now().as_second();
+            // SAFETY: `self.fd` is a live directory fd.
+            let dup_fd = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+            if dup_fd < 0 {
+                return;
+            }
+            // SAFETY: `dup_fd` is a fresh directory descriptor owned by `fdopendir`.
+            let dirp = unsafe { libc::fdopendir(dup_fd) };
+            if dirp.is_null() {
+                unsafe {
+                    libc::close(dup_fd);
+                }
+                return;
+            }
+            loop {
+                // SAFETY: `dirp` is a valid non-null DIR pointer.
+                let entry = unsafe { libc::readdir(dirp) };
+                if entry.is_null() {
+                    break;
+                }
+                // SAFETY: `d_name` is a NUL-terminated C string in the dirent buffer.
+                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+                let bytes = name.to_bytes();
+                let is_canonical_v4_staging = bytes
+                    .strip_prefix(b".tachi-export-")
+                    .and_then(|suffix| std::str::from_utf8(suffix).ok())
+                    .is_some_and(|suffix| {
+                        uuid::Uuid::parse_str(suffix).is_ok_and(|u| {
+                            u.get_version() == Some(uuid::Version::Random)
+                                && u.get_variant() == uuid::Variant::RFC4122
+                                && u.hyphenated().to_string() == suffix
+                        })
+                    });
+                if is_canonical_v4_staging {
+                    if let Ok(stat) = self.stat_entry(name) {
+                        if (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+                            && stat.st_nlink == 1
+                            && now_secs.saturating_sub(stat.st_mtime) >= max_age_secs
+                        {
+                            let _ = self.unlink_file(name);
+                        }
+                    }
+                }
+            }
+            // SAFETY: `dirp` is non-null and closed exactly once.
+            unsafe {
+                libc::closedir(dirp);
+            }
         }
 
         pub(super) fn write_file(&self, file_name: &str, content: &str) -> io::Result<()> {
@@ -500,10 +622,11 @@ mod export_dir_unix {
                             }),
                     )?;
                     if let Ok(stat) = existing {
-                        let target_mode = (stat.st_mode & 0o666) as libc::mode_t;
+                        let target_mode = (stat.st_mode & 0o777) as libc::mode_t;
                         if target_mode != 0o600 {
                             // SAFETY: `file` owns a live fd; fchmod preserves existing
-                            // regular-file access bits without widening 0600 files.
+                            // regular-file access bits (including execute bits, stripping
+                            // setuid/setgid/sticky) without widening 0600 files.
                             if unsafe { libc::fchmod(file.as_raw_fd(), target_mode) } != 0 {
                                 return Err(io::Error::last_os_error());
                             }
@@ -523,11 +646,13 @@ mod export_dir_unix {
                             destination.as_ptr(),
                         )
                     };
-                    if result == 0 {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
+                    if result != 0 {
+                        return Err(io::Error::last_os_error());
                     }
+                    // SAFETY: `self.fd` is a live directory descriptor; fsync persists
+                    // the atomic rename entry across crash/power loss.
+                    let _ = unsafe { libc::fsync(self.fd.as_raw_fd()) };
+                    Ok(())
                 });
             if result.is_err() {
                 let _ = self.unlink_file(&temporary);

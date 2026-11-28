@@ -34,6 +34,7 @@ STOP_FUNCTIONS = STATUS_FUNCTIONS + [
 ]
 SERVICE_FUNCTIONS = STOP_FUNCTIONS + [
     "xml_escape",
+    "dotenv_may_override_db_scope",
     "check_launch_agent_db",
     "check_existing_plist_scope",
     "read_launchctl_scope",
@@ -943,6 +944,82 @@ launchctl() {
         self.assertIn("outside the verified LaunchAgent", result.stderr)
         self.assertIn("88", result.stderr)
         self.assertFalse((self.root / "launchctl").exists())
+
+    def test_legacy_daemon_no_project_db_upgrades_with_unrelated_dotenv_and_manifest(self) -> None:
+        plist = self.launch_agents() / f"{LABEL}.plist"
+        (self.home / ".tachi").mkdir(parents=True, exist_ok=True)
+        (self.home / ".secrets").mkdir(parents=True, exist_ok=True)
+        (self.home / ".tachi/config.env").write_text("VOYAGE_API_KEY=vault:VOYAGE_API_KEY\n", encoding="utf-8")
+        (self.home / ".secrets/master.env").write_text("OTHER_TOKEN=abc\n", encoding="utf-8")
+        (self.home / ".tachi/manifest.json").write_text('{"databases":[]}\n', encoding="utf-8")
+        self.write_launch_agent(plist, "--port", "6919", "--no-project-db", "--allow-schema-migration")
+        self.write_loaded_job("--port", "6919", "--no-project-db", "--allow-schema-migration", pid=4242)
+        self.status.write_text(running(4242), encoding="utf-8")
+
+        result = self.run_bash(self.service_driver(), {"DRAIN_MANAGED_JOB": "1"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plist_text = plist.read_text(encoding="utf-8")
+        self.assertIn("<string>--global-db</string>", plist_text)
+        self.assertIn("<string>--allow-schema-migration</string>", plist_text)
+        self.assertEqual(
+            (self.root / "launchctl").read_text(encoding="utf-8").splitlines(),
+            [f"bootout gui/{os.getuid()}/{LABEL}", f"bootstrap gui/{os.getuid()} {plist}"],
+        )
+
+    def test_implicit_scope_still_refuses_memory_db_path_symlink_or_non_deferred_manifest(self) -> None:
+        plist = self.launch_agents() / f"{LABEL}.plist"
+        (self.home / ".tachi").mkdir(parents=True, exist_ok=True)
+        (self.home / ".secrets").mkdir(parents=True, exist_ok=True)
+        self.status.write_text('{"state":"none"}', encoding="utf-8")
+
+        # 1. config.env setting MEMORY_DB_PATH must fail closed.
+        cfg = self.home / ".tachi/config.env"
+        cfg.write_text("MEMORY_DB_PATH=/elsewhere/db.sqlite\n", encoding="utf-8")
+        before = self.write_launch_agent(plist, "--port", "6919", "--no-project-db")
+        res = self.run_bash(self.service_driver(), {})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("config.env", res.stderr)
+        self.assertEqual(plist.read_bytes(), before)
+        cfg.unlink()
+
+        # 2. Symlinked master.env must fail closed.
+        real_env = self.root / "real-master.env"
+        real_env.write_text("OTHER=1\n", encoding="utf-8")
+        master = self.home / ".secrets/master.env"
+        master.symlink_to(real_env)
+        res = self.run_bash(self.service_driver(), {})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("master.env", res.stderr)
+        master.unlink()
+
+        # 3. manifest.json without --no-project-db must fail closed.
+        manifest = self.home / ".tachi/manifest.json"
+        manifest.write_text('{"databases":[]}\n', encoding="utf-8")
+        before = self.write_launch_agent(plist, "--port", "6919")
+        res = self.run_bash(self.service_driver(), {})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("manifest.json", res.stderr)
+        self.assertEqual(plist.read_bytes(), before)
+
+        # 4. Unknown flag/subcommand (even without manifest.json) must fail closed.
+        manifest.unlink()
+        before = self.write_launch_agent(plist, "--no-project-db", "doctor")
+        res = self.run_bash(self.service_driver(), {})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unrecognized daemon arguments", res.stderr)
+        self.assertEqual(plist.read_bytes(), before)
+
+        # 5. Symlinked master.env must fail closed even when MEMORY_DB_PATH is set in env.
+        master.symlink_to(real_env)
+        before = self.write_launch_agent(
+            plist, "--no-project-db", environment={"MEMORY_DB_PATH": str(self.db)}
+        )
+        res = self.run_bash(self.service_driver(), {})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("master.env", res.stderr)
+        self.assertEqual(plist.read_bytes(), before)
+        master.unlink()
 
 
 if __name__ == "__main__":
