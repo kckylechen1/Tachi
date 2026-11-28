@@ -268,7 +268,7 @@ SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
 
-A project's `.env`, `.tachi/config.env` and `.sigil/config.env` are not applied to the daemon: they are for the other tools you run in the project. At startup, each one that holds a daemon setting is named once on stderr, so that a setting which stopped working can be found. Upgrading from a version that loaded them: [docs/UPGRADING.md](docs/UPGRADING.md), Part 2, section 8.
+A project's `.env`, `.tachi/config.env` and `.sigil/config.env` are not applied to the daemon: they are for the other tools you run in the project. For project-scoped CLI invocations (such as `tachi status` in a checkout), startup emits one best-effort stderr notice per file that holds a daemon setting in its first 64 KiB (names only, never values); keep operator config paths and their symlink targets under operator control. Upgrading from a version that loaded them: [docs/UPGRADING.md](docs/UPGRADING.md), Part 2, section 8.
 
 Background extraction, summaries, and daily distillation call the configured OpenAI-compatible API lanes, try a configured fallback provider, and record `LANE_OUTAGE` when the chain is exhausted. Ordinary reasoning tries Claude CLI first, then the configured API. Per-lane overrides (`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`) are documented in `.env.example`.
 

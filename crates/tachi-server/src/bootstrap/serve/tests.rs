@@ -1038,7 +1038,7 @@ fn workspace_home_notice_is_emitted_only_for_implicit_workspace_selection() {
         workspace_home_selection_notice(crate::path_utils::TachiHomeSource::WorkspaceData, path)
             .as_deref(),
         Some(
-            "[tachi-home] selected workspace home /tmp/repo/data/tachi from cwd ancestry; set TACHI_HOME to pin a different home"
+            "[tachi-home] selected workspace home \"/tmp/repo/data/tachi\" from cwd ancestry; set TACHI_HOME to pin a different home"
         )
     );
     assert_eq!(
@@ -1411,7 +1411,8 @@ impl HostProfileEnvFixture {
         use crate::path_utils::{operator_config_home, OperatorConfigHome};
         let resolution = crate::path_utils::resolve_tachi_home();
         check(&resolution.path, resolution.source);
-        let operator_config_home: Option<OperatorConfigHome> = operator_config_home(&resolution);
+        let operator_config_home: Option<OperatorConfigHome> =
+            operator_config_home(&resolution, Some(self.home.path()));
         load_env_files(
             Some(self.home.path()),
             operator_config_home
@@ -1518,6 +1519,16 @@ fn a_checkout_found_home_is_not_read_for_configuration() {
         std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
     );
     std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
+    let _restore_found_secrets = RestoreEnv(
+        "TACHI_FOUND_SECRETS_MARKER",
+        std::env::var_os("TACHI_FOUND_SECRETS_MARKER"),
+    );
+    std::env::remove_var("TACHI_FOUND_SECRETS_MARKER");
+    let _restore_found_config = RestoreEnv(
+        "TACHI_FOUND_CONFIG_MARKER",
+        std::env::var_os("TACHI_FOUND_CONFIG_MARKER"),
+    );
+    std::env::remove_var("TACHI_FOUND_CONFIG_MARKER");
     // The layout `resolve_tachi_home` looks for above the cwd.
     let app_home = fixture.repo.path().join("data").join("tachi");
     fixture.write_env(
@@ -1526,13 +1537,13 @@ fn a_checkout_found_home_is_not_read_for_configuration() {
     );
     fixture.write_env(
         app_home.join("secrets.env"),
-        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=found-home\n",
+        "TACHI_VAULT_CHILD_ENV=all\nTACHI_FOUND_SECRETS_MARKER=from_found_secrets\n",
     );
     fixture.write_env(
         app_home.join("config.env"),
         "\u{feff}TACHI_HOST_PROFILE=home_data\n\
          TACHI_VAULT_CHILD_ENV=all\n\
-         TACHI_VAULT_PROBE_FIXTURE=found-home\n",
+         TACHI_FOUND_CONFIG_MARKER=from_found_config\n",
     );
     // What the user's own home says.
     fixture.write_env(
@@ -1563,6 +1574,14 @@ fn a_checkout_found_home_is_not_read_for_configuration() {
             std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
             "an app home found in a checkout must not choose what the Vault exports"
         );
+        assert!(
+            std::env::var_os("TACHI_FOUND_SECRETS_MARKER").is_none(),
+            "an ordinary setting in a found-home secrets.env must not be loaded"
+        );
+        assert!(
+            std::env::var_os("TACHI_FOUND_CONFIG_MARKER").is_none(),
+            "an ordinary setting in a found-home config.env must not be loaded"
+        );
         assert_eq!(
             std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
             Ok("users_own"),
@@ -1574,6 +1593,54 @@ fn a_checkout_found_home_is_not_read_for_configuration() {
             "and so does the host profile"
         );
     }
+}
+
+#[test]
+fn launching_from_user_home_applies_operator_config_without_ignored_notice() {
+    let fixture = HostProfileEnvFixture::new();
+    let _restore_marker = RestoreEnv(
+        "TACHI_USER_HOME_CWD_MARKER",
+        std::env::var_os("TACHI_USER_HOME_CWD_MARKER"),
+    );
+    std::env::remove_var("TACHI_USER_HOME_CWD_MARKER");
+    let operator_home = fixture.home.path().join(".tachi");
+    fixture.write_env(
+        operator_home.join("config.env"),
+        "TACHI_USER_HOME_CWD_MARKER=applied_from_home\n",
+    );
+    std::env::set_current_dir(fixture.home.path()).expect("chdir to user home");
+
+    let notes = load_env_files(
+        Some(fixture.home.path()),
+        Some(operator_home.as_path()),
+        true,
+        None,
+    );
+
+    assert_eq!(
+        std::env::var("TACHI_USER_HOME_CWD_MARKER").as_deref(),
+        Ok("applied_from_home"),
+        "operator config.env must still be applied when cwd is user_home"
+    );
+    assert!(
+        notes.is_empty(),
+        "operator's own ~/.tachi/config.env must not be reported as an ignored checkout file: {notes:?}"
+    );
+}
+
+#[test]
+fn startup_notice_emission_does_not_panic_on_broken_pipe() {
+    struct BrokenPipeWriter;
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    emit_startup_notice_to(BrokenPipeWriter, "[startup] advisory notice");
 }
 
 #[test]

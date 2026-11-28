@@ -1,6 +1,6 @@
 mod bindings;
 mod command;
-pub(super) mod dotenv_lines;
+mod dotenv_lines;
 mod edit;
 mod materialize;
 mod shell;

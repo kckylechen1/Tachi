@@ -294,7 +294,8 @@ pub(crate) fn run_cli(
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!(
-                    "host profile saved: {} (max {}). Restart a resident daemon during an approved maintenance window before dispatching with it.",
+                    "host profile saved to {}: {} (max {}). Restart a resident daemon during an approved maintenance window before dispatching with it.",
+                    config_path(home).display(),
                     profile.name(),
                     profile.max_execution_level().as_str(),
                 );

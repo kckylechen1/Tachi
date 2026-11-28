@@ -36,7 +36,10 @@ pub(crate) struct OperatorConfigHome {
 /// there is none: a home merely found from the working directory is not the
 /// operator's, and `./.tachi` would be whatever that directory holds. Nothing
 /// is read from a configuration home that is `None`.
-pub(crate) fn operator_config_home(resolution: &TachiHomeResolution) -> Option<OperatorConfigHome> {
+pub(crate) fn operator_config_home(
+    resolution: &TachiHomeResolution,
+    user_home: Option<&Path>,
+) -> Option<OperatorConfigHome> {
     if let TachiHomeSource::ExplicitEnv(key) = resolution.source {
         if resolution.path.is_absolute() {
             return Some(OperatorConfigHome {
@@ -45,7 +48,7 @@ pub(crate) fn operator_config_home(resolution: &TachiHomeResolution) -> Option<O
             });
         }
     }
-    let home = dirs::home_dir().filter(|home| home.is_absolute())?;
+    let home = user_home.filter(|home| home.is_absolute())?;
     Some(OperatorConfigHome {
         path: home.join(".tachi"),
         source: OperatorConfigSource::UserDefault,

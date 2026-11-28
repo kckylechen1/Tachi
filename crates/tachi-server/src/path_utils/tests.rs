@@ -959,41 +959,59 @@ fn ensure_plan_c_symlink_defers_when_canonical_db_does_not_exist_then_links_once
 #[test]
 fn operator_config_home_is_the_named_absolute_home_or_the_users_own() {
     use super::home::TachiHomeResolution;
-    let named_path = std::env::current_dir().expect("cwd").join("tachi-config");
+    let cwd = std::env::current_dir().expect("cwd");
+    let fake_user_home = cwd.join("operator-user-home");
+    let named_path = cwd.join("tachi-config");
     let named = TachiHomeResolution {
         path: named_path.clone(),
         source: TachiHomeSource::ExplicitEnv("TACHI_HOME"),
     };
     assert_eq!(
-        operator_config_home(&named),
+        operator_config_home(&named, Some(fake_user_home.as_path())),
         Some(OperatorConfigHome {
-            path: named_path,
+            path: named_path.clone(),
             source: OperatorConfigSource::ExplicitEnv("TACHI_HOME"),
         }),
         "an absolute home the operator named is where its configuration lives"
     );
-    let user_default = dirs::home_dir()
-        .filter(|home| home.is_absolute())
-        .map(|home| OperatorConfigHome {
-            path: home.join(".tachi"),
-            source: OperatorConfigSource::UserDefault,
-        });
+    assert_eq!(
+        operator_config_home(&named, None),
+        Some(OperatorConfigHome {
+            path: named_path,
+            source: OperatorConfigSource::ExplicitEnv("TACHI_HOME"),
+        }),
+        "an explicit absolute home does not depend on user_home"
+    );
+    let user_default = Some(OperatorConfigHome {
+        path: fake_user_home.join(".tachi"),
+        source: OperatorConfigSource::UserDefault,
+    });
     let relative = TachiHomeResolution {
         path: PathBuf::from("data/tachi"),
         source: TachiHomeSource::ExplicitEnv("TACHI_HOME"),
     };
     assert_eq!(
-        operator_config_home(&relative),
+        operator_config_home(&relative, Some(fake_user_home.as_path())),
         user_default.clone(),
         "a relative name is whatever the working directory holds"
+    );
+    assert_eq!(
+        operator_config_home(&relative, None),
+        None,
+        "without a user home a relative name has no operator config home"
     );
     let found = TachiHomeResolution {
         path: PathBuf::from("data").join("tachi"),
         source: TachiHomeSource::WorkspaceData,
     };
     assert_eq!(
-        operator_config_home(&found),
+        operator_config_home(&found, Some(fake_user_home.as_path())),
         user_default,
         "a home found from the working directory is not the operator's"
+    );
+    assert_eq!(
+        operator_config_home(&found, None),
+        None,
+        "without a user home a workspace data home has no operator config home"
     );
 }

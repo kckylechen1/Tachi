@@ -268,7 +268,7 @@ SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
 
-项目里的 `.env`、`.tachi/config.env` 和 `.sigil/config.env` 不会被应用到 daemon：它们是给项目里其它工具用的。启动时，其中含有 daemon 设置的每个文件会在标准错误上被提到一次，方便找到不再生效的设置。从会加载它们的版本升级，见 [docs/UPGRADING.md](docs/UPGRADING.md) 第二部分第 8 节。
+项目里的 `.env`、`.tachi/config.env` 和 `.sigil/config.env` 不会被应用到 daemon：它们是给项目里其它工具用的。在项目目录执行非 `--no-project-db` 命令（如 `tachi status`）时，启动会对前 64 KiB 内含有 daemon 设置的文件尽力在标准错误上输出一行提示（只列设置名，不打值）；请保持 operator 配置路径及其符号链接目标由 operator 控制。从会加载它们的版本升级，见 [docs/UPGRADING.md](docs/UPGRADING.md) 第二部分第 8 节。
 
 后台抽取、摘要和每日蒸馏走配置好的 OpenAI 兼容 API 通道，失败时先尝试配置的备用 provider，整条链路耗尽才记录 `LANE_OUTAGE`。普通推理先试 Claude CLI，再转配置的 API。各通道的覆盖项（`EXTRACT_*`、`DISTILL_*`、`SUMMARY_*`、`REASONING_*`）见 `.env.example`。
 

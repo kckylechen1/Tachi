@@ -136,8 +136,12 @@ fn load_env_files(
     // loading off they are not even opened.
     let mut notes = Vec::new();
     if load_project_local_env {
+        let trusted = checkout_env::TrustedFiles {
+            user_home,
+            operator_config_home,
+        };
         let mut note = |path: PathBuf| {
-            if let Some(note) = checkout_env::note_ignored(&path, operator_config_home) {
+            if let Some(note) = checkout_env::note_ignored(&path, &trusted) {
                 notes.push(note);
             }
         };
@@ -175,7 +179,8 @@ fn fix_operator_configuration(
     user_home: Option<&Path>,
     app_home_resolution: &crate::path_utils::TachiHomeResolution,
 ) -> (Option<crate::path_utils::OperatorConfigHome>, Vec<String>) {
-    let operator_config_home = crate::path_utils::operator_config_home(app_home_resolution);
+    let operator_config_home =
+        crate::path_utils::operator_config_home(app_home_resolution, user_home);
     let notices = operator_config_notices(app_home_resolution, operator_config_home.as_ref());
     crate::provider_config::freeze_operator_sources(
         crate::provider_config::OperatorConfigSources::at_startup(
@@ -569,6 +574,14 @@ fn files_identical(a: &Path, b: &Path) -> std::io::Result<bool> {
     }
 }
 
+fn emit_startup_notice_to(mut writer: impl std::io::Write, notice: &str) {
+    let _ = writeln!(writer, "{notice}");
+}
+
+fn emit_startup_notice(notice: &str) {
+    emit_startup_notice_to(std::io::stderr().lock(), notice);
+}
+
 fn workspace_home_selection_notice(
     source: crate::path_utils::TachiHomeSource,
     app_home: &Path,
@@ -576,7 +589,7 @@ fn workspace_home_selection_notice(
     (source == crate::path_utils::TachiHomeSource::WorkspaceData).then(|| {
         format!(
             "[tachi-home] selected workspace home {} from cwd ancestry; set TACHI_HOME to pin a different home",
-            app_home.display()
+            checkout_env::shown_path(app_home)
         )
     })
 }
@@ -620,7 +633,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     if let Some(notice) =
         workspace_home_selection_notice(app_home_resolution.source, &app_home_resolution.path)
     {
-        eprintln!("{notice}");
+        emit_startup_notice(&notice);
     }
     // The operator's configuration is read from, and written to, one home.
     // It is fixed here, before any file is loaded and before the working
@@ -628,7 +641,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     let (operator_config_home, notices) =
         fix_operator_configuration(user_home.as_deref(), &app_home_resolution);
     for notice in notices {
-        eprintln!("{notice}");
+        emit_startup_notice(&notice);
     }
     let app_home = app_home_resolution.path;
 
@@ -670,7 +683,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         load_project_local_env,
         git_root.as_deref(),
     ) {
-        eprintln!("{note}");
+        emit_startup_notice(&note);
     }
     if let Commands::Hub { action } = &command {
         // Check historical retired DB rows after dotenv files populate
