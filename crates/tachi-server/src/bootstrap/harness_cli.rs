@@ -6,7 +6,8 @@ use tachi_bootstrap::cli::HarnessAction;
 use super::instruction_drift_sentinel::{build_instruction_drift_report, InstructionDriftReport};
 use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
 use super::instruction_sync::{
-    inspect_sync_stamp, print_sync_report, run_plan, run_sync, SyncOptions, SyncStampState,
+    inspect_sync_stamp, print_sync_report, read_regular_file_bytes_nofollow, run_plan, run_sync,
+    SyncOptions, SyncStampState,
 };
 use super::setup_wizard::agent_rules::has_legacy_tachi_block;
 use crate::shared_defs::is_managed_agent_rules;
@@ -319,7 +320,7 @@ fn antigravity_specs(home: &Path) -> Vec<HarnessTargetSpec> {
 
 fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
     let path = spec.path.display().to_string();
-    let Ok(metadata) = std::fs::metadata(&spec.path) else {
+    let Ok(metadata) = std::fs::symlink_metadata(&spec.path) else {
         return HarnessTargetStatus {
             host: spec.host.to_string(),
             kind: spec.kind.to_string(),
@@ -336,7 +337,44 @@ fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
         };
     };
 
-    let content = std::fs::read_to_string(&spec.path).unwrap_or_default();
+    if metadata.file_type().is_symlink() {
+        return HarnessTargetStatus {
+            host: spec.host.to_string(),
+            kind: spec.kind.to_string(),
+            path,
+            exists: true,
+            status: "unmanaged".to_string(),
+            managed: false,
+            mentions_tachi: false,
+            hash: None,
+            bytes: None,
+            lines: None,
+            issues: vec!["symlink_target".to_string()],
+            recommended_action: "adopt_or_replace_symlink_target".to_string(),
+        };
+    }
+
+    if !metadata.file_type().is_file() {
+        return HarnessTargetStatus {
+            host: spec.host.to_string(),
+            kind: spec.kind.to_string(),
+            path,
+            exists: true,
+            status: "unmanaged".to_string(),
+            managed: false,
+            mentions_tachi: false,
+            hash: None,
+            bytes: None,
+            lines: None,
+            issues: vec!["non_regular_target".to_string()],
+            recommended_action: "inspect_non_regular_target".to_string(),
+        };
+    }
+
+    let content = read_regular_file_bytes_nofollow(&spec.path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
     let lower = content.to_ascii_lowercase();
     let sync_stamp = inspect_sync_stamp(&content);
     let managed = match &sync_stamp {

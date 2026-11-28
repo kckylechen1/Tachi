@@ -88,7 +88,10 @@ enum TargetCondition {
     Create,
     UpdateManaged,
     ConflictUnmanaged,
-    ConflictSymlink { link_target: String },
+    ConflictSymlink {
+        link_target: String,
+        link_target_b64: String,
+    },
     ConflictModifiedManaged,
 }
 
@@ -112,6 +115,15 @@ impl TargetCondition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    dev: u64,
+    ino: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    size: u64,
+}
+
 #[derive(Debug, Clone)]
 struct PlannedTarget {
     id: String,
@@ -120,6 +132,7 @@ struct PlannedTarget {
     target_rel: String,
     target_path: PathBuf,
     condition: TargetCondition,
+    preflight_fingerprint: Option<FileFingerprint>,
     rendered: String,
     rendered_sha256: String,
     source_sha256: String,
@@ -196,7 +209,9 @@ pub(super) fn inspect_sync_stamp(content: &str) -> SyncStampState {
         return SyncStampState::Absent;
     }
 
-    if !last_line.ends_with(STAMP_SUFFIX) {
+    if !last_line.ends_with(STAMP_SUFFIX)
+        || last_line.len() < STAMP_PREFIX.len() + STAMP_SUFFIX.len()
+    {
         return SyncStampState::TamperedOrEdited;
     }
 
@@ -278,7 +293,9 @@ pub(super) fn run_plan(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
             .into_iter()
             .map(|target| {
                 let previous_symlink_target = match &target.condition {
-                    TargetCondition::ConflictSymlink { link_target } => Some(link_target.clone()),
+                    TargetCondition::ConflictSymlink { link_target, .. } => {
+                        Some(link_target.clone())
+                    }
                     _ => None,
                 };
                 SyncTargetReport {
@@ -318,26 +335,39 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
         ));
     }
 
+    #[cfg(unix)]
+    let home_fd = open_dir_nofollow(&ctx.home)?;
+
     let needs_backup = options.adopt && ctx.summary.conflicts > 0;
-    let backup_dir = if needs_backup {
-        let run_id = format!(
-            "{}-{}",
-            jiff::Timestamp::now().as_second(),
-            &ctx.bundle_sha256[..8]
-        );
-        let rel_backup = format!(".tachi/backups/harness-sync/{run_id}");
-        ensure_safe_dir_under_home(&ctx.home, Path::new(&rel_backup), true)?;
-        Some(ctx.home.join(rel_backup))
+    let backup_rel_dir = if needs_backup {
+        let uuid_str = uuid::Uuid::new_v4().as_simple().to_string();
+        let run_id = format!("{}-{}", jiff::Timestamp::now().as_second(), &uuid_str[..12]);
+        let base_rel = Path::new(".tachi/backups/harness-sync");
+        let run_rel = base_rel.join(&run_id);
+        #[cfg(unix)]
+        create_unique_dir_under_fd(&home_fd, base_rel, &run_id, 0o700)?;
+        #[cfg(not(unix))]
+        {
+            ensure_safe_dir_under_home(&ctx.home, base_rel, true)?;
+            fs::create_dir(ctx.home.join(&run_rel)).map_err(|err| {
+                format!(
+                    "create unique backup directory '{}': {err}",
+                    run_rel.display()
+                )
+            })?;
+        }
+        Some(run_rel)
     } else {
         None
     };
+    let backup_dir = backup_rel_dir.as_ref().map(|rel| ctx.home.join(rel));
 
     let mut summary = ctx.summary.clone();
     let mut reports = Vec::with_capacity(ctx.targets.len());
 
     for target in &ctx.targets {
         let previous_symlink_target = match &target.condition {
-            TargetCondition::ConflictSymlink { link_target } => Some(link_target.clone()),
+            TargetCondition::ConflictSymlink { link_target, .. } => Some(link_target.clone()),
             _ => None,
         };
 
@@ -361,8 +391,9 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
         }
 
         // Recheck condition immediately before mutation to guard against TOCTOU swaps.
-        let current_condition = inspect_target_condition(&target.target_path, &target.rendered)?;
-        if current_condition != target.condition {
+        let (current_condition, current_fp) =
+            inspect_target_condition(&ctx.home, &target.target_rel, &target.rendered)?;
+        if current_condition != target.condition || current_fp != target.preflight_fingerprint {
             return Err(format!(
                 "target {} changed after preflight ({} -> {}); aborting sync",
                 target.target_path.display(),
@@ -373,58 +404,70 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
 
         let mut recorded_backup: Option<String> = None;
         if target.condition.is_conflict() {
-            let backup_root = backup_dir
+            let backup_rel_root = backup_rel_dir
                 .as_ref()
                 .ok_or_else(|| "internal error: missing backup directory".to_string())?;
-            let backup_file = match &target.condition {
-                TargetCondition::ConflictSymlink { link_target } => {
-                    let meta_rel = format!("{}.symlink.json", target.target_rel);
-                    let dest = backup_root.join(&meta_rel);
-                    if let Some(parent) = dest.parent() {
-                        ensure_safe_dir_under_home(
-                            &ctx.home,
-                            parent.strip_prefix(&ctx.home).map_err(|_| {
-                                "backup destination escaped home directory".to_string()
-                            })?,
-                            true,
-                        )?;
-                    }
+            let backup_rel_file = match &target.condition {
+                TargetCondition::ConflictSymlink {
+                    link_target,
+                    link_target_b64,
+                } => {
+                    let rel = backup_rel_root.join(format!("symlinks/{}.json", target.target_rel));
                     let payload = serde_json::json!({
                         "target": target.target_rel,
                         "symlink_target": link_target,
+                        "symlink_target_bytes_base64": link_target_b64,
                     });
-                    crate::utils::write_json_file_owner_only(&dest, &payload)?;
-                    dest
+                    let bytes = serde_json::to_vec_pretty(&payload)
+                        .map_err(|e| format!("serialize symlink backup: {e}"))?;
+                    write_rel_file_anchored(
+                        &ctx.home,
+                        #[cfg(unix)]
+                        &home_fd,
+                        &rel,
+                        &bytes,
+                        true,
+                        true,
+                        None,
+                    )?;
+                    rel
                 }
                 TargetCondition::ConflictUnmanaged | TargetCondition::ConflictModifiedManaged => {
-                    let dest = backup_root.join(&target.target_rel);
-                    if let Some(parent) = dest.parent() {
-                        ensure_safe_dir_under_home(
-                            &ctx.home,
-                            parent.strip_prefix(&ctx.home).map_err(|_| {
-                                "backup destination escaped home directory".to_string()
-                            })?,
-                            true,
-                        )?;
-                    }
+                    let rel = backup_rel_root.join("files").join(&target.target_rel);
+                    #[cfg(unix)]
+                    let existing_bytes = read_file_under_dir_fd(&home_fd, &target.target_rel)?;
+                    #[cfg(not(unix))]
                     let existing_bytes = read_regular_file_bytes_nofollow(&target.target_path)?;
-                    crate::utils::write_owner_only_file_atomic(&dest, &existing_bytes)?;
-                    dest
+                    write_rel_file_anchored(
+                        &ctx.home,
+                        #[cfg(unix)]
+                        &home_fd,
+                        &rel,
+                        &existing_bytes,
+                        true,
+                        true,
+                        None,
+                    )?;
+                    rel
                 }
                 _ => unreachable!(),
             };
-            recorded_backup = Some(backup_file.display().to_string());
+            recorded_backup = Some(ctx.home.join(backup_rel_file).display().to_string());
             summary.adopted += 1;
         }
 
-        if let Some(parent_rel) = Path::new(&target.target_rel).parent() {
-            if !parent_rel.as_os_str().is_empty() {
-                ensure_safe_dir_under_home(&ctx.home, parent_rel, false)?;
-            }
-        }
-
-        crate::utils::write_owner_only_file_atomic(&target.target_path, target.rendered.as_bytes())
-            .map_err(|e| format!("write target {}: {e}", target.target_path.display()))?;
+        let is_create = target.condition == TargetCondition::Create;
+        write_rel_file_anchored(
+            &ctx.home,
+            #[cfg(unix)]
+            &home_fd,
+            Path::new(&target.target_rel),
+            target.rendered.as_bytes(),
+            false,
+            is_create,
+            target.preflight_fingerprint,
+        )
+        .map_err(|e| format!("write target {}: {e}", target.target_path.display()))?;
         summary.written += 1;
 
         let action = if target.condition.is_conflict() {
@@ -452,8 +495,8 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
         });
     }
 
-    ensure_safe_dir_under_home(&ctx.home, Path::new(".tachi"), true)?;
-    let receipt_path = ctx.home.join(".tachi").join("harness-sync-receipt.json");
+    let receipt_rel = Path::new(".tachi/harness-sync-receipt.json");
+    let receipt_path = ctx.home.join(receipt_rel);
     let synced_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let receipt = serde_json::json!({
         "schema_version": RECEIPT_SCHEMA,
@@ -467,7 +510,18 @@ pub(super) fn run_sync(options: &SyncOptions) -> Result<HarnessSyncReport, Strin
         "backup_dir": backup_dir.as_ref().map(|p| p.display().to_string()),
         "targets": reports,
     });
-    crate::utils::write_json_file_owner_only(&receipt_path, &receipt)?;
+    let receipt_bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|e| format!("serialize harness sync receipt: {e}"))?;
+    write_rel_file_anchored(
+        &ctx.home,
+        #[cfg(unix)]
+        &home_fd,
+        receipt_rel,
+        &receipt_bytes,
+        true,
+        false,
+        None,
+    )?;
 
     Ok(HarnessSyncReport {
         schema_version: SYNC_SCHEMA.to_string(),
@@ -563,6 +617,7 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
         .source_dir
         .clone()
         .unwrap_or_else(|| home.join(".tachi").join("instructions"));
+    reject_user_symlink_ancestors(&raw_source_dir, "source_dir")?;
     let source_meta = fs::symlink_metadata(&raw_source_dir)
         .map_err(|e| format!("inspect source_dir '{}': {e}", raw_source_dir.display()))?;
     if source_meta.file_type().is_symlink() {
@@ -586,7 +641,12 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
     if source_dir == home {
         return Err("source_dir must not equal home directory".to_string());
     }
+    #[cfg(unix)]
+    let source_dir_fd = open_dir_nofollow(&source_dir)?;
 
+    #[cfg(unix)]
+    let manifest_bytes = read_file_under_dir_fd(&source_dir_fd, "bundle.json")?;
+    #[cfg(not(unix))]
     let manifest_bytes = read_relative_regular_file(&source_dir, "bundle.json")?;
     let bundle_sha256 = sha256_hex(&manifest_bytes);
     let manifest: BundleManifest =
@@ -594,11 +654,11 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
 
     if manifest.schema_version != BUNDLE_SCHEMA {
         return Err(format!(
-            "unsupported bundle schema_version '{}'; expected '{BUNDLE_SCHEMA}'",
-            manifest.schema_version
+            "unsupported bundle schema_version; expected '{BUNDLE_SCHEMA}'"
         ));
     }
     validate_identifier(&manifest.revision, 128, "revision")?;
+    screen_secrets("revision", &manifest.revision)?;
 
     let LoadedMachineLocal {
         path: machine_local_path,
@@ -669,6 +729,9 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
         if !selected_host_set.contains(decl.host.as_str()) {
             continue;
         }
+        #[cfg(unix)]
+        let raw_bytes = read_file_under_dir_fd(&source_dir_fd, &decl.source)?;
+        #[cfg(not(unix))]
         let raw_bytes = read_relative_regular_file(&source_dir, &decl.source)?;
         let raw_text = String::from_utf8(raw_bytes)
             .map_err(|_| format!("source '{}' is not valid UTF-8", decl.source))?;
@@ -687,6 +750,22 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
             let const_rel = constitution_target_rel
                 .as_deref()
                 .ok_or_else(|| "missing constitution target".to_string())?;
+            if !selected_host_set.contains("constitution") {
+                check_existing_target_parents_no_symlink(&home, Path::new(const_rel))?;
+                let const_path = home.join(const_rel);
+                let const_meta = fs::symlink_metadata(&const_path).map_err(|_| {
+                    format!(
+                        "target '{}' requires constitution '{}' to exist when 'constitution' is excluded from --host",
+                        decl.id, const_rel
+                    )
+                })?;
+                if const_meta.file_type().is_symlink() || !const_meta.file_type().is_file() {
+                    return Err(format!(
+                        "target '{}' requires constitution '{}' to be a regular non-symlink file when 'constitution' is excluded from --host",
+                        decl.id, const_rel
+                    ));
+                }
+            }
             body = format!("@{home_str}/{const_rel}\n\n{body}");
         }
         if decl.include_machine_local {
@@ -728,7 +807,8 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
 
         check_existing_target_parents_no_symlink(&home, Path::new(&decl.target))?;
         let target_path = home.join(&decl.target);
-        let condition = inspect_target_condition(&target_path, &rendered)?;
+        let (condition, preflight_fingerprint) =
+            inspect_target_condition(&home, &decl.target, &rendered)?;
 
         summary.targets += 1;
         match condition {
@@ -747,6 +827,7 @@ fn prepare_plan(options: &SyncOptions) -> Result<PreparedPlan, String> {
             target_rel: decl.target,
             target_path,
             condition,
+            preflight_fingerprint,
             rendered,
             rendered_sha256,
             source_sha256,
@@ -772,6 +853,7 @@ fn resolve_and_validate_home(home_arg: Option<PathBuf>) -> Result<PathBuf, Strin
         Some(path) => path,
         None => crate::utils::resolve_home_arg(None)?,
     };
+    reject_user_symlink_ancestors(&raw, "home")?;
     let meta =
         fs::symlink_metadata(&raw).map_err(|e| format!("inspect home '{}': {e}", raw.display()))?;
     if meta.file_type().is_symlink() {
@@ -784,6 +866,36 @@ fn resolve_and_validate_home(home_arg: Option<PathBuf>) -> Result<PathBuf, Strin
         .map_err(|e| format!("canonicalize home '{}': {e}", raw.display()))
 }
 
+fn reject_user_symlink_ancestors(path: &Path, label: &str) -> Result<(), String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("resolve cwd for {label}: {e}"))?
+            .join(path)
+    };
+    let mut cur = PathBuf::new();
+    for comp in abs.components() {
+        cur.push(comp);
+        if matches!(comp, Component::RootDir | Component::Prefix(_)) {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if cur == Path::new("/tmp") || cur == Path::new("/var") || cur == Path::new("/etc") {
+            continue;
+        }
+        if let Ok(meta) = fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "symlink ancestor is not allowed for {label}: {}",
+                    cur.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 struct LoadedMachineLocal {
     path: Option<PathBuf>,
     content: Option<String>,
@@ -792,7 +904,10 @@ struct LoadedMachineLocal {
 
 fn load_machine_local(home: &Path, explicit: Option<&Path>) -> Result<LoadedMachineLocal, String> {
     let (path, required) = match explicit {
-        Some(p) => (p.to_path_buf(), true),
+        Some(p) => {
+            reject_user_symlink_ancestors(p, "machine_local")?;
+            (p.to_path_buf(), true)
+        }
         None => (home.join(".tachi").join("machine.local.md"), false),
     };
 
@@ -877,8 +992,10 @@ fn validate_relative_path(raw: &str, label: &str) -> Result<(), String> {
     if raw.is_empty()
         || raw.contains('\0')
         || raw.starts_with('/')
+        || raw.ends_with('/')
         || raw.starts_with('~')
         || raw.contains('\\')
+        || raw.contains("//")
     {
         return Err(format!("invalid relative path for {label}: '{raw}'"));
     }
@@ -930,7 +1047,7 @@ fn validate_unique_ids_and_targets(
     source_dir: &Path,
 ) -> Result<(), String> {
     let mut ids = BTreeSet::new();
-    let mut paths: Vec<PathBuf> = Vec::with_capacity(decls.len());
+    let mut lowered_targets: Vec<PathBuf> = Vec::with_capacity(decls.len());
     let backups_root = home.join(".tachi").join("backups");
 
     for decl in decls {
@@ -951,16 +1068,17 @@ fn validate_unique_ids_and_targets(
                 decl.target
             ));
         }
-        for prior in &paths {
-            if &abs == prior || abs.starts_with(prior) || prior.starts_with(&abs) {
+        let lowered = PathBuf::from(decl.target.to_ascii_lowercase());
+        for prior in &lowered_targets {
+            if &lowered == prior || lowered.starts_with(prior) || prior.starts_with(&lowered) {
                 return Err(format!(
-                    "duplicate or overlapping targets: '{}' and '{}'",
+                    "duplicate or overlapping targets (case-insensitive): '{}' and '{}'",
                     prior.display(),
-                    abs.display()
+                    decl.target
                 ));
             }
         }
-        paths.push(abs);
+        lowered_targets.push(lowered);
     }
     Ok(())
 }
@@ -990,6 +1108,7 @@ fn screen_secrets(label: &str, content: &str) -> Result<(), String> {
         "glpat-",
         "xoxb-",
         "xoxp-",
+        "AIza",
         "-----BEGIN ",
     ];
     for prefix in LITERAL_PREFIXES {
@@ -1043,6 +1162,7 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+#[cfg(not(unix))]
 fn read_relative_regular_file(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     validate_relative_path(rel, "source file")?;
     let mut current = root.to_path_buf();
@@ -1079,7 +1199,7 @@ fn read_relative_regular_file(root: &Path, rel: &str) -> Result<Vec<u8>, String>
     read_regular_file_bytes_nofollow(&current)
 }
 
-fn read_regular_file_bytes_nofollow(path: &Path) -> Result<Vec<u8>, String> {
+pub(super) fn read_regular_file_bytes_nofollow(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1159,6 +1279,7 @@ fn check_existing_target_parents_no_symlink(home: &Path, rel_target: &Path) -> R
     Ok(())
 }
 
+#[cfg(not(unix))]
 fn ensure_safe_dir_under_home(home: &Path, rel_dir: &Path, owner_only: bool) -> Result<(), String> {
     let mut current = home.to_path_buf();
     for component in rel_dir.components() {
@@ -1196,18 +1317,43 @@ fn ensure_safe_dir_under_home(home: &Path, rel_dir: &Path, owner_only: bool) -> 
     Ok(())
 }
 
-fn inspect_target_condition(target_path: &Path, rendered: &str) -> Result<TargetCondition, String> {
-    let meta = match fs::symlink_metadata(target_path) {
+fn inspect_target_condition(
+    home: &Path,
+    target_rel: &str,
+    rendered: &str,
+) -> Result<(TargetCondition, Option<FileFingerprint>), String> {
+    let target_path = home.join(target_rel);
+    let meta = match fs::symlink_metadata(&target_path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TargetCondition::Create),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((TargetCondition::Create, None))
+        }
         Err(e) => return Err(format!("inspect target '{}': {e}", target_path.display())),
     };
+    let fp = fingerprint_from_metadata(&meta);
 
     if meta.file_type().is_symlink() {
-        let link_target = fs::read_link(target_path)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "<unreadable>".to_string());
-        return Ok(TargetCondition::ConflictSymlink { link_target });
+        let raw_target = fs::read_link(&target_path)
+            .map_err(|e| format!("read symlink target '{}': {e}", target_path.display()))?;
+        let link_target = raw_target.display().to_string();
+        let link_target_b64 = {
+            use base64::Engine;
+            #[cfg(unix)]
+            let raw_bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                raw_target.as_os_str().as_bytes()
+            };
+            #[cfg(not(unix))]
+            let raw_bytes = link_target.as_bytes();
+            base64::engine::general_purpose::STANDARD.encode(raw_bytes)
+        };
+        return Ok((
+            TargetCondition::ConflictSymlink {
+                link_target,
+                link_target_b64,
+            },
+            Some(fp),
+        ));
     }
     if !meta.file_type().is_file() {
         return Err(format!(
@@ -1216,22 +1362,407 @@ fn inspect_target_condition(target_path: &Path, rendered: &str) -> Result<Target
         ));
     }
 
-    let bytes = read_regular_file_bytes_nofollow(target_path)?;
+    #[cfg(unix)]
+    let bytes = {
+        let home_fd = open_dir_nofollow(home)?;
+        read_file_under_dir_fd(&home_fd, target_rel)?
+    };
+    #[cfg(not(unix))]
+    let bytes = read_regular_file_bytes_nofollow(&target_path)?;
+
     let Ok(existing) = String::from_utf8(bytes) else {
-        return Ok(TargetCondition::ConflictUnmanaged);
+        return Ok((TargetCondition::ConflictUnmanaged, Some(fp)));
     };
 
-    match inspect_sync_stamp(&existing) {
+    let cond = match inspect_sync_stamp(&existing) {
         SyncStampState::ValidClean { .. } => {
             if existing == rendered {
-                Ok(TargetCondition::InSync)
+                TargetCondition::InSync
             } else {
-                Ok(TargetCondition::UpdateManaged)
+                TargetCondition::UpdateManaged
             }
         }
-        SyncStampState::TamperedOrEdited => Ok(TargetCondition::ConflictModifiedManaged),
-        SyncStampState::Absent => Ok(TargetCondition::ConflictUnmanaged),
+        SyncStampState::TamperedOrEdited => TargetCondition::ConflictModifiedManaged,
+        SyncStampState::Absent => TargetCondition::ConflictUnmanaged,
+    };
+    Ok((cond, Some(fp)))
+}
+
+fn fingerprint_from_metadata(meta: &fs::Metadata) -> FileFingerprint {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        FileFingerprint {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            size: meta.size(),
+        }
     }
+    #[cfg(not(unix))]
+    {
+        FileFingerprint {
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+            size: meta.len(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn c_component(seg: &std::ffi::OsStr) -> Result<std::ffi::CString, String> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(seg.as_bytes()).map_err(|_| "NUL byte in path component".to_string())
+}
+
+#[cfg(unix)]
+fn open_dir_nofollow(path: &Path) -> Result<fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("open directory '{}': {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn open_sub_dir_at(
+    root: &fs::File,
+    rel_dir: &Path,
+    create: bool,
+    mode: u32,
+) -> Result<fs::File, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut current = root
+        .try_clone()
+        .map_err(|e| format!("clone directory fd: {e}"))?;
+    for comp in rel_dir.components() {
+        let Component::Normal(seg) = comp else {
+            return Err(format!(
+                "invalid directory segment in '{}'",
+                rel_dir.display()
+            ));
+        };
+        let c_name = c_component(seg)?;
+        let open_child = |parent: &fs::File| -> std::io::Result<fs::File> {
+            // SAFETY: live parent directory fd and NUL-terminated single segment; no O_CREAT.
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                // SAFETY: fresh exclusively owned fd from openat.
+                Ok(unsafe { fs::File::from_raw_fd(fd) })
+            }
+        };
+        current = match open_child(&current) {
+            Ok(dir) => dir,
+            Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {
+                // SAFETY: live directory fd, NUL-terminated name, valid mode.
+                if unsafe {
+                    libc::mkdirat(current.as_raw_fd(), c_name.as_ptr(), mode as libc::mode_t)
+                } < 0
+                {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(format!("mkdirat '{}': {err}", seg.to_string_lossy()));
+                    }
+                }
+                open_child(&current).map_err(|err| {
+                    format!(
+                        "symlink or unsafe directory segment '{}': {err}",
+                        seg.to_string_lossy()
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(format!(
+                    "symlink or unsafe directory segment '{}': {e}",
+                    seg.to_string_lossy()
+                ))
+            }
+        };
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn create_unique_dir_under_fd(
+    root: &fs::File,
+    parent_rel: &Path,
+    leaf: &str,
+    mode: u32,
+) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let parent = open_sub_dir_at(root, parent_rel, true, mode)?;
+    let c_leaf = c_component(std::ffi::OsStr::new(leaf))?;
+    // SAFETY: live parent fd, NUL-terminated single leaf, valid mode; fails if already exists.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), c_leaf.as_ptr(), mode as libc::mode_t) } < 0 {
+        return Err(format!(
+            "create unique directory '{leaf}': {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_file_under_dir_fd(root: &fs::File, rel: &str) -> Result<Vec<u8>, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    validate_relative_path(rel, "relative file")?;
+    let rel_path = Path::new(rel);
+    let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = rel_path
+        .file_name()
+        .ok_or_else(|| format!("missing filename in '{rel}'"))?;
+    let parent = open_sub_dir_at(root, parent_rel, false, 0)?;
+    let c_leaf = c_component(leaf)?;
+    // SAFETY: live parent fd, NUL-terminated leaf, read-only no-follow non-blocking open.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            c_leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "openat '{rel}': {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: fresh exclusively owned fd from openat.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    let meta = file.metadata().map_err(|e| format!("stat '{rel}': {e}"))?;
+    if !meta.file_type().is_file() {
+        return Err(format!("not a regular file: {rel}"));
+    }
+    if meta.len() > MAX_INPUT_FILE_BYTES {
+        return Err(format!(
+            "file '{rel}' exceeds maximum allowed size ({} > {MAX_INPUT_FILE_BYTES} bytes)",
+            meta.len()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_INPUT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read '{rel}': {e}"))?;
+    if bytes.len() as u64 > MAX_INPUT_FILE_BYTES {
+        return Err(format!(
+            "file '{rel}' grew beyond maximum allowed size ({MAX_INPUT_FILE_BYTES} bytes)"
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn fstat_fingerprint_at(
+    parent: &fs::File,
+    c_leaf: &std::ffi::CString,
+) -> Result<Option<FileFingerprint>, String> {
+    use std::os::fd::AsRawFd;
+    let mut stat_buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: valid parent fd, NUL-terminated name, uninit stat buffer written by fstatat.
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            c_leaf.as_ptr(),
+            stat_buf.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } < 0
+    {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("fstatat: {err}"));
+    }
+    // SAFETY: fstatat succeeded and initialized stat_buf.
+    let st = unsafe { stat_buf.assume_init() };
+    Ok(Some(FileFingerprint {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+        mtime: st.st_mtime as i64,
+        mtime_nsec: st.st_mtime_nsec as i64,
+        size: st.st_size as u64,
+    }))
+}
+
+#[cfg(unix)]
+fn write_rel_file_anchored(
+    _home: &Path,
+    home_fd: &fs::File,
+    rel_path: &Path,
+    bytes: &[u8],
+    owner_only_dirs: bool,
+    exclusive: bool,
+    expected_fp: Option<FileFingerprint>,
+) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    let leaf = rel_path
+        .file_name()
+        .ok_or_else(|| format!("missing filename in '{}'", rel_path.display()))?;
+    let dir_mode = if owner_only_dirs { 0o700 } else { 0o755 };
+    let parent = open_sub_dir_at(home_fd, parent_rel, true, dir_mode)?;
+    let c_leaf = c_component(leaf)?;
+
+    if exclusive {
+        // SAFETY: live parent fd, NUL-terminated leaf, O_CREAT|O_EXCL|O_NOFOLLOW prevents clobbering.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c_leaf.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "exclusive create '{}': {}",
+                rel_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: fresh owned fd from openat.
+        let mut file = unsafe { fs::File::from_raw_fd(fd) };
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("write '{}': {e}", rel_path.display()))?;
+        drop(file);
+        parent
+            .sync_all()
+            .map_err(|e| format!("fsync parent dir: {e}"))?;
+        return Ok(());
+    }
+
+    let tmp_name = format!(".tachi-sync-tmp.{}", uuid::Uuid::new_v4().as_simple());
+    let c_tmp = c_component(std::ffi::OsStr::new(&tmp_name))?;
+    // SAFETY: live parent fd, NUL-terminated temp name, O_CREAT|O_EXCL|O_NOFOLLOW.
+    let tmp_fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            c_tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if tmp_fd < 0 {
+        return Err(format!(
+            "open temp '{}': {}",
+            tmp_name,
+            std::io::Error::last_os_error()
+        ));
+    }
+    let write_res = (|| -> Result<(), String> {
+        // SAFETY: fresh owned fd from openat.
+        let mut tmp_file = unsafe { fs::File::from_raw_fd(tmp_fd) };
+        tmp_file
+            .write_all(bytes)
+            .and_then(|_| tmp_file.sync_all())
+            .map_err(|e| format!("write temp '{}': {e}", tmp_name))?;
+        drop(tmp_file);
+
+        if let Some(expected) = expected_fp {
+            let current = fstat_fingerprint_at(&parent, &c_leaf)?;
+            if current != Some(expected) {
+                return Err(format!(
+                    "target '{}' changed concurrently before atomic rename; aborting without overwrite",
+                    rel_path.display()
+                ));
+            }
+        }
+
+        // SAFETY: live parent fd and NUL-terminated sibling names.
+        if unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                c_tmp.as_ptr(),
+                parent.as_raw_fd(),
+                c_leaf.as_ptr(),
+            )
+        } < 0
+        {
+            return Err(format!(
+                "renameat '{}': {}",
+                rel_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        parent
+            .sync_all()
+            .map_err(|e| format!("fsync parent dir: {e}"))
+    })();
+
+    if write_res.is_err() {
+        // SAFETY: best-effort cleanup of sibling temp file in pinned parent fd.
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), c_tmp.as_ptr(), 0);
+        }
+    }
+    write_res
+}
+
+#[cfg(not(unix))]
+fn write_rel_file_anchored(
+    home: &Path,
+    rel_path: &Path,
+    bytes: &[u8],
+    owner_only_dirs: bool,
+    exclusive: bool,
+    _expected_fp: Option<FileFingerprint>,
+) -> Result<(), String> {
+    if let Some(parent_rel) = rel_path.parent() {
+        if !parent_rel.as_os_str().is_empty() {
+            ensure_safe_dir_under_home(home, parent_rel, owner_only_dirs)?;
+        }
+    }
+    let full = home.join(rel_path);
+    if exclusive {
+        write_new_file_exclusive(&full, bytes)
+    } else {
+        crate::utils::write_owner_only_file_atomic(&full, bytes)
+    }
+}
+
+#[cfg(not(unix))]
+fn write_new_file_exclusive(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("create exclusive '{}': {e}", path.display()))?
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("create exclusive '{}': {e}", path.display()))?;
+
+    file.write_all(bytes)
+        .map_err(|e| format!("write '{}': {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("fsync '{}': {e}", path.display()))?;
+    drop(file);
+    crate::utils::sync_parent_dir(path)
 }
 
 #[cfg(test)]
@@ -1465,10 +1996,10 @@ mod tests {
 
         let backup_root = PathBuf::from(synced.backup_dir.unwrap());
         assert_eq!(
-            fs::read_to_string(backup_root.join(".claude/CLAUDE.md")).unwrap(),
+            fs::read_to_string(backup_root.join("files/.claude/CLAUDE.md")).unwrap(),
             "# Hand-written legacy file\n"
         );
-        assert!(backup_root.join(".codex/AGENTS.md.symlink.json").is_file());
+        assert!(backup_root.join("symlinks/.codex/AGENTS.md.json").is_file());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1574,6 +2105,106 @@ mod tests {
         std::os::unix::fs::symlink(&outside, home.join(".claude")).unwrap();
         let err = run_plan(&opts).expect_err("symlink parent must fail");
         assert!(err.contains("symlink target parent"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn r1_review_regressions_stamp_panic_double_slash_case_collision_and_host_filter() {
+        // 1. Shortened malformed stamp must not panic when slicing.
+        assert_eq!(
+            inspect_sync_stamp("# body\n<!-- tachi:instruction-sync v1 -->\n"),
+            SyncStampState::TamperedOrEdited
+        );
+
+        // 2. Double-slash cannot bypass gemini exclusion of .gemini/config/.
+        assert!(validate_relative_path(".gemini//config/AGENTS.md", "target").is_err());
+
+        // 3. Case-insensitive duplicate targets are rejected.
+        let root = temp_dir("r1-regressions");
+        let home = root.join("home");
+        let bundle = root.join("bundle");
+        fs::create_dir_all(&home).unwrap();
+        write_six_surface_bundle(&bundle, "2026-11-28.1");
+        let mut manifest_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(bundle.join("bundle.json")).unwrap()).unwrap();
+        manifest_json["targets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "claude-global-lower",
+                "host": "claude",
+                "source": "adapters/claude/CLAUDE.md",
+                "target": ".claude/claude.md",
+                "include_constitution_import": false,
+                "include_machine_local": false,
+                "max_bytes": 4096
+            }));
+        fs::write(
+            bundle.join("bundle.json"),
+            serde_json::to_string_pretty(&manifest_json).unwrap(),
+        )
+        .unwrap();
+        let opts = SyncOptions {
+            source_dir: Some(bundle.clone()),
+            machine_local: None,
+            hosts: vec![],
+            home: Some(home.clone()),
+            adopt: false,
+        };
+        let err = run_plan(&opts).expect_err("case-insensitive duplicate target must fail");
+        assert!(err.contains("case-insensitive"));
+
+        // 4. --host claude without existing constitution refuses broken @import.
+        write_six_surface_bundle(&bundle, "2026-11-28.1");
+        let claude_only = SyncOptions {
+            source_dir: Some(bundle.clone()),
+            machine_local: None,
+            hosts: vec!["claude".to_string()],
+            home: Some(home.clone()),
+            adopt: false,
+        };
+        let err = run_plan(&claude_only).expect_err("missing constitution import must fail");
+        assert!(err.contains("requires constitution"));
+
+        // 5. Secret-like revision and Google API key prefix are rejected.
+        let fake_rev = format!("{}{}", "ghp_", "RevSecret123456");
+        write_six_surface_bundle(&bundle, &fake_rev);
+        let err = run_plan(&opts).expect_err("secret in revision must fail");
+        assert!(err.contains("secret pattern rejected"));
+        assert!(!err.contains(&fake_rev));
+
+        write_six_surface_bundle(&bundle, "2026-11-28.1");
+        let fake_google = format!("{}{}", "AIza", "SyFakeKey0123456789");
+        fs::write(
+            bundle.join("adapters/antigravity/AGENTS.md"),
+            format!("key={fake_google}\n"),
+        )
+        .unwrap();
+        let err = run_plan(&opts).expect_err("AIza key must fail");
+        assert!(err.contains("secret pattern rejected"));
+        assert!(!err.contains(&fake_google));
+
+        // 6. Explicit --machine-local under a symlinked ancestor directory fails closed.
+        write_six_surface_bundle(&bundle, "2026-11-28.1");
+        let real_overlay_dir = root.join("real-overlay");
+        fs::create_dir_all(&real_overlay_dir).unwrap();
+        fs::write(real_overlay_dir.join("machine.local.md"), "## Local\n").unwrap();
+        #[cfg(unix)]
+        {
+            let link_overlay_dir = root.join("link-overlay");
+            std::os::unix::fs::symlink(&real_overlay_dir, &link_overlay_dir).unwrap();
+            let linked_opts = SyncOptions {
+                source_dir: Some(bundle.clone()),
+                machine_local: Some(link_overlay_dir.join("machine.local.md")),
+                hosts: vec![],
+                home: Some(home.clone()),
+                adopt: false,
+            };
+            let err =
+                run_plan(&linked_opts).expect_err("symlink ancestor on --machine-local must fail");
+            assert!(err.contains("symlink ancestor"));
+        }
 
         let _ = fs::remove_dir_all(root);
     }
