@@ -14,10 +14,12 @@
 //! `setsid` or `setpgid` is not reached, and nothing here waits for its end.
 //!
 //! What a probe hands out is whole for writers that close their pipes and
-//! leave them closed. A process that opens a pipe for writing again after
-//! closing it, which Linux's procfs allows, is outside what this module can
-//! establish: such a writer can be cut short by the reclaim, and until the
-//! process has ended its pipe is not read from again.
+//! leave them closed, and for so long as nothing else reads those pipes. A
+//! process that opens a pipe for writing again after closing it, which Linux's
+//! procfs allows, is outside what this module can establish: such a writer can
+//! be cut short by the reclaim, and until the process has ended its pipe is
+//! not read from again. Nor is a second reader, which the same way can get at
+//! a pipe: what it reads is not in the output.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Stdio};
