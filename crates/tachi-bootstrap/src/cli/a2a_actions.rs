@@ -45,6 +45,13 @@ pub enum RemoteA2aAction {
         #[arg(long)]
         reconcile: bool,
     },
+    /// Send an authenticated `CancelTask` request to the enrolled destination and reconcile.
+    Cancel {
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+        #[arg(long)]
+        submission: String,
+    },
     /// Serve mutual-TLS admission only; this does not expose MCP or start jobs.
     Serve {
         #[arg(long, value_name = "PATH")]

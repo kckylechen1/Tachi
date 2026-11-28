@@ -1277,6 +1277,284 @@ impl SessionDriver for NativeDriver {
     }
 }
 
+pub(crate) enum RemoteNativeReviewOutcome {
+    Completed {
+        output: String,
+        reaped: bool,
+    },
+    Canceled {
+        reaped: bool,
+    },
+    Failed {
+        error_class: &'static str,
+        reaped: bool,
+    },
+}
+
+/// Runs a single bounded read-only native review turn for `remote_a2a` using
+/// the canonical `NativeDriver` (`CodexAppServerConnection` / `NativeAcpConnection`),
+/// provider credential snapshotting (`snapshot_provider_auth` + `NativeAuthCleanup`),
+/// and full process-group reap verification.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_remote_native_review<F, Fut, G, SpawnedFut>(
+    profile_name: &str,
+    mut cmd: Command,
+    worktree: &Path,
+    run_root: &Path,
+    runtime_dir: &Path,
+    dispatch_id: &str,
+    prompt: String,
+    deadline: tokio::time::Instant,
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
+    before_spawn: F,
+    on_spawned: G,
+) -> RemoteNativeReviewOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), &'static str>>,
+    G: FnOnce(u32) -> SpawnedFut,
+    SpawnedFut: std::future::Future<Output = Result<(), &'static str>>,
+{
+    let Some(profile) = tachi_dispatch::native_session_profile(profile_name) else {
+        return RemoteNativeReviewOutcome::Failed {
+            error_class: "invalid_review_profile",
+            reaped: true,
+        };
+    };
+    if profile.writable {
+        return RemoteNativeReviewOutcome::Failed {
+            error_class: "invalid_review_profile",
+            reaped: true,
+        };
+    }
+    let spec = NativeAcpRunSpec {
+        managed: true,
+        sandbox_cwd: Some(worktree.to_path_buf()),
+        #[cfg(any(unix, windows))]
+        approval: None,
+        mcp_servers: Vec::new(),
+        command: String::new(),
+        args: Vec::new(),
+        cwd: worktree.to_path_buf(),
+        cwd_authority: None,
+        prompt,
+        mode: super::NativeAcpRunMode::Session,
+        permission_label: "server-read-only".to_string(),
+        session: None,
+        session_record_path: None,
+        session_distill_path: None,
+        metadata: json!({
+            "profile_contract": {
+                "profile": profile_name,
+                "backend": profile.backend,
+                "dialect": profile.dialect,
+                "model": profile.model,
+                "writable": false,
+                "max_turns": 1,
+                "lifetime_timeout_secs": profile.lifetime_timeout_secs,
+            }
+        }),
+        env: std::collections::HashMap::new(),
+        env_remove: std::collections::HashSet::new(),
+    };
+    let mut auth_cleanup = NativeAuthCleanup::default();
+    if snapshot_provider_auth(&spec, runtime_dir, &mut cmd, &mut auth_cleanup).is_err() {
+        let _ = auth_cleanup.cleanup();
+        return RemoteNativeReviewOutcome::Failed {
+            error_class: "provider_auth_unavailable",
+            reaped: true,
+        };
+    }
+
+    #[cfg(unix)]
+    let escape_contained = true;
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    cmd.kill_on_drop(false);
+    #[cfg(not(unix))]
+    cmd.kill_on_drop(true);
+    crate::dispatch_ops::subprocess::configure_process_group(&mut cmd);
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(tachi_dispatch::mark_native_inherited_fds_cloexec);
+    }
+
+    if let Err(error_class) = before_spawn().await {
+        let _ = auth_cleanup.cleanup();
+        return if *cancel_rx.borrow() {
+            RemoteNativeReviewOutcome::Canceled { reaped: true }
+        } else {
+            RemoteNativeReviewOutcome::Failed {
+                error_class,
+                reaped: true,
+            }
+        };
+    }
+    if *cancel_rx.borrow() {
+        let _ = auth_cleanup.cleanup();
+        return RemoteNativeReviewOutcome::Canceled { reaped: true };
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = auth_cleanup.cleanup();
+            return RemoteNativeReviewOutcome::Failed {
+                error_class: "spawn_failed",
+                reaped: true,
+            };
+        }
+    };
+    let child_pid = child.id();
+    #[cfg(unix)]
+    let mut process_group =
+        crate::dispatch_ops::subprocess::ManagedProcessGroupGuard::arm(child_pid);
+
+    let Some(pid) = child_pid else {
+        #[cfg(unix)]
+        let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+            &mut child,
+            &mut process_group,
+            escape_contained,
+        )
+        .await;
+        #[cfg(not(unix))]
+        let liveness =
+            crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
+        let _ = auth_cleanup.cleanup();
+        return RemoteNativeReviewOutcome::Failed {
+            error_class: "spawn_failed",
+            reaped: matches!(
+                liveness,
+                crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+            ),
+        };
+    };
+
+    if let Err(err_class) = on_spawned(pid).await {
+        #[cfg(unix)]
+        let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+            &mut child,
+            &mut process_group,
+            escape_contained,
+        )
+        .await;
+        #[cfg(not(unix))]
+        let liveness =
+            crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
+        let _ = auth_cleanup.cleanup();
+        let reaped = matches!(
+            liveness,
+            crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+        );
+        return if *cancel_rx.borrow() {
+            RemoteNativeReviewOutcome::Canceled { reaped }
+        } else {
+            RemoteNativeReviewOutcome::Failed {
+                error_class: err_class,
+                reaped,
+            }
+        };
+    }
+
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        #[cfg(unix)]
+        let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+            &mut child,
+            &mut process_group,
+            escape_contained,
+        )
+        .await;
+        #[cfg(not(unix))]
+        let liveness =
+            crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
+        let _ = auth_cleanup.cleanup();
+        return RemoteNativeReviewOutcome::Failed {
+            error_class: "adapter_io_error",
+            reaped: matches!(
+                liveness,
+                crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+            ),
+        };
+    };
+    let (stderr_task, _stderr_tail) = spawn_stderr_drain(stderr);
+    let trajectory_path = run_root.join("trajectory.jsonl");
+    let mut driver = NativeDriver::new(
+        stdin,
+        stdout,
+        &spec,
+        dispatch_id,
+        profile.backend,
+        run_root,
+        &trajectory_path,
+        true,
+    );
+
+    enum TurnOutcome {
+        Ok(String),
+        Canceled,
+        Timeout,
+        Failed,
+    }
+
+    let turn_result = tokio::select! {
+        res = driver.run_turn(&spec, None) => match res {
+            Ok(outcome) if !outcome.output.trim().is_empty() => TurnOutcome::Ok(outcome.output),
+            _ => TurnOutcome::Failed,
+        },
+        _ = tokio::time::sleep_until(deadline) => TurnOutcome::Timeout,
+        changed = cancel_rx.changed() => {
+            if changed.is_ok() && *cancel_rx.borrow() {
+                TurnOutcome::Canceled
+            } else {
+                TurnOutcome::Failed
+            }
+        }
+    };
+
+    let _ = driver.close_stdin().await;
+    drop(driver);
+    #[cfg(unix)]
+    let (_, liveness) = crate::dispatch_ops::subprocess::terminate_reap_and_prove(
+        &mut child,
+        &mut process_group,
+        escape_contained,
+    )
+    .await;
+    #[cfg(not(unix))]
+    let liveness =
+        crate::dispatch_ops::subprocess::terminate_reap_uncontained_child(&mut child).await;
+    stderr_task.abort();
+    let auth_err = auth_cleanup.cleanup().err();
+    let reaped = matches!(
+        liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+    );
+
+    match turn_result {
+        TurnOutcome::Ok(output) if auth_err.is_none() => {
+            RemoteNativeReviewOutcome::Completed { output, reaped }
+        }
+        TurnOutcome::Ok(_) => RemoteNativeReviewOutcome::Failed {
+            error_class: "credential_cleanup_failed",
+            reaped,
+        },
+        TurnOutcome::Canceled => RemoteNativeReviewOutcome::Canceled { reaped },
+        TurnOutcome::Timeout => RemoteNativeReviewOutcome::Failed {
+            error_class: "execution_timeout",
+            reaped,
+        },
+        TurnOutcome::Failed => RemoteNativeReviewOutcome::Failed {
+            error_class: "adapter_turn_failed",
+            reaped,
+        },
+    }
+}
+
 #[cfg(test)]
 mod auth_snapshot_tests {
     use super::*;

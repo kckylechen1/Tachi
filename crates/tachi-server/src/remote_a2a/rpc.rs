@@ -201,10 +201,28 @@ pub(super) async fn handle(
     // transaction; that SQLite work stays off the Tokio worker.
     let method = request.method;
     let params = request.params;
-    let stored = {
-        let connection = connection.clone();
-        blocking(move || dispatch(&connection, &method, params)).await
+    let admission = if method == "SendMessage"
+        && connection.config.execution_mode == DestinationExecutionMode::Execute
+    {
+        let Some(guard) = connection.run_registry.begin_admission().await else {
+            return failure(
+                id,
+                RpcError {
+                    code: -32000,
+                    message: "server shutting down",
+                },
+            );
+        };
+        Some(guard)
+    } else {
+        None
     };
+    let stored = blocking(move || {
+        // A blocking admission can outlive the HTTP request that started it.
+        let _admission = admission;
+        dispatch(&connection, &method, params)
+    })
+    .await;
     match stored {
         Ok(Ok(result)) => response(
             StatusCode::OK,
@@ -271,7 +289,9 @@ fn access(connection: &Connection) -> RemoteTaskAccess {
     }
 }
 
-fn pinned_git_command(dest: &super::config::DestinationPolicy) -> Option<std::process::Command> {
+pub(super) fn pinned_git_command(
+    dest: &super::config::DestinationPolicy,
+) -> Option<std::process::Command> {
     let (canonical_root, canonical_git_dir) =
         super::config::resolve_pinned_git_dir(&dest.repo_root).ok()?;
     if canonical_root != dest.canonical_repo_root || canonical_git_dir != dest.canonical_git_dir {
@@ -351,7 +371,7 @@ fn admission_decision(
         DestinationExecutionMode::RefusalOnly => {
             RemoteAdmissionDecision::Reject(RemoteRejectionReason::ExecutionUnavailable)
         }
-        DestinationExecutionMode::AdmitOnly => {
+        DestinationExecutionMode::AdmitOnly | DestinationExecutionMode::Execute => {
             let Some(dest) = connection
                 .config
                 .destinations
@@ -360,6 +380,12 @@ fn admission_decision(
             else {
                 return RemoteAdmissionDecision::Reject(RemoteRejectionReason::PolicyDenied);
             };
+            if connection.config.execution_mode == DestinationExecutionMode::Execute
+                && job.job == JobKind::VerifyPr
+                && dest.verify_command.is_none()
+            {
+                return RemoteAdmissionDecision::Reject(RemoteRejectionReason::PolicyDenied);
+            }
             if !verify_exact_git_commit(dest, &job.head_sha) {
                 return RemoteAdmissionDecision::Reject(RemoteRejectionReason::HeadNotFound);
             }
@@ -387,7 +413,7 @@ fn admission_decision(
                     ),
                 ),
             };
-            RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+            let spec = RemoteLocalAdmissionSpec {
                 canonical_project: dest.canonical_project.clone(),
                 adapter_kind,
                 policy_profile,
@@ -397,7 +423,12 @@ fn admission_decision(
                 issue_ref,
                 worktree_path: dest.repo_root.to_string_lossy().into_owned(),
                 writable: false,
-            })
+            };
+            if connection.config.execution_mode == DestinationExecutionMode::Execute {
+                RemoteAdmissionDecision::AdmitSupervised(spec)
+            } else {
+                RemoteAdmissionDecision::Admit(spec)
+            }
         }
     }
 }
@@ -447,19 +478,52 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                 },
             };
             let outcome = storage(connection.server.with_global_store(|store| {
-                Ok(admit_remote_task(
-                    store.connection(),
-                    &binding,
-                    &connection.gateway_actor,
-                    &access,
-                    &request,
-                    &decision,
-                ))
+                let admit = |conn: &rusqlite::Connection| {
+                    admit_remote_task(
+                        conn,
+                        &binding,
+                        &connection.gateway_actor,
+                        &access,
+                        &request,
+                        &decision,
+                    )
+                };
+                if !matches!(decision, RemoteAdmissionDecision::AdmitSupervised(_)) {
+                    return Ok(admit(store.connection()));
+                }
+
+                Ok((|| {
+                    let tx = rusqlite::Transaction::new_unchecked(
+                        store.connection(),
+                        rusqlite::TransactionBehavior::Immediate,
+                    )?;
+                    super::executor::reconcile_unmarked_admitted_runs(
+                        &tx,
+                        &connection.config,
+                        &connection.gateway_actor,
+                    )?;
+                    let outcome = admit(&tx)?;
+                    if let RemoteTaskInsertOutcome::Created(task) = &outcome {
+                        if task.envelope.current_state == "remote_admitted" {
+                            // Make the executor handoff durable before the database can
+                            // expose a supervised run. Recovery only reads committed rows.
+                            super::executor::mark_admitted_for_execution(&connection.config, task)?;
+                        }
+                    }
+                    tx.commit()?;
+                    Ok(outcome)
+                })())
             }))?;
             let task = match outcome {
-                RemoteTaskInsertOutcome::Created(task) | RemoteTaskInsertOutcome::Replay(task) => {
+                RemoteTaskInsertOutcome::Created(task) => {
+                    if connection.config.execution_mode == DestinationExecutionMode::Execute
+                        && task.envelope.current_state == "remote_admitted"
+                    {
+                        super::executor::spawn_admitted_run(connection, &task, job);
+                    }
                     task
                 }
+                RemoteTaskInsertOutcome::Replay(task) => task,
             };
             Ok(json!({"task":task_value(&task)?}))
         }
@@ -474,10 +538,16 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                         Ok(Some(task)) => task,
                         other => return Ok(other),
                     };
-                if matches!(
-                    task.envelope.current_state.as_str(),
-                    "remote_admitted" | "remote_started" | "remote_cancel_requested"
-                ) {
+                let is_supervised = task.run.as_ref().is_some_and(|r| {
+                    super::executor::has_execution_marker(&connection.config, &r.local_run_id)
+                });
+                if (connection.config.execution_mode != DestinationExecutionMode::Execute
+                    || !is_supervised)
+                    && matches!(
+                        task.envelope.current_state.as_str(),
+                        "remote_admitted" | "remote_started" | "remote_cancel_requested"
+                    )
+                {
                     match memcore::db::a2a::reconcile_remote_run_if_expired(
                         store.connection(),
                         &connection.gateway_actor,
@@ -549,7 +619,10 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                 })
                 .map_err(|_| INTERNAL)?;
             match result {
-                Ok(Some(task)) => task_value(&task),
+                Ok(Some(task)) => {
+                    connection.run_registry.signal_cancel(&request.id);
+                    task_value(&task)
+                }
                 Ok(None) => Err(NOT_FOUND),
                 Err(memcore::MemoryError::InvalidArg(_)) => Err(RpcError {
                     code: -32002,
@@ -695,6 +768,12 @@ pub(super) async fn agent_card(State(connection): State<Arc<Connection>>) -> Res
                 "Authenticated host admission and lifecycle receipts",
                 "Admit bounded remote task",
                 "Validate a bounded review or verification request, verify commit and local claim/slot admission, and retain correlation receipts without launching a worker.",
+            ),
+            DestinationExecutionMode::Execute => (
+                "Authenticated task admission, supervised execution, and lifecycle receipts.",
+                "Authenticated host admission, execution, cancellation, and cleanup receipts",
+                "Execute bounded remote task",
+                "Validate a bounded review or verification request, verify commit and local claim/slot admission, execute the operator-configured adapter, and publish lifecycle receipts.",
             ),
         };
     response(

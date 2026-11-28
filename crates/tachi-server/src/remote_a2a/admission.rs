@@ -16,6 +16,7 @@ pub(super) struct Connection {
     pub peer: Peer,
     pub config: Arc<GatewayConfig>,
     pub gateway_actor: memcore::db::a2a::A2aTransitionActor,
+    pub run_registry: Arc<super::executor::RemoteRunRegistry>,
     certificates: Vec<CertificateDer<'static>>,
     verifier: Arc<dyn ClientCertVerifier>,
 }
@@ -115,6 +116,7 @@ impl Connection {
         peer: Peer,
         evidence: TlsEvidence,
         verifier: Arc<dyn ClientCertVerifier>,
+        run_registry: Arc<super::executor::RemoteRunRegistry>,
     ) -> Result<Self, Rejection> {
         let TlsEvidence {
             key,
@@ -202,6 +204,7 @@ impl Connection {
                 agent_identity_id: gateway_id,
                 connection_id: gateway_connection,
             },
+            run_registry,
             certificates,
             verifier,
         })
@@ -212,12 +215,15 @@ impl Connection {
         config: Arc<GatewayConfig>,
         tls: &rustls::ServerConnection,
         verifier: Arc<dyn ClientCertVerifier>,
+        run_registry: Arc<super::executor::RemoteRunRegistry>,
     ) -> Result<Self, Rejection> {
         let (peer, evidence) = Self::evidence(&config, tls)?;
         let base = base.clone();
-        tokio::task::spawn_blocking(move || Self::admit(base, config, peer, evidence, verifier))
-            .await
-            .map_err(|_| Rejection::from("remote admission task failed"))?
+        tokio::task::spawn_blocking(move || {
+            Self::admit(base, config, peer, evidence, verifier, run_registry)
+        })
+        .await
+        .map_err(|_| Rejection::from("remote admission task failed"))?
     }
 
     pub fn current(&self) -> Result<(), String> {

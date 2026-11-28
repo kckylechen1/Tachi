@@ -21,6 +21,7 @@ pub(super) use runner::run_managed_native_acp;
 #[cfg(test)]
 pub(super) use runner::run_native_acp_dispatch;
 pub(super) use runner::{publish_native_acp_artifacts, run_native_acp_dispatch_with_liveness};
+pub(crate) use runner::{run_remote_native_review, RemoteNativeReviewOutcome};
 pub(super) use spec::{build_native_acp_run_spec, is_native_acp_transport};
 
 const ACP_STREAM_FILE: &str = "acp.stream.ndjson";

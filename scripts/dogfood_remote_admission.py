@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import shutil
 import socket
 import sqlite3
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -908,6 +910,460 @@ def _admit_only_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free
         orig.stop()
 
 
+def _execute_mode_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free_port, ca, leaves):
+    exec_root = root / "execute-mode"
+    exec_root.mkdir(mode=0o700)
+    gw = Daemon(ctx.daemon.tachi, exec_root / "gw", free_port())
+    orig = Daemon(ctx.daemon.tachi, exec_root / "orig", free_port())
+    gw.app_home.chmod(0o700)
+    orig.app_home.chmod(0o700)
+    repo = make_fixture_repo(exec_root)
+    head = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True, env=orig.env
+    ).strip()
+    for pr in (101, 102, 103):
+        subprocess.run(
+            ["git", "-C", str(repo), "update-ref", f"refs/pull/{pr}/head", head],
+            check=True,
+            env=orig.env,
+        )
+
+    fake_bin = exec_root / "bin"
+    fake_bin.mkdir(mode=0o700)
+    worker_runs_dir = exec_root / "worker-runs"
+    worker_runs_dir.mkdir(mode=0o700)
+    sibling_auth = worker_runs_dir / "sibling-run/runtime/home/.codex/auth.json"
+    sibling_auth.parent.mkdir(parents=True)
+    sibling_auth.write_text('{"fixture":"sibling-run"}', encoding="utf-8")
+    codex_home = exec_root / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    codex_auth_source = exec_root / "codex-auth-source.json"
+    _private_text(codex_auth_source, json.dumps({"token": "dogfood-codex-fixture"}))
+    (codex_home / "auth.json").symlink_to(codex_auth_source)
+    gw.env["CODEX_HOME"] = str(codex_home)
+
+    telemetry_events = []
+    telemetry_lock = threading.Lock()
+    telemetry_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    telemetry_sock.bind(("127.0.0.1", 0))
+    telemetry_port = telemetry_sock.getsockname()[1]
+    telemetry_sock.listen(16)
+    telemetry_stop = threading.Event()
+
+    def _telemetry_loop():
+        telemetry_sock.settimeout(0.2)
+        while not telemetry_stop.is_set():
+            try:
+                conn, _ = telemetry_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                data = conn.recv(65536).decode("utf-8", errors="replace").strip()
+                if data:
+                    with telemetry_lock:
+                        for line in data.splitlines():
+                            telemetry_events.append(json.loads(line))
+
+    telemetry_thread = threading.Thread(target=_telemetry_loop, daemon=True)
+    telemetry_thread.start()
+
+    gw_key_path = leaves["server"]["private_key"]
+    gw_db_path = str(gw.app_home / "global.db")
+
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        f"""#!{sys.executable}
+import json, os, socket, subprocess, sys
+
+def probe_denied_read(path):
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(16)
+        return len(data) == 0
+    except OSError:
+        return True
+
+def probe_denied_write(path):
+    try:
+        with open(path, "ab") as fh:
+            fh.write(b"x")
+        return False
+    except OSError:
+        return True
+
+head_now = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+ev = {{
+    "kind": "review_launch",
+    "head": head_now,
+    "has_tachi_home": "TACHI_HOME" in os.environ,
+    "has_memory_db": "MEMORY_DB_PATH" in os.environ,
+    "has_auth_snapshot": not probe_denied_read(os.path.join(os.environ["CODEX_HOME"], "auth.json")),
+    "sibling_blocked": probe_denied_read({str(sibling_auth)!r}),
+    "host_auth_blocked": probe_denied_read({str(codex_home / "auth.json")!r}),
+    "host_auth_target_blocked": probe_denied_read({str(codex_auth_source)!r}),
+    "key_blocked": probe_denied_read({gw_key_path!r}),
+    "db_blocked": probe_denied_read({gw_db_path!r}),
+    "worktree_ro": probe_denied_write(os.path.join(os.getcwd(), "README.md")),
+}}
+with socket.create_connection(("127.0.0.1", {telemetry_port}), timeout=5) as s:
+    s.sendall((json.dumps(ev) + "\\n").encode("utf-8"))
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    msg = json.loads(raw)
+    method = msg.get("method")
+    rid = msg.get("id")
+    if method == "initialize":
+        print(json.dumps({{"jsonrpc": "2.0", "id": rid, "result": {{"ok": True}}}}), flush=True)
+    elif method == "model/list":
+        print(json.dumps({{"jsonrpc": "2.0", "id": rid, "result": {{"data": [{{"id": "gpt-6.2-sol", "model": "gpt-6.2-sol"}}, {{"id": "gpt-6.1-sol", "model": "gpt-6.1-sol"}}]}}}}) , flush=True)
+    elif method == "thread/start":
+        params = msg.get("params", {{}})
+        model = params.get("model", "gpt-6.1-sol")
+        effort = params.get("config", {{}}).get("model_reasoning_effort", "high")
+        print(json.dumps({{"id": rid, "result": {{"thread": {{"id": "t-remote-1"}}, "model": model, "reasoningEffort": effort}}}}), flush=True)
+    elif method == "turn/start":
+        print(json.dumps({{"id": rid, "result": {{"turn": {{"id": "turn-1"}}}}}}), flush=True)
+        print(json.dumps({{"method": "item/agentMessage/delta", "params": {{"threadId": "t-remote-1", "turnId": "turn-1", "delta": "LGTM: verified read-only remote review."}}}}), flush=True)
+        print(json.dumps({{"method": "item/completed", "params": {{"threadId": "t-remote-1", "turnId": "turn-1", "item": {{"type": "agentMessage", "phase": "final_answer", "text": "LGTM: verified read-only remote review."}}}}}}), flush=True)
+        print(json.dumps({{"method": "turn/completed", "params": {{"threadId": "t-remote-1", "turn": {{"id": "turn-1", "status": "completed"}}}}}}), flush=True)
+        break
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o700)
+    gw.env["PATH"] = f"{fake_bin}:{gw.env.get('PATH', '/usr/bin:/bin')}"
+
+    verify_script = exec_root / "verify-pr.py"
+    verify_script.write_text(
+        f"""#!{sys.executable}
+import json, os, socket, sys, time
+
+def probe_denied_read(path):
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(16)
+        return len(data) == 0
+    except OSError:
+        return True
+
+def probe_denied_write(path):
+    try:
+        with open(path, "ab") as fh:
+            fh.write(b"x")
+        return False
+    except OSError:
+        return True
+
+pr = int(os.environ["TACHI_REMOTE_PULL_REQUEST"])
+sha = os.environ["TACHI_REMOTE_HEAD_SHA"]
+repo = os.environ["TACHI_REMOTE_REPOSITORY"]
+ev = {{
+    "kind": f"verify_pr_{{pr}}",
+    "pid": os.getpid(),
+    "pr": pr,
+    "sha": sha,
+    "sibling_blocked": probe_denied_read({str(sibling_auth)!r}),
+    "host_auth_blocked": probe_denied_read({str(codex_home / "auth.json")!r}),
+    "host_auth_target_blocked": probe_denied_read({str(codex_auth_source)!r}),
+    "has_tachi_home": "TACHI_HOME" in os.environ,
+    "has_memory_db": "MEMORY_DB_PATH" in os.environ,
+    "key_blocked": probe_denied_read({gw_key_path!r}),
+    "db_blocked": probe_denied_read({gw_db_path!r}),
+    "worktree_ro": probe_denied_write(os.path.join(os.getcwd(), "README.md")),
+}}
+with socket.create_connection(("127.0.0.1", {telemetry_port}), timeout=5) as s:
+    s.sendall((json.dumps(ev) + "\\n").encode("utf-8"))
+
+if pr == 101:
+    print(json.dumps({{
+        "status": "completed",
+        "repository": repo,
+        "pull_request": pr,
+        "head_sha": sha,
+        "receipt_url": f"https://github.com/{{repo}}/pull/{{pr}}#issuecomment-777001",
+    }}), flush=True)
+elif pr == 102:
+    print(json.dumps({{
+        "status": "completed",
+        "repository": repo,
+        "pull_request": pr,
+        "head_sha": "0" * 40,
+        "receipt_url": f"https://github.com/{{repo}}/pull/{{pr}}#issuecomment-777002",
+    }}), flush=True)
+elif pr == 103:
+    time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    verify_script.chmod(0o700)
+
+    domain = "dogfood:execute"
+    gw_config = {
+        "schema_version": "tachi.remote_gateway.v1",
+        "agent_identity_id": "agent-mac",
+        "host_id": "host-mac",
+        "issuer_id": "issuer-exec-gw",
+        "trust_domain": domain,
+        "home": str(gw.app_home),
+        "worker_runs_dir": str(worker_runs_dir),
+        "bind": f"127.0.0.1:{gw.port}",
+        "public_endpoint": f"https://localhost:{gw.port}",
+        "certificate": leaves["server"]["certificate"],
+        "private_key": leaves["server"]["private_key"],
+        "peer_ca": str(ca),
+        "execution_mode": "execute",
+        "destinations": [{
+            "repository": "owner/exec",
+            "canonical_project": "e" * 64,
+            "repo_root": str(repo),
+            "allowed_jobs": ["review_revision", "verify_pr"],
+            "review_profile": "codex_sol_review",
+            "review_timeout_secs": 30,
+            "verify_policy": "dgx2_acceptance_v1",
+            "verify_command": [str(verify_script)],
+            "verify_timeout_secs": 30,
+            "resource_slot": "slot-exec-1",
+            "max_concurrent_runs": 2,
+            "lease_ttl_secs": 600,
+        }],
+        "peers": [{
+            "agent_identity_id": "agent-cloud",
+            "host_id": "host-cloud",
+            "public_key_sha256": leaves["cloud"]["public_key_sha256"],
+            "repositories": [{"repository": "owner/exec", "jobs": ["review_revision", "verify_pr"]}],
+        }],
+    }
+    orig_config = {
+        "schema_version": "tachi.remote_gateway.v1",
+        "agent_identity_id": "agent-cloud",
+        "host_id": "host-cloud",
+        "issuer_id": "issuer-exec-orig",
+        "trust_domain": domain,
+        "home": str(orig.app_home),
+        "origin_database": str(orig.app_home / "global" / "tachi-memory.db"),
+        "bind": f"127.0.0.1:{orig.port}",
+        "certificate": leaves["cloud"]["certificate"],
+        "private_key": leaves["cloud"]["private_key"],
+        "peer_ca": str(ca),
+        "peers": [{
+            "agent_identity_id": "agent-mac",
+            "host_id": "host-mac",
+            "public_key_sha256": leaves["server"]["public_key_sha256"],
+            "endpoint": f"https://localhost:{gw.port}",
+            "outbound": [{
+                "repository": "owner/exec",
+                "canonical_project": "",
+                "jobs": ["review_revision", "verify_pr"],
+            }],
+        }],
+    }
+    gw_path = exec_root / "gateway.json"
+    orig_path = exec_root / "origin.json"
+    _private_text(gw_path, json.dumps(gw_config))
+    orig.start()
+    try:
+        source = McpSession(orig.url, {"X-Tachi-Workspace-Root": str(repo),
+                                       "X-Tachi-Agent-Identity": "agent-cloud"})
+        lease = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+        ok, claim, raw = source.call("tachi_task", action="claim", claim_scope=["src/main.rs"],
+            claim_mode="read_only", claim_role="reviewer", worktree_path=str(repo),
+            expected_head=head, lease_expires_at=lease, issue_ref="owner/exec#rev")
+        ctx.require("execute-mode origin obtains WorkClaim", ok, claim if ok else raw)
+        with closing(sqlite3.connect(orig.app_home / "global" / "tachi-memory.db")) as conn:
+            orig_project = conn.execute("SELECT canonical_project FROM session_claims WHERE claim_id=?",
+                                        (claim["claim_id"],)).fetchone()[0]
+        orig_config["peers"][0]["outbound"][0]["canonical_project"] = orig_project
+        _private_text(orig_path, json.dumps(orig_config))
+
+        _start_gateway(ctx, gw, gw_path)
+
+        def orig_cli(*args):
+            res = _run(ctx, orig, f"execute-mode cli {' '.join(args)}",
+                       [str(orig.tachi), "a2a", "remote", *args])
+            ctx.require(f"execute-mode cli {' '.join(args)} succeeds", res.returncode == 0, _output(res))
+            return json.loads(res.stdout)
+
+        def poll_until(sub_id, predicate, timeout=15.0):
+            deadline = time.monotonic() + timeout
+            last = None
+            while time.monotonic() < deadline:
+                last = orig_cli("status", "--config", str(orig_path), "--submission", sub_id, "--reconcile")
+                if predicate(last):
+                    return last
+                time.sleep(0.15)
+            return last
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        # 1. A3: review_revision executes once, isolates env, and cleans up.
+        review_req = exec_root / "job-review.json"
+        _private_text(review_req, json.dumps({
+            "kind": "tachi.remote_job/v1",
+            "sender": "agent-cloud",
+            "recipient": "agent-mac",
+            "trust_domain": domain,
+            "idempotency_key": "exec-review-1",
+            "nonce": "exec-review-nonce-1",
+            "issued_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "repository": "owner/exec",
+            "head_sha": head,
+            "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+            "job": "review_revision",
+            "question": "Check remote review execution.",
+        }))
+        rev_sub = orig_cli("submit", "--config", str(orig_path), "--request", str(review_req))
+        rev_done = poll_until(
+            rev_sub["submission_id"],
+            lambda s: s["current_state"] == "completed"
+            and any(r["fact"] == "cleanup" for r in s["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]),
+        )
+        rev_facts = [r["fact"] for r in rev_done["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]]
+        # Replay must not launch a second worker.
+        _ = orig_cli("submit", "--config", str(orig_path), "--request", str(review_req))
+        with telemetry_lock:
+            launches = [e for e in telemetry_events if e.get("kind") == "review_launch"]
+        ctx.check("A3 review_revision executes once, sandboxes gateway secrets/DB, snapshots auth, and records completed+cleanup",
+                  rev_done["current_state"] == "completed"
+                  and rev_facts == ["received", "admitted", "started", "completed", "cleanup"]
+                  and len(launches) == 1
+                  and launches[0]["head"] == head
+                  and launches[0]["has_auth_snapshot"]
+                  and launches[0]["sibling_blocked"]
+                  and launches[0]["host_auth_blocked"]
+                  and launches[0]["host_auth_target_blocked"]
+                  and launches[0]["key_blocked"]
+                  and launches[0]["db_blocked"]
+                  and launches[0]["worktree_ro"]
+                  and not launches[0]["has_tachi_home"]
+                  and not launches[0]["has_memory_db"],
+                  {"state": rev_done["current_state"], "facts": rev_facts, "launches": launches})
+
+        # 2. A5 positive: verify_pr records authoritative exact-head GitHub receipt URL.
+        v_ok_req = exec_root / "job-verify-ok.json"
+        _private_text(v_ok_req, json.dumps({
+            "kind": "tachi.remote_job/v1",
+            "sender": "agent-cloud",
+            "recipient": "agent-mac",
+            "trust_domain": domain,
+            "idempotency_key": "exec-verify-ok",
+            "nonce": "exec-verify-nonce-ok",
+            "issued_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "repository": "owner/exec",
+            "head_sha": head,
+            "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+            "job": "verify_pr",
+            "pull_request": 101,
+        }))
+        v_ok_sub = orig_cli("submit", "--config", str(orig_path), "--request", str(v_ok_req))
+        v_ok_done = poll_until(
+            v_ok_sub["submission_id"],
+            lambda s: s["current_state"] == "completed"
+            and any(r["fact"] == "cleanup" for r in s["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]),
+        )
+        v_ok_receipts = v_ok_done["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]
+        v_ok_term = next((r for r in v_ok_receipts if r["fact"] == "completed"), {})
+        with telemetry_lock:
+            v_ok_events = [e for e in telemetry_events if e.get("kind") == "verify_pr_101"]
+            v_env = v_ok_events[-1] if v_ok_events else {}
+        ctx.check("A5 verify_pr binds exact-head GitHub receipt_url with sandboxed secrets and zero memory env",
+                  v_ok_done["current_state"] == "completed"
+                  and v_ok_term.get("detail", {}).get("external_ref") == "https://github.com/owner/exec/pull/101#issuecomment-777001"
+                  and v_env.get("key_blocked") and v_env.get("db_blocked") and v_env.get("worktree_ro")
+                  and v_env.get("sibling_blocked")
+                  and v_env.get("host_auth_blocked")
+                  and v_env.get("host_auth_target_blocked")
+                  and not v_env.get("has_tachi_home") and not v_env.get("has_memory_db"),
+                  {"state": v_ok_done["current_state"], "receipts": v_ok_receipts, "env": v_env})
+
+        # 3. A5 negative: exit-0 with mismatched head_sha must fail closed, never completed.
+        v_bad_req = exec_root / "job-verify-bad.json"
+        _private_text(v_bad_req, json.dumps({
+            "kind": "tachi.remote_job/v1",
+            "sender": "agent-cloud",
+            "recipient": "agent-mac",
+            "trust_domain": domain,
+            "idempotency_key": "exec-verify-bad",
+            "nonce": "exec-verify-nonce-bad",
+            "issued_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "repository": "owner/exec",
+            "head_sha": head,
+            "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+            "job": "verify_pr",
+            "pull_request": 102,
+        }))
+        v_bad_sub = orig_cli("submit", "--config", str(orig_path), "--request", str(v_bad_req))
+        v_bad_done = poll_until(
+            v_bad_sub["submission_id"],
+            lambda s: s["current_state"] == "failed"
+            and any(r["fact"] == "cleanup" for r in s["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]),
+        )
+        v_bad_term = [r for r in v_bad_done["remote_receipt"]["metadata"][_PROVENANCE]["receipts"] if r["fact"] == "failed"][0]
+        ctx.check("A5 verify_pr rejects mismatched head_sha receipt as failed",
+                  v_bad_done["current_state"] == "failed"
+                  and v_bad_term["detail"]["error_class"] == "invalid_external_receipt",
+                  v_bad_term)
+
+        # 4. A4 live cancellation: cancel_requested -> kill/reap process group -> canceled + cleanup.
+        v_slow_req = exec_root / "job-verify-slow.json"
+        _private_text(v_slow_req, json.dumps({
+            "kind": "tachi.remote_job/v1",
+            "sender": "agent-cloud",
+            "recipient": "agent-mac",
+            "trust_domain": domain,
+            "idempotency_key": "exec-verify-slow",
+            "nonce": "exec-verify-nonce-slow",
+            "issued_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "repository": "owner/exec",
+            "head_sha": head,
+            "origin_claim": {"claim_id": claim["claim_id"], "transition_version": claim["transition_version"]},
+            "job": "verify_pr",
+            "pull_request": 103,
+        }))
+        v_slow_sub = orig_cli("submit", "--config", str(orig_path), "--request", str(v_slow_req))
+        deadline = time.monotonic() + 10.0
+        slow_pid = None
+        while time.monotonic() < deadline:
+            with telemetry_lock:
+                hits = [e for e in telemetry_events if e.get("kind") == "verify_pr_103"]
+            if hits:
+                slow_pid = int(hits[-1]["pid"])
+                break
+            time.sleep(0.05)
+        ctx.require("A4 slow verify_pr process started", slow_pid is not None, "slow verify_pr telemetry missing")
+        cancel_resp = orig_cli("cancel", "--config", str(orig_path), "--submission", v_slow_sub["submission_id"])
+        cancel_facts = [r["fact"] for r in cancel_resp["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]]
+        v_slow_done = poll_until(
+            v_slow_sub["submission_id"],
+            lambda s: s["current_state"] == "canceled"
+            and any(r["fact"] == "cleanup" for r in s["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]),
+        )
+        done_facts = [r["fact"] for r in v_slow_done["remote_receipt"]["metadata"][_PROVENANCE]["receipts"]]
+        process_dead = False
+        try:
+            os.kill(slow_pid, 0)
+        except ProcessLookupError:
+            process_dead = True
+        ctx.check("A4 live CancelTask transitions working -> cancel_requested -> canceled+cleanup and reaps child",
+                  "cancel_requested" in cancel_facts
+                  and v_slow_done["current_state"] == "canceled"
+                  and done_facts == ["received", "admitted", "started", "cancel_requested", "canceled", "cleanup"]
+                  and process_dead,
+                  {"cancel_facts": cancel_facts, "done_facts": done_facts, "process_dead": process_dead})
+    finally:
+        telemetry_stop.set()
+        telemetry_sock.close()
+        gw.stop()
+        orig.stop()
+
+
 def register_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_repo):
     @scenario("remote-admission", "a2a-remote", "identity", shared_daemon=False)
     def remote_admission_enforces_tls_identity_and_revocation(ctx):
@@ -1140,6 +1596,7 @@ def register_scenarios(scenario, Daemon, free_port, McpSession, make_fixture_rep
             clients.clear()
             gateway.stop()
             _admit_only_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free_port, ca, leaves)
+            _execute_mode_lifecycle(ctx, root, Daemon, McpSession, make_fixture_repo, free_port, ca, leaves)
         finally:
             for client in clients:
                 client.close()

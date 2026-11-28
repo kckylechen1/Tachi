@@ -157,6 +157,10 @@ pub(super) async fn run(
                 read(server, &actor, submission)?
             }
         }
+        RemoteA2aAction::Cancel {
+            config: path,
+            submission,
+        } => cancel_via_rpc(server, authority, config, path, &actor, submission).await?,
         _ => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -444,6 +448,51 @@ async fn reconcile_via_get_task(
     actor: &A2aTransitionActor,
     id: &str,
 ) -> Result<RemoteSubmission, Box<dyn Error>> {
+    task_rpc_and_reconcile(
+        server,
+        authority,
+        original,
+        path,
+        actor,
+        id,
+        "GetTask",
+        |task_id| json!({"id": task_id, "historyLength": 0}),
+    )
+    .await
+}
+
+async fn cancel_via_rpc(
+    server: &crate::MemoryServer,
+    authority: &crate::MemoryServer,
+    original: &GatewayConfig,
+    path: &Path,
+    actor: &A2aTransitionActor,
+    id: &str,
+) -> Result<RemoteSubmission, Box<dyn Error>> {
+    task_rpc_and_reconcile(
+        server,
+        authority,
+        original,
+        path,
+        actor,
+        id,
+        "CancelTask",
+        |task_id| json!({"id": task_id}),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn task_rpc_and_reconcile(
+    server: &crate::MemoryServer,
+    authority: &crate::MemoryServer,
+    original: &GatewayConfig,
+    path: &Path,
+    actor: &A2aTransitionActor,
+    id: &str,
+    method: &str,
+    params_fn: impl FnOnce(&str) -> Value,
+) -> Result<RemoteSubmission, Box<dyn Error>> {
     let current = read(server, actor, id)?;
     let task_id = current
         .remote_task_id
@@ -487,11 +536,8 @@ async fn reconcile_via_get_task(
     let req_bytes = serde_json::to_vec(&json!({
         "jsonrpc": "2.0",
         "id": rpc_id,
-        "method": "GetTask",
-        "params": {
-            "id": task_id,
-            "historyLength": 0
-        }
+        "method": method,
+        "params": params_fn(task_id)
     }))?;
     let url = url::Url::parse(&bound.endpoint)?.join("/rpc")?;
     let response = client
@@ -503,25 +549,28 @@ async fn reconcile_via_get_task(
         .send()
         .await?;
     if !response.status().is_success() || !validate_rpc_headers(&response) {
-        return Err("destination GetTask RPC rejected or returned invalid framing".into());
+        return Err(
+            format!("destination {method} RPC rejected or returned invalid framing").into(),
+        );
     }
     let bytes = read_bounded_rpc_body(response)
         .await
-        .map_err(|err| format!("failed reading destination GetTask response: {err}"))?;
+        .map_err(|err| format!("failed reading destination {method} response: {err}"))?;
     let parsed = profile::parse_unique(&bytes)
-        .map_err(|_| "destination GetTask response was not valid unique JSON")?;
+        .map_err(|_| format!("destination {method} response was not valid unique JSON"))?;
     if parsed["jsonrpc"] != "2.0"
         || parsed["id"] != rpc_id
         || !keys(&parsed, &["jsonrpc", "id", "result"])
     {
-        return Err("destination GetTask response failed RPC envelope checks".into());
+        return Err(format!("destination {method} response failed RPC envelope checks").into());
     }
     let task = &parsed["result"];
-    let state = validate_task_snapshot(task, &current)
-        .ok_or("destination GetTask snapshot failed provenance/lifecycle validation")?;
+    let state = validate_task_snapshot(task, &current).ok_or_else(|| {
+        format!("destination {method} snapshot failed provenance/lifecycle validation")
+    })?;
     let returned_id = task["id"]
         .as_str()
-        .ok_or("destination GetTask snapshot missing task id")?;
+        .ok_or_else(|| format!("destination {method} snapshot missing task id"))?;
     Ok(server.with_global_store(|store| {
         a2a::reconcile_remote_submission(store.connection(), actor, id, state, returned_id, task)
             .map_err(|error| error.to_string())
