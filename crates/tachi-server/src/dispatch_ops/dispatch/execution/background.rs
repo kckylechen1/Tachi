@@ -50,6 +50,19 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         ctx.presence_assignment,
     );
     let observer = presence.as_ref().map(|(observer, _)| observer.clone());
+    // The dispatch is acknowledged before this task runs. The guards are built
+    // here rather than in the task, so one that is dropped before its first
+    // poll (the daemon exiting in that window) still cleans up.
+    let handover = BackgroundHandover {
+        early_exit_cleanup: BackgroundEarlyExitCleanup::new(
+            server_clone.clone(),
+            workspace_dir_for_spawn.clone(),
+            flow_dispatch_slot_for_spawn,
+            postflight_dispatch_lease,
+        ),
+        mcp_cleanup: McpCleanup(mcp_config_path),
+        managed_run_guard,
+    };
     let background = async move {
         #[cfg(any(unix, windows))]
         let _status_hint =
@@ -58,15 +71,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         // Keep the registry entry and its sender alive for the entire
         // background lifecycle. Binding this outside the async move drops the
         // guard as soon as scheduling returns and makes the child observe a
-        // closed cancellation receiver before it can spawn.
-        let _managed_run_guard = managed_run_guard;
-        let _mcp_cleanup = McpCleanup(mcp_config_path);
-        let mut early_exit_cleanup = BackgroundEarlyExitCleanup::new(
-            server_clone.clone(),
-            workspace_dir_for_spawn.clone(),
-            flow_dispatch_slot_for_spawn,
-            postflight_dispatch_lease,
-        );
+        // closed cancellation receiver before it can spawn. The bindings are
+        // written so the scope drops them in reverse: credentials and the
+        // dispatch slot, the temporary MCP config, then the authority.
+        let (_managed_run_guard, _mcp_cleanup, mut early_exit_cleanup) = handover.into_parts();
 
         // execute_started — Stage 2 (or, in V1, the only stage).
         let execute_started_at = jiff::Timestamp::now();
@@ -1319,4 +1327,79 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
     hand_over_background_dispatch_handle_to_capture(background_dispatch);
     #[cfg(not(test))]
     drop(background_dispatch);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dispatch is acknowledged before its task runs. If the daemon exits in
+    /// that window the task is dropped without ever being polled, and what it
+    /// owns must still be released.
+    #[test]
+    fn a_dispatch_dropped_before_its_first_poll_still_removes_its_temporary_mcp_config() {
+        let dir = tempfile::tempdir().expect("dispatch directory");
+        let mcp_config = dir.path().join("mcp.json");
+        std::fs::write(&mcp_config, "{}").expect("temporary MCP config");
+        let server = MemoryServer::new(
+            crate::utils::test_fixture_path(format!(
+                "background-handover-{}.sqlite",
+                uuid::Uuid::new_v4()
+            )),
+            None,
+        )
+        .expect("create test server");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let entered = runtime.enter();
+        spawn_background_dispatch(BackgroundDispatchContext {
+            server,
+            dispatch_id: "handover-never-polled".to_string(),
+            agent: "codex".to_string(),
+            presence_assignment: crate::staffing_ops::presence::Assignment {
+                agent_identity_id: None,
+                summary: "never polled".to_string(),
+                issue_ref: None,
+                flow_id: None,
+            },
+            env_id: None,
+            stage: None,
+            project: None,
+            trajectory_path: dir.path().join("trajectory.jsonl"),
+            workspace_dir: dir.path().to_path_buf(),
+            v2: false,
+            plan_generated_at: None,
+            plan_duration_ms: None,
+            timeout_secs: 60,
+            timeout: Duration::from_secs(60),
+            feedback_rules_trace: serde_json::Value::Null,
+            harness_transport: "subprocess".to_string(),
+            harness_server_url: None,
+            host_adapter: None,
+            opencode_sop_label: None,
+            execution_backend_metadata: None,
+            execution: DispatchExecution::Subprocess(
+                std::process::Command::new("/usr/bin/true").into(),
+            ),
+            cwd_authority: None,
+            flow_dispatch_slot: None,
+            mcp_config_path: Some(mcp_config.clone()),
+            managed_run_guard: None,
+            managed_ephemeral_credential_cleanup: None,
+            native_staff_sandbox: false,
+            postflight_gate: None,
+            postflight_dispatch_lease: None,
+            auto_staff_exec_env: None,
+        });
+        // The runtime is never driven, so nothing in the task runs.
+        drop(entered);
+        drop(runtime);
+
+        assert!(
+            !mcp_config.exists(),
+            "the temporary MCP config outlived a dispatch that never ran"
+        );
+    }
 }
