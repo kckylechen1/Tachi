@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 jiff = { workspace = true }
+libc = "0.2"
 memcore = { path = "../memcore" }
 rusqlite = { workspace = true }
 serde = { workspace = true }

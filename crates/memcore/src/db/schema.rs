@@ -2054,6 +2054,9 @@ fn init_schema_inner(
         install_harness_session_attachments_schema(conn)?;
         install_harness_session_spine_schema(conn)?;
         install_delivery_spine_schema(conn)?;
+        if crate::db::migrations::supported_schema_version() >= 47 {
+            crate::db::migrations::projection_keys::install_v47_fts_projection_map(conn)?;
+        }
         if profile.includes_product() {
             install_a2a_mailbox_v32_schema(conn)?;
             crate::db::verified_admissions::install_verified_admission_schema(conn)?;
@@ -3434,6 +3437,15 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     // Bare schema callers also need the function. Store connection setup
     // registers it even for identity-bound/maintenance opens that skip init.
     super::fts_projection::register(conn)?;
+    if crate::db::table_exists(conn, super::fts_projection::FTS_PROJECTION_MAP_TABLE)? {
+        let outcome = super::fts_projection::repair_memories_fts(conn, true)?;
+        if outcome.changed {
+            crate::db::search_generation::bump_search_generation(conn)?;
+        }
+        return Ok(());
+    }
+    // Admitted pre-v47 inputs run the historical repair before v47's atomic
+    // authoritative rebuild in the same schema transaction.
     // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
     // table and would `no such table`-crash a PortableKernel init, and it never

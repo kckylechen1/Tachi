@@ -946,7 +946,7 @@ fn wait_for_process_group_absence_after_reap(pid: Option<u32>) -> bool {
 }
 
 #[cfg(unix)]
-async fn wait_for_process_group_absence(pid: Option<u32>) -> bool {
+pub(crate) async fn wait_for_process_group_absence(pid: Option<u32>) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline {
         if process_group_absent(pid) {
@@ -1061,11 +1061,11 @@ pub(crate) async fn wait_for_owned_root_exit(
 ) -> std::io::Result<bool> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if observe_root_exit_without_reap(child_pid)? {
-            return Ok(true);
-        }
         if tokio::time::Instant::now() >= deadline {
             return Ok(false);
+        }
+        if observe_root_exit_without_reap(child_pid)? {
+            return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

@@ -12,7 +12,8 @@
 //! [`check_schema_version_gate`] and must be bridged to `v39+` using an
 //! archived pre-squash binary. Fresh empty databases (`user_version == 0`)
 //! initialize the complete baseline schema directly and stamp
-//! [`EXPECTED_SCHEMA_VERSION`] (`46` for Product; Portable remains `44`).
+//! [`EXPECTED_SCHEMA_VERSION`] (`47`). Both Product and Portable run the v47
+//! FTS projection-key migration.
 //!
 //! Active shipped migrations:
 //! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
@@ -25,6 +26,7 @@
 //! - v44: scoped erasure guards on typed revisions and lineage (Portable).
 //! - v45: remote job rejection/replay headers and receipts in the Product A2A mailbox.
 //! - v46: durable origin submissions with frozen authority and bounded attempts (Product).
+//! - v47: stable projection keys shared by lexical and symbolic FTS (Portable).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -65,6 +67,12 @@ pub const PORTABLE_EXPECTED_SCHEMA_VERSION: u32 =
 /// Last schema stamp supported by binaries predating D7. Never advance this floor.
 pub const PORTABLE_COMPAT_FLOOR: u32 = 39;
 
+/// Install the v47 mapping before an explicit repair rebuilds both projections.
+/// Ordinary opens reach the same DDL through the migration catalogue.
+pub fn ensure_fts_projection_map_for_repair(conn: &Connection) -> Result<(), MemoryError> {
+    projection_keys::install_v47_fts_projection_map(conn)
+}
+
 pub(crate) mod catalogue;
 
 pub(crate) fn supported_schema_version() -> u32 {
@@ -77,6 +85,7 @@ pub(crate) fn portable_schema_version() -> u32 {
 
 mod identity_workclaim_spine;
 mod mirror_eval_identity;
+pub(crate) mod projection_keys;
 mod sentinel;
 mod symbolic_fts;
 

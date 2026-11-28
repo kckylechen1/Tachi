@@ -172,6 +172,13 @@ pub enum BuildAction {
     /// Quarantines that build's target dir FIRST, then frees the slot. Never
     /// run this while the holder's cargo is actually alive.
     Abandon {
+        /// The stale holder's ticket, read from `tachi build status`.
+        #[arg(long, value_name = "ID")]
+        ticket_id: String,
+        /// The stale holder's unique acquisition ID, required for new claims.
+        /// Omit only when recovering a legacy holder that predates these IDs.
+        #[arg(long, value_name = "ID")]
+        acquisition_id: Option<String>,
         /// Why the slot is being forced open (recorded on the quarantine).
         #[arg(long, value_name = "REASON")]
         reason: String,

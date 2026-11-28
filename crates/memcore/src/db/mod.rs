@@ -37,8 +37,9 @@ pub mod foundry_config;
 #[cfg(feature = "admin")]
 pub mod foundry_jobs;
 mod fts_projection;
-#[cfg(test)]
-pub(crate) use fts_projection::acquire_fts_sync_lock;
+pub(crate) use fts_projection::{
+    acquire_fts_sync_lock, rebuild_memories_fts_from_authority_locked, repair_memories_fts,
+};
 mod gc_candidates;
 mod graph;
 #[cfg(feature = "admin")]
@@ -231,8 +232,8 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub use memory_crud::refuse_retired_sticky_row_within_tx;
 #[cfg(test)]
 pub(crate) use memory_crud::search_fts_raw_match;
-pub(crate) use memory_crud::search_fts_with_normalized_as_of;
-pub(crate) use memory_crud::search_symbolic_candidates_with_relevance;
+pub(crate) use memory_crud::search_fts_with_normalized_as_of_and_domain;
+pub(crate) use memory_crud::search_symbolic_candidates_with_relevance_and_domain;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use memory_crud::supersede_with_metadata_if_expected_state;
 pub(crate) use memory_crud::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals;
@@ -251,11 +252,12 @@ pub use memory_crud::{
     mark_metadata_extraction_attempted, normalize_for_write, record_enrichment_failure,
     record_enrichment_failure_if_revision, record_memory_use, release_event_claim,
     restore_archived_if_revision, restore_archived_revision_within_tx, search_fts,
-    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
-    set_keyword_enrichment_status, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
-    try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicateOutcome,
-    NearDuplicatePolicy, ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    search_symbolic_candidates, search_vec, search_vec_with_domain,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
+    symbolic_trigram_select_sql, sync_memories_symbolic_fts, try_claim_event,
+    update_enrichment_fields, update_with_revision, AccessEventDensity, AccessEventKind,
+    IdlessUpsertResult, InsertMemoryResult, NearDuplicateOutcome, NearDuplicatePolicy,
+    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
     MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };

@@ -86,6 +86,56 @@ pub fn ensure_resource_allow_quarantined(
     }
 }
 
+/// Transaction-scoped variant used by crash recovery. The holder identity,
+/// target fence and slot deletion must either all commit or all roll back.
+pub fn ensure_resource_allow_quarantined_in_tx(
+    tx: &memcore::store::state::StateTransaction<'_>,
+    target_path: &str,
+) -> Result<String, String> {
+    let existing = tx
+        .find_resource_by_path(target_path, ResourceKind::BuildTarget)
+        .map_err(|e| e.to_string())?;
+    match existing {
+        Some(res)
+            if matches!(
+                res.state,
+                ResourceState::Active | ResourceState::Quarantined
+            ) =>
+        {
+            Ok(res.resource_id)
+        }
+        Some(res) if res.state == ResourceState::Reclaimed => {
+            let resource_id = uuid::Uuid::new_v4().to_string();
+            tx.insert_resource(&NewExecEnvResource {
+                resource_id: resource_id.clone(),
+                kind: ResourceKind::BuildTarget,
+                path: target_path.to_string(),
+                bytes: None,
+                created_at: String::new(),
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(resource_id)
+        }
+        Some(res) => Err(format!(
+            "build target '{target_path}' is '{}': crash recovery must wait for the in-progress \
+             reclaim to resolve (#894 S2a/S2c)",
+            res.state.as_str()
+        )),
+        None => {
+            let resource_id = uuid::Uuid::new_v4().to_string();
+            tx.insert_resource(&NewExecEnvResource {
+                resource_id: resource_id.clone(),
+                kind: ResourceKind::BuildTarget,
+                path: target_path.to_string(),
+                bytes: None,
+                created_at: String::new(),
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(resource_id)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

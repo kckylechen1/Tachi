@@ -18,7 +18,7 @@ mod path_gate;
 mod predicate;
 mod prompt;
 pub(crate) mod signature_evidence;
-mod subprocess;
+pub(crate) mod subprocess;
 
 // Re-exports preserving the legacy public surface so external callers
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep

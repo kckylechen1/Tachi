@@ -39,6 +39,10 @@ pub struct SlotHolder {
     pub ticket_id: String,
     pub pid: u32,
     pub acquired_at: String,
+    /// Unique per claim, so even the same ticket and PID cannot be confused
+    /// with a later acquisition during crash recovery.
+    #[serde(default)]
+    pub acquisition_id: String,
     /// The target dir this holder is writing into. `None` until the target plan
     /// is chosen; recorded as soon as it is, so that if this process dies
     /// mid-build the recovery path knows exactly which target to quarantine.
@@ -48,8 +52,8 @@ pub struct SlotHolder {
 /// Whether a ticket may build now, decided together with the state it depends on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Claim {
-    /// This process holds the executor slot for the ticket.
-    Held,
+    /// This process holds the executor slot for the ticket and acquisition.
+    Held(SlotHolder),
     /// The slot is taken; nothing was attempted for the ticket.
     Busy { holder: SlotHolder },
     /// The build already ran. Receipts are write-once, so running again would
@@ -74,7 +78,7 @@ pub(crate) fn claim_for_execution(
         .begin_state_transaction(TransactionBehavior::Immediate)
         .map_err(|e| format!("begin executor claim: {e}"))?;
     let claim = claim_in(&tx, ticket_id)?;
-    if matches!(claim, Claim::Held) {
+    if matches!(claim, Claim::Held(_)) {
         tx.commit()
             .map_err(|e| format!("commit executor claim: {e}"))?;
     }
@@ -94,6 +98,7 @@ fn claim_in(tx: &StateTransaction<'_>, ticket_id: &str) -> Result<Claim, String>
         ticket_id: ticket_id.to_string(),
         pid: std::process::id(),
         acquired_at: jiff::Timestamp::now().to_string(),
+        acquisition_id: uuid::Uuid::new_v4().to_string(),
         target_path: None,
     };
     let value = serde_json::to_string(&holder).map_err(|e| format!("serialize slot: {e}"))?;
@@ -101,7 +106,7 @@ fn claim_in(tx: &StateTransaction<'_>, ticket_id: &str) -> Result<Claim, String>
         .insert_state_if_absent(BROKER_NS, EXECUTOR_SLOT_KEY, &value)
         .map_err(|e| format!("acquire executor slot: {e}"))?
     {
-        return Ok(Claim::Held);
+        return Ok(Claim::Held(holder));
     }
     // The write lock is held, so the row that won the insert cannot vanish
     // before it is read back.
@@ -140,49 +145,57 @@ pub fn current_holder(store: &MemoryStore) -> Result<Option<SlotHolder>, String>
 /// may do this — a non-holder writing here would mislabel the recovery path's
 /// quarantine target.
 pub(crate) fn record_slot_target(
-    store: &MemoryStore,
-    ticket_id: &str,
+    store: &mut MemoryStore,
+    expected: &SlotHolder,
     target_path: &str,
 ) -> Result<(), String> {
-    let mut holder = current_holder(store)?
+    let tx = store
+        .begin_state_transaction(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin slot-target update: {e}"))?;
+    let mut holder = holder_in(&tx)?
         .ok_or_else(|| "executor slot is not held; cannot record its target".to_string())?;
-    if holder.ticket_id != ticket_id {
+    if &holder != expected {
         return Err(format!(
-            "executor slot is held by ticket '{}', not '{ticket_id}': refusing to record a \
-             target dir on someone else's slot",
-            holder.ticket_id
+            "executor slot acquisition '{}' no longer belongs to ticket '{}'; refusing to update it",
+            expected.acquisition_id, expected.ticket_id
         ));
     }
     holder.target_path = Some(target_path.to_string());
     let value = serde_json::to_string(&holder).map_err(|e| format!("serialize slot: {e}"))?;
-    store
-        .set_state(BROKER_NS, EXECUTOR_SLOT_KEY, &value)
+    tx.set_state(BROKER_NS, EXECUTOR_SLOT_KEY, &value)
         .map_err(|e| format!("record executor slot target: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit executor slot target: {e}"))?;
     Ok(())
 }
 
-/// Release the slot. Only the holder may release it: releasing someone else's
-/// slot would let a third ticket in while their `cargo` is still running.
-/// Returns `false` when there was nothing to release.
-pub(crate) fn release_slot(store: &MemoryStore, ticket_id: &str) -> Result<bool, String> {
-    match current_holder(store)? {
-        None => Ok(false),
-        Some(holder) if holder.ticket_id != ticket_id => Err(format!(
-            "executor slot is held by ticket '{}', not '{ticket_id}': refusing to release \
-             someone else's slot (that would admit a second concurrent cargo)",
-            holder.ticket_id
-        )),
-        Some(_) => store
-            .delete_state(BROKER_NS, EXECUTOR_SLOT_KEY)
-            .map_err(|e| format!("release executor slot: {e}")),
-    }
+/// Release the slot. Only the exact acquisition may release it.
+fn same_acquisition(left: &SlotHolder, right: &SlotHolder) -> bool {
+    left.ticket_id == right.ticket_id
+        && left.pid == right.pid
+        && left.acquired_at == right.acquired_at
+        && left.acquisition_id == right.acquisition_id
 }
 
-/// Force the slot open, whoever holds it. The ONLY caller is the explicit
-/// crash-recovery path ([`super::abandon_stale_slot`]), which quarantines the
-/// dead holder's target dir *first*.
-pub(crate) fn force_release_slot(store: &MemoryStore) -> Result<bool, String> {
-    store
-        .delete_state(BROKER_NS, EXECUTOR_SLOT_KEY)
-        .map_err(|e| format!("force-release executor slot: {e}"))
+pub(crate) fn release_slot(store: &mut MemoryStore, expected: &SlotHolder) -> Result<bool, String> {
+    let tx = store
+        .begin_state_transaction(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin executor release: {e}"))?;
+    match holder_in(&tx)? {
+        None => Ok(false),
+        Some(holder) if !same_acquisition(&holder, expected) => Err(format!(
+            "executor slot is held by ticket '{}', acquisition '{}', not the caller's '{}': refusing to release it",
+            holder.ticket_id, holder.acquisition_id, expected.acquisition_id
+        )),
+        Some(_) => {
+            let deleted = tx
+                .delete_state(BROKER_NS, EXECUTOR_SLOT_KEY)
+                .map_err(|e| format!("release executor slot: {e}"))?;
+            if deleted {
+                tx.commit()
+                    .map_err(|e| format!("commit executor release: {e}"))?;
+            }
+            Ok(deleted)
+        }
+    }
 }

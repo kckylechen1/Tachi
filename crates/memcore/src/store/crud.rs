@@ -8,8 +8,8 @@ use crate::{
     db,
     error::MemoryError,
     search::{
-        hybrid_search, hybrid_search_with_receipt, SearchOptions, SearchPhaseReceipt,
-        SearchReceiptDatabaseScope, SearchReceiptOperation,
+        hybrid_search, hybrid_search_prepare_access, hybrid_search_with_receipt, SearchAccessPlan,
+        SearchOptions, SearchPhaseReceipt, SearchReceiptDatabaseScope, SearchReceiptOperation,
     },
     types::{MemoryEntry, SearchResult, StatsResult},
     MemoryStore,
@@ -61,6 +61,89 @@ impl MemoryStore {
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         retry_search_locked(&self.db_label, || {
             hybrid_search(&self.conn, query, &options)
+        })
+    }
+
+    /// Prepare one store's contribution to a merged search without writing
+    /// access evidence. The returned plan can be finalized only against the
+    /// same store and IDs returned by this search.
+    pub fn search_prepare_access(
+        &self,
+        query: &str,
+        opts: Option<SearchOptions>,
+    ) -> Result<(Vec<SearchResult>, SearchAccessPlan), MemoryError> {
+        let mut options = opts.unwrap_or_default();
+        options.vec_available = self.vec_available;
+        options.wiki_corpus_store = self.is_wiki_corpus_store();
+        self.apply_kernel_policy_defaults(&mut options);
+        self.withhold_access_recording_on_read_only(&mut options);
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let (results, mut plan) = retry_search_locked(&self.db_label, || {
+            hybrid_search_prepare_access(&self.conn, query, &options)
+        })?;
+        plan.store_instance_id = self.instance_id;
+        Ok((results, plan))
+    }
+
+    /// Commit one prepared plan after the caller has chosen final winners.
+    /// Each store commits once; this deliberately provides no cross-store
+    /// transaction or proof that the caller subsequently delivered a response.
+    pub fn finalize_search_access<'a>(
+        &self,
+        mut plan: SearchAccessPlan,
+        results: impl IntoIterator<Item = &'a mut SearchResult>,
+    ) -> Result<(), MemoryError> {
+        if plan.store_instance_id != self.instance_id {
+            return Err(MemoryError::InvalidArg(format!(
+                "search access plan belongs to store instance {}, not {}",
+                plan.store_instance_id, self.instance_id
+            )));
+        }
+        let mut results = results.into_iter().collect::<Vec<_>>();
+        let eligible = plan
+            .local_display_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        if results
+            .iter()
+            .any(|result| !eligible.contains(result.entry.id.as_str()))
+        {
+            return Err(MemoryError::InvalidArg(
+                "merged display contains an ID absent from this store's prepared results".into(),
+            ));
+        }
+        if !plan.writable {
+            return Ok(());
+        }
+        let displayed_ids = results
+            .iter()
+            .map(|result| result.entry.id.clone())
+            .collect::<Vec<_>>();
+        if let Some(impression) = plan.impression.as_mut() {
+            impression.finalize_displayed(&displayed_ids);
+        }
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        retry_search_locked(&self.db_label, || {
+            let updates = db::record_access_with_updates(
+                &self.conn,
+                &displayed_ids,
+                &plan.scored_ids,
+                &plan.fts_hit_ids,
+                Some(&plan.query),
+                &plan.recall_config,
+                plan.impression.as_ref(),
+            )?;
+            for result in &mut results {
+                if let Some(update) = updates.get(&result.entry.id) {
+                    result.entry.access_count = update.access_count;
+                    result.entry.scored_count = update.scored_count;
+                    result.entry.last_access = update.last_access.clone();
+                }
+            }
+            Ok(())
         })
     }
 
@@ -467,6 +550,17 @@ impl MemoryStore {
         db::stats(&self.conn, include_archived)
     }
 
+    /// Count only the rows needed by lightweight status surfaces.
+    pub fn memory_count(&self, include_archived: bool) -> Result<u64, MemoryError> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE (?1 = 1 OR archived = 0)",
+            [include_archived as i64],
+            |row| row.get::<_, i64>(0),
+        )?;
+        u64::try_from(count)
+            .map_err(|_| MemoryError::Internal("memory count was negative".to_string()))
+    }
+
     /// Verify that the admitted memory table can be read, touching at most one
     /// row. This is a readiness probe; use `quick_check` for integrity checks
     /// and `stats` for whole-store aggregates.
@@ -576,6 +670,30 @@ fn retry_search_locked<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_plan_cannot_finalize_against_another_store_with_the_same_label() {
+        let mut a = MemoryStore::open_in_memory().expect("store A");
+        let mut b = MemoryStore::open_in_memory().expect("store B");
+        assert_eq!(a.db_label, b.db_label);
+        assert_ne!(a.instance_id, b.instance_id);
+        for store in [&mut a, &mut b] {
+            store
+                .upsert(&store_identity_entry("shared-id", "/probe", "shared query"))
+                .unwrap();
+        }
+        let (mut results, plan) = a
+            .search_prepare_access("shared query", None)
+            .expect("prepare A");
+        assert!(!results.is_empty());
+        let error = b
+            .finalize_search_access(plan, results.iter_mut())
+            .expect_err("cross-store finalize must fail");
+        assert!(error.to_string().contains("store instance"), "{error}");
+        let b_entry = b.get("shared-id").unwrap().unwrap();
+        assert_eq!(b_entry.access_count, 0);
+        assert_eq!(b_entry.scored_count, 0);
+    }
 
     #[test]
     fn readiness_probe_is_bounded_but_still_reads_the_memory_table() {

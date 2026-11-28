@@ -149,12 +149,14 @@ pub(crate) struct CheckRunOutcome {
 /// Seam over a spawned child so the timeout/kill/bound discipline
 /// ([`wait_with_kill_cap`]) is testable with a fake child that ignores
 /// kills (F7 unit test).
+#[cfg(any(not(unix), test))]
 #[async_trait::async_trait]
 pub(crate) trait CheckChild: Send {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
     async fn start_kill(&mut self) -> std::io::Result<()>;
 }
 
+#[cfg(any(not(unix), test))]
 #[async_trait::async_trait]
 impl CheckChild for tokio::process::Child {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
@@ -174,6 +176,7 @@ impl CheckChild for tokio::process::Child {
 ///    abandon it: return with `kill_abandoned = true` instead of waiting
 ///    forever. The caller (run_with_runner) keeps the in-flight guard on an
 ///    RAII drop, so an abandoned child never wedges the per-flow slot.
+#[cfg(any(not(unix), test))]
 pub(crate) async fn wait_with_kill_cap<C: CheckChild>(
     child: &mut C,
     timeout: Duration,
@@ -284,6 +287,43 @@ pub(crate) trait CheckRunner: Send + Sync {
 /// copy lifecycle).
 pub(crate) struct ProcessCheckRunner;
 
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+struct CheckProcessGroupGuard {
+    pid: Option<u32>,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl CheckProcessGroupGuard {
+    fn arm(pid: Option<u32>) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm_after_reap_attempt(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CheckProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // The child has not completed a reap attempt on this path. The
+            // group signal is therefore still owned; reaping is left to the
+            // tokio child's kill-on-drop machinery rather than a blocking Drop.
+            crate::dispatch_ops::subprocess::terminate_process_group(self.pid, libc::SIGKILL);
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl CheckRunner for ProcessCheckRunner {
     async fn observe_head(&self, worktree: &Path) -> Result<String, String> {
@@ -374,13 +414,20 @@ impl CheckRunner for ProcessCheckRunner {
                 .map_err(|e| format!("write run log header: {e}"))?;
         }
 
-        let mut child = tokio::process::Command::new(argv[0])
+        let mut command = tokio::process::Command::new(argv[0]);
+        command
             .args(&argv[1..])
             .current_dir(cwd)
             .envs(env.iter().copied())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        command.kill_on_drop(false);
+        #[cfg(not(unix))]
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        crate::dispatch_ops::subprocess::configure_process_group(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| format!("spawn {} in {}: {e}", argv[0], cwd.display()))?;
         let stdout = child
@@ -410,16 +457,70 @@ impl CheckRunner for ProcessCheckRunner {
                 Ok::<(), String>(())
             })
         };
-        let stdout_pump = pump(Box::new(stdout) as Box<dyn AsyncRead + Unpin + Send>);
-        let stderr_pump = pump(Box::new(stderr) as Box<dyn AsyncRead + Unpin + Send>);
+        let stdout_pump = AbortOnDrop(pump(Box::new(stdout) as Box<dyn AsyncRead + Unpin + Send>));
+        let stderr_pump = AbortOnDrop(pump(Box::new(stderr) as Box<dyn AsyncRead + Unpin + Send>));
+        let mut pumps = [stdout_pump, stderr_pump];
 
+        let started = Instant::now();
+        #[cfg(unix)]
+        let mut outcome = {
+            let child_pid = child.id();
+            let mut process_group = CheckProcessGroupGuard::arm(child_pid);
+            let observed =
+                crate::dispatch_ops::subprocess::wait_for_owned_root_exit(child_pid, timeout).await;
+            let timed_out = matches!(observed, Ok(false));
+            let observation_failed = observed.is_err();
+            let root_ownership_lost = observed
+                .as_ref()
+                .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD));
+            if root_ownership_lost {
+                process_group.disarm_after_reap_attempt();
+            } else {
+                // WNOWAIT leaves the root unreaped, so this is the final owned
+                // group termination before any call to Child::wait.
+                crate::dispatch_ops::subprocess::terminate_process_group(child_pid, libc::SIGKILL);
+            }
+            let post_kill = crate::dispatch_ops::subprocess::wait_for_owned_root_exit(
+                child_pid,
+                POST_KILL_WAIT_CAP,
+            )
+            .await;
+            if post_kill
+                .as_ref()
+                .is_err_and(|error| error.raw_os_error() == Some(libc::ECHILD))
+            {
+                process_group.disarm_after_reap_attempt();
+            }
+            let status = if matches!(post_kill, Ok(true)) {
+                let status = child.wait().await;
+                process_group.disarm_after_reap_attempt();
+                status.ok()
+            } else {
+                None
+            };
+            // Reaping the root is not proof that the group is empty. This is
+            // observation only: no cached PGID is signalled after a reap.
+            let group_absent =
+                crate::dispatch_ops::subprocess::wait_for_process_group_absence(child_pid).await;
+            let abandoned = observation_failed
+                || !matches!(post_kill, Ok(true))
+                || status.is_none()
+                || !group_absent;
+            CheckRunOutcome {
+                exit_code: status.and_then(|status| status.code()),
+                duration_ms: started.elapsed().as_millis() as u64,
+                timed_out,
+                kill_abandoned: abandoned,
+            }
+        };
+        #[cfg(not(unix))]
         let mut outcome = wait_with_kill_cap(&mut child, timeout, POST_KILL_WAIT_CAP).await?;
-        // Pipes close once the child exits; both pumps then drain and finish.
-        // Bound the join anyway (F7): an abandoned child keeps its pipes open,
-        // so the pumps must not be awaited without bound. On expiry the pump
-        // tasks are detached (the child's kill_on_drop closes the pipes).
-        for pump in [stdout_pump, stderr_pump] {
-            match tokio::time::timeout(PUMP_JOIN_GRACE, pump).await {
+
+        // The group cleanup above closes ordinary descendants' pipes. If an
+        // escaped writer remains, abort the task owner instead of detaching a
+        // pump that could keep appending after the receipt is written.
+        for pump in &mut pumps {
+            match tokio::time::timeout(PUMP_JOIN_GRACE, &mut pump.0).await {
                 Ok(joined) => joined
                     .map_err(|e| format!("run output pump failed: {e}"))?
                     .map_err(|e| {
@@ -431,8 +532,7 @@ impl CheckRunner for ProcessCheckRunner {
                 Err(_) => {
                     tracing::warn!(
                         log = %log_path.display(),
-                        "run output pump did not finish within {PUMP_JOIN_GRACE:?}; \
-                         detaching pump tasks (abandoned child keeps pipes open)"
+                        "run output pump did not finish within {PUMP_JOIN_GRACE:?}; aborting output capture"
                     );
                     outcome.kill_abandoned = true;
                 }
@@ -1124,7 +1224,7 @@ async fn run_with_runner<R: CheckRunner>(
 
     let status = if tree_mutated {
         "failed"
-    } else if outcome.exit_code == Some(0) {
+    } else if !outcome.timed_out && !outcome.kill_abandoned && outcome.exit_code == Some(0) {
         "passed"
     } else {
         "failed"

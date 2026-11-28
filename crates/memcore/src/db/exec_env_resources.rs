@@ -478,11 +478,20 @@ pub fn insert_resource(
     conn: &mut Connection,
     res: &NewExecEnvResource,
 ) -> Result<RegisterOutcome, MemoryError> {
+    let tx = write_tx(conn)?;
+    let outcome = insert_resource_in_tx(&tx, res)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn insert_resource_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    res: &NewExecEnvResource,
+) -> Result<RegisterOutcome, MemoryError> {
     let path = normalize_resource_path(res.kind, &res.path)?;
     let now = normalize_utc_iso_or_now(&res.created_at);
     let measured_at = res.bytes.map(|_| now.clone());
 
-    let tx = write_tx(conn)?;
     let existing: Option<(String, String, Option<i64>)> = tx
         .query_row(
             "SELECT resource_id, state, reclaimed_bytes FROM exec_env_resources \
@@ -545,7 +554,6 @@ pub fn insert_resource(
             }
         }
     };
-    tx.commit()?;
     Ok(outcome)
 }
 
@@ -787,8 +795,17 @@ pub fn quarantine_resource(
     reason: &str,
 ) -> Result<QuarantineOutcome, MemoryError> {
     let tx = write_tx(conn)?;
-    let Some(state) = state_in_tx(&tx, resource_id)? else {
-        tx.commit()?;
+    let outcome = quarantine_resource_in_tx(&tx, resource_id, reason)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn quarantine_resource_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    resource_id: &str,
+    reason: &str,
+) -> Result<QuarantineOutcome, MemoryError> {
+    let Some(state) = state_in_tx(tx, resource_id)? else {
         return Ok(QuarantineOutcome::NotFound);
     };
 
@@ -820,7 +837,6 @@ pub fn quarantine_resource(
             }
         }
     };
-    tx.commit()?;
     Ok(outcome)
 }
 

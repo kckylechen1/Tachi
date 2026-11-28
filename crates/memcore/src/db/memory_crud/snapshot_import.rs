@@ -27,7 +27,7 @@ use serde::Serialize;
 use crate::error::MemoryError;
 use crate::store::snapshot_import::PortableImportEntry;
 
-use super::{canonical_entities_json, refuse_reserved_write_identity, sync_memories_fts};
+use super::{canonical_entities_json, refuse_reserved_write_identity};
 use crate::db::sqlite_vec::serialize_f32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,8 @@ pub(crate) fn snapshot_import_fts_mode(
     let occupied: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.memories)
              OR EXISTS(SELECT 1 FROM main.memories_fts)
-             OR EXISTS(SELECT 1 FROM main.memories_symbolic_fts)",
+             OR EXISTS(SELECT 1 FROM main.memories_symbolic_fts)
+             OR EXISTS(SELECT 1 FROM main.memories_fts_projection_map)",
         [],
         |row| row.get(0),
     )?;
@@ -196,7 +197,19 @@ pub(crate) fn import_snapshot_rows_within_tx(
             crate::db::snapshot_import_measurement::Phase::Fts,
         );
         let project = match fts_mode {
-            SnapshotFtsMode::Synchronize => sync_memories_fts,
+            SnapshotFtsMode::Synchronize => {
+                // Snapshot synchronization explicitly replaces stale rows.
+                // Keep this compatibility scan off the ordinary upsert path;
+                // fresh IDs and ordinary writes use mapped rowid point lookups.
+                tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![entry.id])?;
+                if crate::db::table_exists(tx, "memories_symbolic_fts")? {
+                    tx.execute(
+                        "DELETE FROM memories_symbolic_fts WHERE id = ?1",
+                        params![entry.id],
+                    )?;
+                }
+                super::insert_memories_fts
+            }
             SnapshotFtsMode::InsertOnly => crate::db::fts_projection::insert_snapshot_fts,
         };
         project(

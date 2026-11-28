@@ -670,31 +670,17 @@ impl MemoryStore {
     ///   back to an FTS hit, and projecting it would create exactly such a
     ///   poisoning row (`NULL NOT IN (<empty>)` is TRUE).
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
-        let tx = self.conn.transaction()?;
-        let inserted = tx.execute(
-            r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
-               SELECT
-                 id, path, summary, text,
-                 memcore_fts_terms(keywords),
-                 memcore_fts_terms(entities)
-               FROM memories
-               WHERE id IS NOT NULL
-                 AND id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#,
-            [],
-        )?;
-        let symbolic_inserted = tx.execute(
-            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
-               SELECT id, path, summary, text, keywords, entities, topic
-               FROM memories
-               WHERE id IS NOT NULL
-                 AND id NOT IN (SELECT id FROM memories_symbolic_fts WHERE id IS NOT NULL)"#,
-            [],
-        )?;
-        if inserted + symbolic_inserted > 0 {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // This maintenance surface remains insert-missing only: unlike writable
+        // open, it does not prune pre-existing orphan/NULL-id projection rows.
+        let outcome = db::repair_memories_fts(&tx, false)?;
+        if outcome.changed {
             crate::db::bump_search_generation(&tx)?;
         }
         tx.commit()?;
-        Ok(inserted)
+        Ok(outcome.lexical_inserted)
     }
 
     /// Full FTS rebuild. Use this when the FTS table is stale or corrupted.
@@ -705,7 +691,12 @@ impl MemoryStore {
         // The fixed rebuild SQL owns its DDL authorization. Declare the
         // guard before the transaction so rollback precedes token release.
         let _authorization = db::authorize_schema_migration(&self.reserved_reference_write)?;
-        let tx = self.conn.transaction()?;
+        // Match ordinary upsert: acquire the SQLite write lock before the
+        // process-global FTS tokenizer mutex.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let _fts_guard = db::acquire_fts_sync_lock();
         tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
         tx.execute_batch(
             r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -717,16 +708,6 @@ impl MemoryStore {
                    entities,
                    tokenize = 'simple'
                );"#,
-        )?;
-        let inserted = tx.execute(
-            r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
-               SELECT
-                 id, path, summary, text,
-                 memcore_fts_terms(keywords),
-                 memcore_fts_terms(entities)
-               FROM memories
-               WHERE id IS NOT NULL"#,
-            [],
         )?;
         tx.execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
         tx.execute_batch(
@@ -741,13 +722,7 @@ impl MemoryStore {
                    tokenize = 'trigram case_sensitive 0'
                );"#,
         )?;
-        let _ = tx.execute(
-            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
-               SELECT id, path, summary, text, keywords, entities, topic
-               FROM memories
-               WHERE id IS NOT NULL"#,
-            [],
-        )?;
+        let inserted = db::rebuild_memories_fts_from_authority_locked(&tx)?;
         crate::db::bump_search_generation(&tx)?;
         tx.commit()?;
         Ok(inserted)

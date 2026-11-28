@@ -334,6 +334,11 @@ pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, Stri
                 .map_err(|e| format!("decode ticket {}: {e}", row.key))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    sort_tickets(&mut tickets);
+    Ok(tickets)
+}
+
+pub(crate) fn sort_tickets(tickets: &mut [BuildTicket]) {
     // FIFO by submission time. `created_at` is an RFC3339 stamp, so this is a
     // parsed-instant comparison, not a string sort — a lexicographic compare of
     // mixed-offset timestamps ("+08:00" vs "Z") orders them wrong.
@@ -344,7 +349,6 @@ pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, Stri
             .map(|ts| ts.as_microsecond())
             .unwrap_or(i64::MAX)
     });
-    Ok(tickets)
 }
 
 /// Read a ticket's lifecycle record. `None` = never attempted, never cancelled.
@@ -364,6 +368,7 @@ pub(crate) fn load_status(
 }
 
 /// The effective state of a ticket (a missing status row = `Queued`).
+#[cfg(test)]
 pub(crate) fn ticket_state(
     source: &impl StateReader,
     ticket_id: &str,

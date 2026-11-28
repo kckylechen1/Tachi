@@ -165,16 +165,66 @@ pub fn pending_tickets(
     store: &MemoryStore,
     repo: Option<&str>,
 ) -> Result<Vec<BuildTicket>, String> {
+    // One SQL statement gives a consistent ticket/receipt/status snapshot and
+    // avoids two per-ticket lookups. Claiming still re-checks every condition
+    // under BEGIN IMMEDIATE; this snapshot only selects a candidate.
+    let mut statement = store
+        .connection()
+        .prepare(
+            "SELECT namespace, key, value_json FROM hard_state \
+             WHERE namespace IN (?1, ?2, ?3) \
+             ORDER BY updated_at DESC, key ASC",
+        )
+        .map_err(|e| format!("prepare pending-ticket snapshot: {e}"))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![ticket::TICKET_NS, RECEIPT_NS, ticket::STATUS_NS],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("query pending-ticket snapshot: {e}"))?;
+    let mut tickets = Vec::new();
+    let mut receipts = std::collections::HashMap::new();
+    let mut statuses = std::collections::HashMap::new();
+    for row in rows {
+        let (namespace, key, json) = row.map_err(|e| format!("read pending ticket: {e}"))?;
+        match namespace.as_str() {
+            ticket::TICKET_NS => tickets.push(
+                serde_json::from_str::<BuildTicket>(&json)
+                    .map_err(|e| format!("decode ticket {key}: {e}"))?,
+            ),
+            RECEIPT_NS => {
+                receipts.insert(key, json);
+            }
+            ticket::STATUS_NS => {
+                statuses.insert(key, json);
+            }
+            _ => unreachable!("query restricted hard-state namespaces"),
+        }
+    }
+    ticket::sort_tickets(&mut tickets);
+
     let mut pending = Vec::new();
-    for t in ticket::list_tickets(store)? {
+    for t in tickets {
         if !repo::same_repo(&t.source.repo_root, repo) {
             continue;
         }
-        if load_receipt(store, &t.ticket_id)?.is_some() {
+        if let Some(json) = receipts.get(&t.ticket_id) {
+            serde_json::from_str::<BuildReceipt>(json)
+                .map_err(|e| format!("decode receipt {}: {e}", t.ticket_id))?;
             continue;
         }
-        if ticket::ticket_state(store, &t.ticket_id)?.is_terminal() {
-            continue;
+        if let Some(json) = statuses.get(&t.ticket_id) {
+            let status = serde_json::from_str::<TicketStatus>(json)
+                .map_err(|e| format!("decode ticket status {}: {e}", t.ticket_id))?;
+            if status.state.is_terminal() {
+                continue;
+            }
         }
         pending.push(t);
     }
@@ -350,7 +400,7 @@ pub(crate) fn execute_ticket(
     runner: &dyn BuildRunner,
     lineage: &dyn LineageOracle,
 ) -> Result<BuildReceipt, String> {
-    match slot::claim_for_execution(store, &ticket.ticket_id)? {
+    let holder = match slot::claim_for_execution(store, &ticket.ticket_id)? {
         Claim::AlreadyBuilt(existing) => return Ok(existing),
         Claim::LeftQueue(state) => {
             return Err(format!(
@@ -365,14 +415,14 @@ pub(crate) fn execute_ticket(
                 holder.ticket_id, holder.pid, holder.acquired_at
             ));
         }
-        Claim::Held => {}
-    }
+        Claim::Held(holder) => holder,
+    };
 
-    let result = execute_holding_slot(store, seat, ticket, runner, lineage);
+    let result = execute_holding_slot(store, seat, ticket, &holder, runner, lineage);
 
     // Always give the slot back — an error path that keeps the slot would wedge
     // every future build on this machine behind a build that is not running.
-    if let Err(err) = slot::release_slot(store, &ticket.ticket_id) {
+    if let Err(err) = slot::release_slot(store, &holder) {
         tracing::error!(error = %err, ticket = %ticket.ticket_id, "failed to release executor slot");
     }
     result
@@ -382,6 +432,7 @@ fn execute_holding_slot(
     store: &mut MemoryStore,
     seat: &ExecutorSeat,
     ticket: &BuildTicket,
+    holder: &slot::SlotHolder,
     runner: &dyn BuildRunner,
     lineage: &dyn LineageOracle,
 ) -> Result<BuildReceipt, String> {
@@ -401,7 +452,7 @@ fn execute_holding_slot(
 
     // Record the target on the slot BEFORE touching it, so that if this process
     // dies mid-build the recovery path knows which dir to quarantine.
-    slot::record_slot_target(store, &ticket.ticket_id, &plan.path)?;
+    slot::record_slot_target(store, holder, &plan.path)?;
 
     // The target dir is a tracked resource: register it if this is the first
     // time the seat used it.
@@ -559,30 +610,92 @@ fn read_slot_state(store: &MemoryStore, path: &std::path::Path) -> Result<Target
 /// This is deliberately an explicit operation, not a TTL sweep. We cannot tell
 /// "the holder is dead" from "the holder is 40 minutes into a cold build", and
 /// guessing wrong means two cargos in one target dir.
-pub fn abandon_stale_slot(store: &mut MemoryStore, reason: &str) -> Result<bool, String> {
+pub fn abandon_stale_slot(
+    store: &mut MemoryStore,
+    expected_ticket_id: &str,
+    expected_acquisition_id: Option<&str>,
+    reason: &str,
+) -> Result<bool, String> {
     let Some(holder) = slot::current_holder(store)? else {
         return Ok(false);
     };
+    if holder.ticket_id != expected_ticket_id {
+        return Err(format!(
+            "executor slot is held by ticket '{}', not the expected '{}'; refusing recovery",
+            holder.ticket_id, expected_ticket_id
+        ));
+    }
+    if holder.acquisition_id.is_empty() {
+        if expected_acquisition_id.is_some_and(|value| !value.is_empty()) {
+            return Err(
+                "current holder predates acquisition IDs; retry without --acquisition-id"
+                    .to_string(),
+            );
+        }
+    } else if expected_acquisition_id != Some(holder.acquisition_id.as_str()) {
+        return Err(format!(
+            "executor slot acquisition '{}' does not match the operator-supplied value; refusing recovery",
+            holder.acquisition_id
+        ));
+    }
+    abandon_observed_stale_slot(store, holder, reason)
+}
+
+fn abandon_observed_stale_slot(
+    store: &mut MemoryStore,
+    holder: slot::SlotHolder,
+    reason: &str,
+) -> Result<bool, String> {
+    // The recovery operation keeps targeting the originally observed holder.
+    // If another recovery has already released it, do nothing at all: a new
+    // claim may already own the same target path.
+    let tx = store
+        .begin_state_transaction(TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin stale-slot abandonment: {e}"))?;
+    if slot::holder_in(&tx)?.as_ref() != Some(&holder) {
+        return Ok(false);
+    }
 
     if let Some(target_path) = &holder.target_path {
         let resource_id =
-            crate::ensure_resource_allow_quarantined(store.connection_mut(), target_path)?;
-        memcore::quarantine_resource(
-            store.connection_mut(),
-            &resource_id,
-            &format!(
-                "executor slot abandoned ({reason}); ticket {} (pid {}) was building into this \
-                 target and its contents are not trustworthy",
-                holder.ticket_id, holder.pid
-            ),
-        )
-        .map_err(|e| format!("quarantine abandoned target {target_path}: {e}"))?;
+            crate::resource::ensure_resource_allow_quarantined_in_tx(&tx, target_path)?;
+        let outcome = tx
+            .quarantine_resource(
+                &resource_id,
+                &format!(
+                    "executor slot abandoned ({reason}); ticket {} (pid {}) was building into this \
+                     target and its contents are not trustworthy",
+                    holder.ticket_id, holder.pid
+                ),
+            )
+            .map_err(|e| format!("quarantine abandoned target {target_path}: {e}"))?;
+        if matches!(
+            outcome,
+            memcore::QuarantineOutcome::NotFound
+                | memcore::QuarantineOutcome::AlreadyReclaimed { .. }
+        ) {
+            return Err(format!(
+                "cannot abandon ticket '{}': target '{target_path}' has no fenceable active resource",
+                holder.ticket_id
+            ));
+        }
+    }
+
+    if !tx
+        .delete_state(slot::BROKER_NS, slot::EXECUTOR_SLOT_KEY)
+        .map_err(|e| format!("release abandoned executor slot: {e}"))?
+    {
+        return Err("abandoned executor slot vanished inside its transaction".to_string());
+    }
+    tx.commit()
+        .map_err(|e| format!("commit stale-slot abandonment: {e}"))?;
+
+    if let Some(target_path) = &holder.target_path {
         tracing::warn!(
             target = %target_path,
             ticket = %holder.ticket_id,
             "build broker: abandoned slot; target quarantined"
         );
     }
-
-    slot::force_release_slot(store)
+    Ok(true)
 }

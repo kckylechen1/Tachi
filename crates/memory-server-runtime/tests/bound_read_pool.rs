@@ -244,3 +244,103 @@ fn replaced_bound_path_is_refused_before_serving_cached_data() {
     assert!(!called, "a stale bound identity reached the callback");
     assert!(result.unwrap_err().contains("physical identity"));
 }
+
+#[cfg(unix)]
+#[test]
+fn replaced_bound_path_is_refused_by_direct_project_scope_doors() {
+    for write in [false, true] {
+        let fixture = Fixture::new(Some("named"));
+        let old_directory = fixture.root.join("retired-project");
+        // Move the complete SQLite file set, then install a different store at
+        // the bound path. Existing handles still address the retired inode.
+        std::fs::rename(fixture.project.parent().unwrap(), &old_directory).unwrap();
+        std::fs::create_dir(fixture.project.parent().unwrap()).unwrap();
+        drop(
+            MemoryStore::open_with_label(fixture.project.to_str().unwrap(), "named")
+                .expect("replacement scratch store"),
+        );
+
+        let mut called = false;
+        let result = if write {
+            fixture.runtime().with_project_store(|_| {
+                called = true;
+                Ok(())
+            })
+        } else {
+            fixture.runtime().with_project_store_read(|_| {
+                called = true;
+                Ok(())
+            })
+        };
+        assert!(!called, "a stale bound identity reached the scope callback");
+        let error = result.unwrap_err();
+        assert!(error.contains("physical identity"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn scope_doors_recheck_identity_after_the_callback() {
+    for write in [false, true] {
+        let fixture = Fixture::new(Some("named"));
+        let result = if write {
+            fixture.runtime().with_project_store(|_| {
+                let old_directory = fixture.root.join("retired-project");
+                std::fs::rename(fixture.project.parent().unwrap(), &old_directory).unwrap();
+                std::fs::create_dir(fixture.project.parent().unwrap()).unwrap();
+                drop(
+                    MemoryStore::open_with_label(fixture.project.to_str().unwrap(), "named")
+                        .expect("replacement scratch store"),
+                );
+                Ok(())
+            })
+        } else {
+            fixture.runtime().with_project_store_read(|_| {
+                let old_directory = fixture.root.join("retired-project");
+                std::fs::rename(fixture.project.parent().unwrap(), &old_directory).unwrap();
+                std::fs::create_dir(fixture.project.parent().unwrap()).unwrap();
+                drop(
+                    MemoryStore::open_with_label(fixture.project.to_str().unwrap(), "named")
+                        .expect("replacement scratch store"),
+                );
+                Ok(())
+            })
+        };
+        assert!(result.unwrap_err().contains("stale store identity"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn named_path_doors_recheck_identity_after_the_callback() {
+    for write in [false, true] {
+        let fixture = Fixture::new(Some("named"));
+        let result = if write {
+            fixture.runtime().with_path_store(&fixture.project, |_| {
+                let old_directory = fixture.root.join("retired-project");
+                std::fs::rename(fixture.project.parent().unwrap(), &old_directory).unwrap();
+                std::fs::create_dir(fixture.project.parent().unwrap()).unwrap();
+                drop(
+                    MemoryStore::open_with_label(fixture.project.to_str().unwrap(), "named")
+                        .expect("replacement scratch store"),
+                );
+                Ok(())
+            })
+        } else {
+            fixture
+                .runtime()
+                .with_path_store_read(&fixture.project, |_| {
+                    let old_directory = fixture.root.join("retired-project");
+                    std::fs::rename(fixture.project.parent().unwrap(), &old_directory).unwrap();
+                    std::fs::create_dir(fixture.project.parent().unwrap()).unwrap();
+                    drop(
+                        MemoryStore::open_with_label(fixture.project.to_str().unwrap(), "named")
+                            .expect("replacement scratch store"),
+                    );
+                    Ok(())
+                })
+        };
+        let error = result.unwrap_err();
+        assert!(error.contains("identity changed after open"), "{error}");
+    }
+}

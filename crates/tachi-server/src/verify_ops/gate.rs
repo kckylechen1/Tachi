@@ -99,6 +99,16 @@ fn classify_receipt(receipt: &Value, head_sha: &str) -> (&'static str, Option<St
             .to_string();
         return ("failed", Some(reason));
     }
+    for (field, reason) in [
+        ("timed_out", "timed_out"),
+        ("kill_abandoned", "output_incomplete"),
+    ] {
+        match receipt.get(field) {
+            None | Some(Value::Bool(false)) => {}
+            Some(Value::Bool(true)) => return ("failed", Some(reason.to_string())),
+            Some(_) => return ("failed", Some("invalid_receipt".to_string())),
+        }
+    }
     if !receipt_is_tree_bound(receipt) {
         return ("failed", Some("tree_mutation_during_run".to_string()));
     }

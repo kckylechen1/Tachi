@@ -503,6 +503,30 @@ impl ReductionV1 {
         self.get(issue, PredicateV1::OwnerAcceptancePresent).status == ReductionStatusV1::Current
     }
 
+    /// Borrow one subject's predicates without cloning the repository-wide
+    /// reduction. The BTreeMap is already ordered by (subject, predicate).
+    pub fn for_subject(&self, subject: &SubjectRefV1) -> impl Iterator<Item = &ReducedPredicateV1> {
+        let token = subject.as_token();
+        self.predicates
+            .range((token.clone(), PredicateV1::IssueOpen)..)
+            .take_while(move |((subject, _), _)| subject == &token)
+            .map(|(_, reduced)| reduced)
+    }
+
+    /// The issue and its currently linked PRs in the same canonical token
+    /// order as `all()`.
+    pub fn chain_subjects(&self, issue: &SubjectRefV1) -> Vec<SubjectRefV1> {
+        let mut subjects = vec![issue.clone()];
+        subjects.extend(
+            self.linked_prs(issue)
+                .iter()
+                .map(|object| pr_subject(issue, object)),
+        );
+        subjects.sort_by_key(SubjectRefV1::as_token);
+        subjects.dedup_by(|left, right| left.as_token() == right.as_token());
+        subjects
+    }
+
     /// Whether any NON-family predicate in the subject's reconciliation
     /// chain (the issue plus its currently linked PRs) is conflicted.
     ///
@@ -514,16 +538,11 @@ impl ReductionV1 {
     /// (parity with `resolve_family`); a CURRENT family conflict is caught
     /// by the family gates, not by this predicate scan.
     pub fn chain_conflicted(&self, issue: &SubjectRefV1) -> bool {
-        let mut chain = vec![issue.as_token()];
-        chain.extend(
-            self.linked_prs(issue)
-                .iter()
-                .map(|object| pr_subject(issue, object).as_token()),
-        );
-        self.predicates.values().any(|r| {
-            chain.contains(&r.subject.as_token())
-                && r.status == ReductionStatusV1::Conflicted
-                && !is_lifecycle_family_predicate(r.predicate)
+        self.chain_subjects(issue).into_iter().any(|subject| {
+            self.for_subject(&subject).any(|r| {
+                r.status == ReductionStatusV1::Conflicted
+                    && !is_lifecycle_family_predicate(r.predicate)
+            })
         })
     }
 }

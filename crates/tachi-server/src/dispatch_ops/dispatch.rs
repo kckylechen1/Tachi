@@ -695,18 +695,22 @@ async fn launch_canonical_dispatch(
     let (requested_skills, stage_instruction) =
         resolve_assignment_skills(&request, &requested_skills);
     mechanics.skills = requested_skills;
-    let backend_version = tachi_dispatch::probe_provider_version(
-        &agent_norm,
-        tachi_dispatch::transport_kind(&harness_transport),
-    );
-    let effective_contract = compile_dispatch_contract_from_mechanics(
-        &mut mechanics,
-        &agent_norm,
-        &harness_transport,
-        &resolved_profile,
-        tachi_dispatch::PROVIDER_QUALIFICATIONS,
-        backend_version.as_deref(),
-    )?;
+    let backend_version = crate::executor_offload::block_off_core(|| {
+        tachi_dispatch::probe_provider_version(
+            &agent_norm,
+            tachi_dispatch::transport_kind(&harness_transport),
+        )
+    });
+    let effective_contract = crate::executor_offload::block_off_core(|| {
+        compile_dispatch_contract_from_mechanics(
+            &mut mechanics,
+            &agent_norm,
+            &harness_transport,
+            &resolved_profile,
+            tachi_dispatch::PROVIDER_QUALIFICATIONS,
+            backend_version.as_deref(),
+        )
+    })?;
     let authority_receipt = contract_receipt(&effective_contract);
     assert_nested_mcp_profile_mechanics(&mechanics, &resolved_profile)?;
     let execution_grant = mint_execution_grant_from_mechanics(

@@ -282,6 +282,12 @@ impl MemoryServer {
             global_store.db_label(),
             &kernel_policy,
         )?;
+        if !global_read_pool.shares_physical_database(&global_store) {
+            return Err(std::io::Error::other(format!(
+                "global writer/read pool identity mismatch: {global_db_str}"
+            ))
+            .into());
+        }
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {

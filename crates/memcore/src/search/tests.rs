@@ -12,6 +12,7 @@ mod baseline;
 mod config;
 mod decay_policy;
 mod deferred_vectors;
+mod domain;
 mod engineering_query_corpus;
 mod expansion;
 mod exposure_loop;

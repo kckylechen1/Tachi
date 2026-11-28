@@ -3,7 +3,7 @@
 //! Only `input_type == "query"` is eligible. Document embeds bypass this
 //! module entirely. Errors are never stored in the LRU. No TTL in v1.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use tokio::sync::watch;
@@ -29,9 +29,14 @@ impl CacheKey {
     }
 }
 
+struct CacheEntry {
+    embedding: Vec<f32>,
+    tick: u64,
+}
+
 struct LruState {
-    map: HashMap<CacheKey, Vec<f32>>,
-    order: VecDeque<CacheKey>,
+    map: HashMap<CacheKey, CacheEntry>,
+    tick: u64,
     capacity: usize,
 }
 
@@ -39,39 +44,55 @@ impl LruState {
     fn new(capacity: usize) -> Self {
         Self {
             map: HashMap::new(),
-            order: VecDeque::new(),
+            tick: 0,
             capacity: capacity.max(1),
         }
     }
 
-    fn get(&mut self, key: &CacheKey) -> Option<Vec<f32>> {
-        let value = self.map.get(key)?.clone();
-        // Move to most-recently-used.
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
-            self.order.push_back(key.clone());
+    fn next_tick(&mut self) -> u64 {
+        if self.tick == u64::MAX {
+            let mut entries = self
+                .map
+                .iter()
+                .map(|(key, entry)| (key.clone(), entry.tick))
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|(_, tick)| *tick);
+            for (index, (key, _)) in entries.into_iter().enumerate() {
+                if let Some(entry) = self.map.get_mut(&key) {
+                    entry.tick = index as u64 + 1;
+                }
+            }
+            self.tick = self.map.len() as u64;
         }
-        Some(value)
+        self.tick += 1;
+        self.tick
     }
 
-    fn insert(&mut self, key: CacheKey, value: Vec<f32>) {
-        if self.map.contains_key(&key) {
-            self.map.insert(key.clone(), value);
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                self.order.remove(pos);
-            }
-            self.order.push_back(key);
+    fn get(&mut self, key: &CacheKey) -> Option<Vec<f32>> {
+        let tick = self.next_tick();
+        let entry = self.map.get_mut(key)?;
+        entry.tick = tick;
+        Some(entry.embedding.clone())
+    }
+
+    fn insert(&mut self, key: CacheKey, embedding: Vec<f32>) {
+        let tick = self.next_tick();
+        if let Some(entry) = self.map.get_mut(&key) {
+            entry.embedding = embedding;
+            entry.tick = tick;
             return;
         }
-        while self.map.len() >= self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            } else {
-                break;
+        if self.map.len() >= self.capacity {
+            let oldest = self
+                .map
+                .iter()
+                .min_by_key(|(_, entry)| entry.tick)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.map.remove(&oldest);
             }
         }
-        self.order.push_back(key.clone());
-        self.map.insert(key, value);
+        self.map.insert(key, CacheEntry { embedding, tick });
     }
 }
 
@@ -224,7 +245,7 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn lru_evicts_oldest_at_capacity() {
+    fn lru_get_refreshes_recency_before_capacity_eviction() {
         let cache = QueryEmbeddingCache {
             enabled: true,
             entries: Mutex::new(LruState::new(2)),
@@ -232,10 +253,49 @@ mod unit_tests {
         };
         cache.insert("m", "query", "a", vec![1.0]);
         cache.insert("m", "query", "b", vec![2.0]);
+        assert_eq!(cache.get("m", "query", "a"), Some(vec![1.0]));
         cache.insert("m", "query", "c", vec![3.0]);
-        assert!(cache.get("m", "query", "a").is_none());
-        assert_eq!(cache.get("m", "query", "b"), Some(vec![2.0]));
+        assert!(cache.get("m", "query", "b").is_none());
+        assert_eq!(cache.get("m", "query", "a"), Some(vec![1.0]));
         assert_eq!(cache.get("m", "query", "c"), Some(vec![3.0]));
+    }
+
+    #[test]
+    fn lru_overwrite_refreshes_value_and_recency() {
+        let cache = QueryEmbeddingCache {
+            enabled: true,
+            entries: Mutex::new(LruState::new(2)),
+            inflight: Mutex::new(HashMap::new()),
+        };
+        cache.insert("m", "query", "a", vec![1.0]);
+        cache.insert("m", "query", "b", vec![2.0]);
+        cache.insert("m", "query", "a", vec![9.0]);
+        cache.insert("m", "query", "c", vec![3.0]);
+        assert!(cache.get("m", "query", "b").is_none());
+        assert_eq!(cache.get("m", "query", "a"), Some(vec![9.0]));
+        assert_eq!(cache.get("m", "query", "c"), Some(vec![3.0]));
+    }
+
+    #[test]
+    fn tick_overflow_renumbering_preserves_recency() {
+        let mut state = LruState::new(2);
+        let a = CacheKey::new("m", "query", "a");
+        let b = CacheKey::new("m", "query", "b");
+        state.insert(a.clone(), vec![1.0]);
+        state.insert(b.clone(), vec![2.0]);
+        state.map.get_mut(&a).expect("a entry").tick = u64::MAX - 1;
+        state.map.get_mut(&b).expect("b entry").tick = u64::MAX;
+        state.tick = u64::MAX;
+
+        assert_eq!(state.get(&a), Some(vec![1.0]));
+        state.insert(CacheKey::new("m", "query", "c"), vec![3.0]);
+
+        assert!(!state.map.contains_key(&b));
+        assert_eq!(state.get(&a), Some(vec![1.0]));
+        assert_eq!(
+            state.get(&CacheKey::new("m", "query", "c")),
+            Some(vec![3.0])
+        );
     }
 
     #[test]

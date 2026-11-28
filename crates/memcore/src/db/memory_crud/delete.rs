@@ -8,10 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use crate::{db::StoreProfile, error::MemoryError, types::ProjectionKind};
 
 use super::super::{common::now_utc_iso, state::CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE};
-use super::{
-    delete_memories_symbolic_fts, refuse_reserved_rem_operation_mutation,
-    refuse_retired_sticky_row_within_tx,
-};
+use super::{refuse_reserved_rem_operation_mutation, refuse_retired_sticky_row_within_tx};
 
 /// Presence is authoritative, even if a damaged marker payload cannot be read.
 /// Generic state writers and TTL maintenance cannot create or clear this state.
@@ -122,9 +119,8 @@ pub(crate) fn delete_memory_within_tx(
     let deleted = tx.changes() > 0;
 
     if deleted {
-        // Clean up FTS index
-        tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
-        delete_memories_symbolic_fts(tx, trimmed)?;
+        // Clean up both projections through their shared stable rowid.
+        super::super::fts_projection::delete_memories_fts(tx, trimmed)?;
 
         if vec_available {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;

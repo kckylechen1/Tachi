@@ -16,6 +16,8 @@ use memcore::ClaimState;
 struct FakeRunner {
     exit_code: Option<i32>,
     head_sha: &'static str,
+    timed_out: bool,
+    kill_abandoned: bool,
 }
 
 #[async_trait::async_trait]
@@ -43,8 +45,8 @@ impl CheckRunner for FakeRunner {
         Ok(CheckRunOutcome {
             exit_code: self.exit_code,
             duration_ms: 7,
-            timed_out: false,
-            kill_abandoned: false,
+            timed_out: self.timed_out,
+            kill_abandoned: self.kill_abandoned,
         })
     }
 
@@ -299,6 +301,8 @@ fn fake_runner() -> FakeRunner {
     FakeRunner {
         exit_code: Some(0),
         head_sha: "deadbeef0123456789abcdef0123456789abcdef01",
+        timed_out: false,
+        kill_abandoned: false,
     }
 }
 
@@ -560,6 +564,60 @@ async fn run_exit_nonzero_lands_in_failed_bucket() {
     assert_eq!(ledger["overall"], "failed");
     assert_eq!(ledger["items"][0]["status"], "failed");
     assert_eq!(ledger["items"][0]["source"], "server_run:clippy");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_exit_zero_never_passes_when_timed_out_or_output_was_abandoned() {
+    let (_root, _guard) = with_run_root();
+    for (flow_id, timed_out, kill_abandoned) in [
+        ("flow_run-timeout-zero", true, false),
+        ("flow_run-abandoned-zero", false, true),
+    ] {
+        let server = make_server();
+        let worktree = tempfile::tempdir().expect("worktree tempdir");
+        seed_claim(
+            &server,
+            flow_id,
+            worktree.path().to_str().expect("utf8 worktree"),
+        );
+        let runner = FakeRunner {
+            timed_out,
+            kill_abandoned,
+            ..fake_runner()
+        };
+        let raw = run_with_runner(
+            &server,
+            &runner,
+            flow_id,
+            "fmt",
+            check_kind_argv("fmt").expect("fmt argv"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("run completes");
+
+        assert_eq!(raw["item_status"], "failed");
+        assert_eq!(raw["exit_code"], 0);
+        assert_eq!(raw["timed_out"], timed_out);
+        assert_eq!(raw["kill_abandoned"], kill_abandoned);
+        assert!(raw["gate"]["failed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("fmt")));
+        let receipt: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                server
+                    .tachi_home_dir()
+                    .join("verify-receipts")
+                    .join(flow_id)
+                    .join("fmt.json"),
+            )
+            .expect("read receipt"),
+        )
+        .expect("receipt JSON");
+        assert_eq!(receipt["status"], "failed");
+    }
 }
 
 #[tokio::test]
@@ -910,6 +968,49 @@ async fn timeout_ignored_kill_is_bounded_and_guard_released() {
         leftovers.is_empty(),
         "no detached copy may survive a timed-out run: {leftovers:?}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_runner_terminates_descendants_on_root_exit_and_timeout() {
+    for (tail, timeout, timed_out) in [
+        ("exit 0", Duration::from_secs(2), false),
+        ("wait", Duration::from_millis(50), true),
+    ] {
+        let root = tempfile::tempdir().expect("process fixture");
+        let pid_file = root.path().join("descendant.pid");
+        let log = root.path().join("run.log");
+        let script = format!(
+            "sleep 30 & printf '%s' \"$!\" > '{}'; {tail}",
+            pid_file.display()
+        );
+        let outcome = ProcessCheckRunner
+            .run_check(&["/bin/sh", "-c", &script], root.path(), timeout, &log, &[])
+            .await
+            .expect("managed process run");
+        assert_eq!(outcome.timed_out, timed_out);
+        assert!(!outcome.kill_abandoned, "owned group must be cleaned up");
+        if !timed_out {
+            assert_eq!(outcome.exit_code, Some(0));
+        }
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(Instant::now() < deadline, "descendant {pid} survived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(std::fs::read_to_string(log)
+            .expect("run log")
+            .contains("# tachi_verify run:"));
+    }
 }
 
 #[tokio::test]

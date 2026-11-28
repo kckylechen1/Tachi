@@ -30,6 +30,38 @@ impl StateTransaction<'_> {
         db::list_state(self.transaction(), namespace)
     }
 
+    /// Resource operations needed by writers that must fence a resource and
+    /// change its owning hard-state row in the same transaction.
+    #[cfg(feature = "admin")]
+    pub fn find_resource_by_path(
+        &self,
+        path: &str,
+        kind: crate::ResourceKind,
+    ) -> Result<Option<crate::ExecEnvResource>, MemoryError> {
+        db::exec_env_resources::find_resource_by_path(self.transaction(), path, kind)
+    }
+
+    #[cfg(feature = "admin")]
+    pub fn insert_resource(
+        &self,
+        resource: &crate::NewExecEnvResource,
+    ) -> Result<crate::RegisterOutcome, MemoryError> {
+        db::exec_env_resources::insert_resource_in_tx(self.transaction(), resource)
+    }
+
+    #[cfg(feature = "admin")]
+    pub fn quarantine_resource(
+        &self,
+        resource_id: &str,
+        reason: &str,
+    ) -> Result<crate::QuarantineOutcome, MemoryError> {
+        db::exec_env_resources::quarantine_resource_in_tx(self.transaction(), resource_id, reason)
+    }
+
+    pub fn delete_state(&self, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+        db::delete_state(self.transaction(), namespace, key)
+    }
+
     pub fn set_state(
         &self,
         namespace: &str,

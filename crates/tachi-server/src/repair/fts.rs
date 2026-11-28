@@ -130,6 +130,41 @@ fn projection_drift(ctx: &DbContext, table: &str) -> Result<Option<ProjectionDri
     }))
 }
 
+pub(crate) fn projection_mapping_drift(ctx: &DbContext) -> Result<Option<i64>, RepairError> {
+    if !table_exists(ctx, "memories_fts_projection_map")? {
+        if memcore::db::migrations::read_schema_version(&ctx.conn)? >= 47 {
+            // A current-stamped store without its required map is damaged even
+            // when both FTS ID sets happen to look complete (and even empty).
+            return Ok(Some(live_memory_count(ctx)?.max(1)));
+        }
+        return Ok(None);
+    }
+    if !table_exists(ctx, "memories_fts")? || !table_exists(ctx, "memories_symbolic_fts")? {
+        return Ok(Some(0));
+    }
+    let count = ctx.conn.query_row(
+        "WITH drift(id) AS (
+             SELECT p.memory_id FROM memories_fts_projection_map p
+             JOIN memories m ON m.id = p.memory_id
+             LEFT JOIN memories_fts f ON f.rowid = p.projection_key
+             LEFT JOIN memories_symbolic_fts s ON s.rowid = p.projection_key
+             WHERE f.id IS NOT m.id OR s.id IS NOT m.id
+             UNION ALL
+             SELECT m.id FROM memories m
+             LEFT JOIN memories_fts_projection_map p ON p.memory_id = m.id
+             WHERE m.id IS NOT NULL AND p.memory_id IS NULL
+             UNION ALL
+             SELECT p.memory_id FROM memories_fts_projection_map p
+             LEFT JOIN memories m ON m.id = p.memory_id
+             WHERE m.id IS NULL
+         )
+         SELECT COUNT(*) FROM drift",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(Some(count))
+}
+
 fn drift_finding(kind: &str, rows_key: &str, drift: &ProjectionDrift) -> Finding {
     let mut detail = json!({
         "memories": drift.memories,
@@ -151,7 +186,9 @@ fn orphan_shadow_count(ctx: &DbContext) -> Result<i64, RepairError> {
         .conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master \
-             WHERE type='table' AND name LIKE 'memories_fts\\_%' ESCAPE '\\'",
+             WHERE type='table' AND name IN ( \
+               'memories_fts_data', 'memories_fts_idx', 'memories_fts_docsize', \
+               'memories_fts_config', 'memories_fts_content')",
             [],
             |r| r.get(0),
         )
@@ -204,6 +241,14 @@ impl RepairRule for FtsRebuild {
                     .push(drift_finding("symbolic_fts_drift", "symbolic_fts", &drift));
             }
         }
+        if let Some(count) = projection_mapping_drift(ctx)? {
+            if count > 0 && r.findings.is_empty() {
+                r.findings.push(Finding::new(
+                    "fts_projection_mapping_drift",
+                    usize::try_from(count).expect("mapping drift count is non-negative"),
+                ));
+            }
+        }
         Ok(r)
     }
 
@@ -222,6 +267,9 @@ impl RepairRule for FtsRebuild {
         // `error creating shadow table memories_fts_data: table ... already exists`
         // and the DB is stuck — the exact `project:quant` symptom.
         let tx = ctx.conn.transaction()?;
+        if memcore::db::migrations::read_schema_version(&tx)? >= 47 {
+            memcore::db::migrations::ensure_fts_projection_map_for_repair(&tx)?;
+        }
         tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
         for shadow in [
             "memories_fts_data",
@@ -258,6 +306,12 @@ impl RepairRule for FtsRebuild {
                 r.errors.push(format!(
                     "post-rebuild memories_symbolic_fts drift: {drift:?}"
                 ));
+            }
+        }
+        if let Some(count) = projection_mapping_drift(ctx)? {
+            if count > 0 {
+                r.errors
+                    .push(format!("post-rebuild projection mapping drift: {count}"));
             }
         }
         Ok(r)

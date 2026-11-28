@@ -27,6 +27,26 @@ const MEMORIES_SYMBOLIC_FTS_DDL: &str = r#"CREATE VIRTUAL TABLE IF NOT EXISTS me
 /// (`tachi-server::repair::fts`) so the trigram projection gets the same
 /// full-rebuild coverage as `memories_fts` (#1335 oracle).
 pub fn rebuild_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryError> {
+    crate::db::fts_projection::register(conn)?;
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let inserted = rebuild_memories_symbolic_fts_inner(&tx)?;
+        tx.commit()?;
+        return Ok(inserted);
+    }
+    rebuild_memories_symbolic_fts_inner(conn)
+}
+
+fn rebuild_memories_symbolic_fts_inner(conn: &Connection) -> Result<usize, MemoryError> {
+    if crate::db::table_exists(conn, crate::db::fts_projection::FTS_PROJECTION_MAP_TABLE)? {
+        // Current repair rebuilds both projections from authoritative memories;
+        // external R1 lexical SQL may have populated legacy rowids immediately
+        // before this compatibility entry point.
+        let inserted = crate::db::fts_projection::rebuild_memories_fts_from_authority(conn)?;
+        crate::db::bump_search_generation(conn)?;
+        return Ok(inserted);
+    }
     let Some(inserted) = rebuild_memories_symbolic_fts_rows(conn)? else {
         return Ok(0);
     };

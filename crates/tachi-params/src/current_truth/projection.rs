@@ -334,12 +334,9 @@ pub fn projection_health(
 }
 
 fn chain_heads(reduction: &ReductionV1, issue: &SubjectRefV1) -> Vec<EvidenceHeadV1> {
-    let linked = reduction.linked_prs(issue);
     let mut heads = Vec::new();
-    for reduced in reduction.all() {
-        if reduced.subject == *issue
-            || (reduced.subject.repo == issue.repo && linked.contains(&reduced.subject.object))
-        {
+    for subject in reduction.chain_subjects(issue) {
+        for reduced in reduction.for_subject(&subject) {
             heads.extend(reduced.current_heads.iter().cloned());
         }
     }
@@ -347,23 +344,22 @@ fn chain_heads(reduction: &ReductionV1, issue: &SubjectRefV1) -> Vec<EvidenceHea
 }
 
 fn chain_conflict_tokens(reduction: &ReductionV1, issue: &SubjectRefV1) -> Vec<String> {
-    let linked = reduction.linked_prs(issue);
     let mut tokens = Vec::new();
-    for reduced in reduction.all() {
-        // Same exclusion as `chain_conflicted`: lifecycle-family conflicts
-        // are surfaced by the family gates (`<subject>#lifecycle_conflict`),
-        // not as per-predicate blockers — an older conflicted family member
-        // superseded by a newer fact is history.
-        if reduced.status == ReductionStatusV1::Conflicted
-            && !super::reducer::is_lifecycle_family_predicate(reduced.predicate)
-            && (reduced.subject == *issue
-                || (reduced.subject.repo == issue.repo && linked.contains(&reduced.subject.object)))
-        {
-            tokens.push(format!(
-                "{}#{}",
-                reduced.subject.as_token(),
-                reduced.predicate.as_str()
-            ));
+    for subject in reduction.chain_subjects(issue) {
+        for reduced in reduction.for_subject(&subject) {
+            // Same exclusion as `chain_conflicted`: lifecycle-family conflicts
+            // are surfaced by the family gates (`<subject>#lifecycle_conflict`),
+            // not as per-predicate blockers — an older conflicted family member
+            // superseded by a newer fact is history.
+            if reduced.status == ReductionStatusV1::Conflicted
+                && !super::reducer::is_lifecycle_family_predicate(reduced.predicate)
+            {
+                tokens.push(format!(
+                    "{}#{}",
+                    reduced.subject.as_token(),
+                    reduced.predicate.as_str()
+                ));
+            }
         }
     }
     tokens

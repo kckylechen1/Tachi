@@ -1,3 +1,4 @@
+use super::super::fts::projection_mapping_drift;
 use super::super::RuleReport;
 use super::*;
 
@@ -342,6 +343,127 @@ fn r1_missing_fts_table_rebuilt() {
 
     let app = FtsRebuild.apply(&mut ctx).unwrap();
     assert_eq!(app.applied, 1);
+}
+
+/// A complete ID set does not prove projection-key alignment. R1 must also
+/// detect and repair a mapping whose rowid no longer addresses its memory.
+#[test]
+fn r1_detects_projection_mapping_rowid_drift() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "projection_mapping_drift.db");
+    insert_memory(
+        &conn,
+        "mapped",
+        "/x/mapped",
+        "mapped body",
+        "{}",
+        None,
+        None,
+    );
+    for table in PROJECTION_TABLES {
+        set_projection(&conn, table, &[Some("mapped")]);
+    }
+    conn.execute(
+        "INSERT INTO memories_fts_projection_map(projection_key, memory_id)
+         SELECT rowid, id FROM memories_fts",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memories_fts_projection_map SET projection_key = projection_key + 1000",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry.findings
+            .iter()
+            .any(|finding| finding.kind == "fts_projection_mapping_drift"),
+        "mapping drift must be reported even when ID membership is complete: {dry:?}"
+    );
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    assert_eq!(projection_mapping_drift(&ctx).unwrap(), Some(0));
+}
+
+/// A current schema stamp makes the map required even when no FTS rows exist.
+#[test]
+fn r1_rebuilds_a_missing_projection_mapping_table() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "missing_projection_mapping_table.db");
+    conn.execute_batch("DROP TABLE memories_fts_projection_map")
+        .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(dry
+        .findings
+        .iter()
+        .any(|finding| finding.kind == "fts_projection_mapping_drift"));
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    assert!(ctx
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'memories_fts_projection_map')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    assert!(FtsRebuild.dry_run(&mut ctx).unwrap().findings.is_empty());
+}
+
+/// A missing map row is itself drift even when both FTS ID sets are intact.
+#[test]
+fn r1_rebuilds_a_missing_projection_mapping_row() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "missing_projection_mapping.db");
+    insert_memory(
+        &conn,
+        "mapped",
+        "/x/mapped",
+        "mapped body",
+        "{}",
+        None,
+        None,
+    );
+    for table in PROJECTION_TABLES {
+        set_projection(&conn, table, &[Some("mapped")]);
+    }
+    conn.execute(
+        "INSERT INTO memories_fts_projection_map(projection_key, memory_id)
+         SELECT rowid, id FROM memories_fts",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM memories_fts_projection_map", [])
+        .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = FtsRebuild.dry_run(&mut ctx).unwrap();
+    assert!(dry
+        .findings
+        .iter()
+        .any(|f| f.kind == "fts_projection_mapping_drift"));
+    let app = FtsRebuild.apply(&mut ctx).unwrap();
+    assert!(app.errors.is_empty(), "apply errors: {:?}", app.errors);
+    let mut store = memcore::MemoryStore::open(path.to_str().unwrap()).unwrap();
+    assert!(store
+        .update_with_revision(
+            "mapped",
+            "fresh body",
+            "fresh summary",
+            "manual",
+            &serde_json::json!({}),
+            None,
+            1,
+        )
+        .expect("ordinary update after R1 must not need an ad-hoc repair"));
 }
 
 /// #1335 oracle: R1 must reconcile `memories_symbolic_fts` drift, not just

@@ -210,10 +210,66 @@ pub fn probe_backend_version(backend: &str) -> Option<String> {
         }
     }
 
-    let version = run_version_probe(&program);
+    let key = (backend.to_string(), identity.clone());
+    let (flight, leader) = {
+        let mut flights = version_inflight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = flights.get(&key).and_then(std::sync::Weak::upgrade) {
+            (existing, false)
+        } else {
+            let flight = std::sync::Arc::new(VersionFlight {
+                result: Mutex::new(None),
+                complete: std::sync::Condvar::new(),
+            });
+            flights.insert(key.clone(), std::sync::Arc::downgrade(&flight));
+            (flight, true)
+        }
+    };
+    if !leader {
+        let mut result = flight
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(version) = result.as_ref() {
+                return version.clone();
+            }
+            result = flight
+                .complete
+                .wait(result)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
 
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(backend.to_string(), (identity, version.clone()));
+    let probed_version = std::panic::catch_unwind(|| run_version_probe(&program)).unwrap_or(None);
+    // A slow A probe is not evidence for an upgraded B, even for the callers
+    // already waiting on A's flight. They can retry and resolve B explicitly.
+    let version = match which(backend) {
+        Some(current_program)
+            if current_program == program && binary_identity(&current_program) == identity =>
+        {
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(backend.to_string(), (identity, probed_version.clone()));
+            }
+            probed_version
+        }
+        _ => None,
+    };
+    *flight
+        .result
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(version.clone());
+    flight.complete.notify_all();
+    let mut flights = version_inflight()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if flights
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade)
+        .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &flight))
+    {
+        flights.remove(&key);
     }
     version
 }
@@ -242,81 +298,296 @@ fn probe_codex_program_with_timeout(
     program: &std::path::Path,
     timeout: std::time::Duration,
 ) -> bool {
-    use std::io::Read;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-    // Keep an unreaped supervisor alive until all process-group signals finish.
-    // Vendor arguments are positional values, never interpolated shell source.
-    let Ok(mut child) = Command::new("/bin/sh")
-        .args(["-c", r#""$@" </dev/null; code=$?; printf '\nTACHI_CODEX_PROBE_EXIT=%s\n' "$code"; exec 1>&-; read -r hold"#, "tachi-codex-probe"])
-        .arg(program).args(["exec", "--help"])
-        .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-    else { return false };
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(65537).read_to_end(&mut bytes);
-        let _ = tx.send((result, bytes));
-    });
-    let output = rx.recv_timeout(timeout);
-    let timed_out = output.is_err();
-    // SAFETY: the group leader is our unreaped child (`child` and its piped
-    // stdin stay alive until `child.wait()`), so its PID/PGID cannot be
-    // reused. Stop-then-kill shrinks the fork-vs-kill window, `waitid(WNOWAIT)`
-    // pins the PGID until the leader exits, and bounded post-leader sweeps
-    // reap any grandchild forked just before the leader died (#1299).
-    let pgid = child.id() as libc::pid_t;
-    unsafe {
-        libc::kill(-pgid, libc::SIGSTOP);
-        libc::kill(-pgid, libc::SIGKILL);
+    let Some(output) = run_program_probe_with_timeout(program, &["exec", "--help"], timeout) else {
+        return false;
+    };
+    output.succeeded
+        && (codex_help_supports_read_only(&String::from_utf8_lossy(&output.stdout))
+            || codex_help_supports_read_only(&String::from_utf8_lossy(&output.stderr)))
+}
+
+#[cfg(unix)]
+const MAX_PROGRAM_PROBE_OUTPUT: usize = 65_536;
+
+#[cfg(unix)]
+struct ProgramProbeOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    succeeded: bool,
+}
+
+/// The unreaped root pins its PID/PGID while the owned group is terminated.
+/// After `wait`, this type only observes group absence: a cached PGID is never
+/// signalled again because the numeric ID may already belong to someone else.
+#[cfg(unix)]
+struct ProgramProbeChild {
+    child: Option<std::process::Child>,
+    owns_root: bool,
+}
+
+#[cfg(unix)]
+impl ProgramProbeChild {
+    fn id(&self) -> Option<u32> {
+        self.child.as_ref().map(std::process::Child::id)
     }
-    let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    loop {
-        let rc = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id() as libc::id_t,
-                &mut siginfo,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        if rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            break;
+
+    fn observe_exit(&mut self) -> std::io::Result<bool> {
+        if !self.owns_root {
+            return Err(std::io::Error::other(
+                "program probe root ownership was lost",
+            ));
+        }
+        let pid = self
+            .id()
+            .ok_or_else(|| std::io::Error::other("program probe root is unavailable"))?;
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                return Ok(unsafe { info.si_pid() } != 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                self.owns_root = false;
+            }
+            return Err(error);
         }
     }
-    let mut output = output;
-    let sweep_deadline = std::time::Instant::now() + Duration::from_secs(1);
-    for round in 0..20 {
+
+    fn terminate_and_reap(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        if !self.owns_root {
+            return Err(std::io::Error::other(
+                "program probe root ownership was lost",
+            ));
+        }
+        let pgid = self
+            .id()
+            .ok_or_else(|| std::io::Error::other("program probe root is unavailable"))?
+            as libc::pid_t;
+        // SAFETY: the root is unreaped, so neither its PID nor its original PGID
+        // can be recycled. Killing the direct PID also covers a root that moved
+        // itself into another process group before hanging.
         unsafe {
             libc::kill(-pgid, libc::SIGSTOP);
             libc::kill(-pgid, libc::SIGKILL);
         }
-        if output.is_err() {
-            output = rx.recv_timeout(Duration::from_millis(25));
-        } else if round >= 1 || std::time::Instant::now() >= sweep_deadline {
-            break;
-        } else {
-            std::thread::sleep(Duration::from_millis(10));
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+
+        let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match self.observe_exit() {
+                Ok(true) => {
+                    // WNOWAIT observed a zombie, so this wait cannot block on a
+                    // still-running vendor process.
+                    let status = self
+                        .child
+                        .as_mut()
+                        .expect("owned probe root remains present")
+                        .wait();
+                    self.owns_root = false;
+                    return status.map(Some);
+                }
+                Ok(false) if std::time::Instant::now() < reap_deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(false) => {
+                    // Do not let an uninterruptible vendor process block this
+                    // probe or its singleflight followers. A reaper owns the
+                    // blocking wait; this path never waits again in Drop.
+                    self.owns_root = false;
+                    let mut child = self.child.take().expect("owned probe root remains present");
+                    let _ = std::thread::Builder::new()
+                        .name("tachi-program-probe-reaper".into())
+                        .spawn(move || {
+                            let _ = child.wait();
+                        });
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
-    let _ = child.wait();
-    let output = output.or_else(|_| rx.recv_timeout(Duration::from_secs(1)));
-    if output.is_ok() {
-        let _ = reader.join();
+}
+
+#[cfg(unix)]
+impl Drop for ProgramProbeChild {
+    fn drop(&mut self) {
+        if self.owns_root {
+            let _ = self.terminate_and_reap();
+        }
     }
-    let Ok((Ok(_), bytes)) = output else {
-        return false;
-    };
-    if timed_out || bytes.len() > 65536 {
-        return false;
+}
+
+#[cfg(unix)]
+fn program_probe_group_absent(pgid: libc::pid_t) -> bool {
+    // Observation only. EPERM and a recycled live PGID both fail closed.
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn set_program_probe_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let Some(help) = text.strip_suffix("\nTACHI_CODEX_PROBE_EXIT=0\n") else {
-        return false;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_program_probe_reader<R>(
+    mut stream: R,
+    tag: usize,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: std::sync::mpsc::Sender<(usize, std::io::Result<Vec<u8>>)>,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(format!("tachi-program-probe-{tag}"))
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            let result = loop {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    break Ok(bytes);
+                }
+                match stream.read(&mut buffer) {
+                    Ok(0) => break Ok(bytes),
+                    Ok(count) => {
+                        let remaining = (MAX_PROGRAM_PROBE_OUTPUT + 1).saturating_sub(bytes.len());
+                        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = tx.send((tag, result));
+        })
+}
+
+#[cfg(unix)]
+fn run_program_probe_with_timeout(
+    program: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<ProgramProbeOutput> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    let child = Command::new(program)
+        .args(args)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    // Arm ownership before any fallible pipe/thread setup. Every early return
+    // below therefore terminates and reaps an already-spawned root.
+    let mut process = ProgramProbeChild {
+        child: Some(child),
+        owns_root: true,
     };
-    codex_help_supports_read_only(help)
+    let pgid = process.id()? as libc::pid_t;
+    let stdout = process.child.as_mut()?.stdout.take()?;
+    let stderr = process.child.as_mut()?.stderr.take()?;
+    set_program_probe_nonblocking(stdout.as_raw_fd()).ok()?;
+    set_program_probe_nonblocking(stderr.as_raw_fd()).ok()?;
+
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stdout_reader = spawn_program_probe_reader(stdout, 0, cancel.clone(), tx.clone()).ok()?;
+    let stderr_reader = match spawn_program_probe_reader(stderr, 1, cancel.clone(), tx) {
+        Ok(reader) => reader,
+        Err(_) => {
+            cancel.store(true, Ordering::Release);
+            let _ = stdout_reader.join();
+            return None;
+        }
+    };
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let root_observed = loop {
+        match process.observe_exit() {
+            Ok(true) => break true,
+            Ok(false) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(false) => {
+                timed_out = true;
+                break true;
+            }
+            Err(_) => break false,
+        }
+    };
+    let status = if root_observed {
+        process.terminate_and_reap().ok().flatten()
+    } else {
+        None
+    };
+    let group_deadline = Instant::now() + Duration::from_secs(2);
+    let group_absent = status.is_some()
+        && loop {
+            if program_probe_group_absent(pgid) {
+                break true;
+            }
+            if Instant::now() >= group_deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+    let output_deadline = Instant::now() + Duration::from_secs(1);
+    let mut outputs = [None, None];
+    let mut output_complete = true;
+    for _ in 0..2 {
+        let remaining = output_deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok((tag, output)) => outputs[tag] = Some(output),
+            Err(_) => {
+                output_complete = false;
+                break;
+            }
+        }
+    }
+    cancel.store(true, Ordering::Release);
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    if timed_out || !root_observed || !output_complete || !group_absent {
+        return None;
+    }
+    let stdout = outputs[0].take()?.ok()?;
+    let stderr = outputs[1].take()?.ok()?;
+    if stdout.len() > MAX_PROGRAM_PROBE_OUTPUT || stderr.len() > MAX_PROGRAM_PROBE_OUTPUT {
+        return None;
+    }
+    Some(ProgramProbeOutput {
+        stdout,
+        stderr,
+        succeeded: status?.success(),
+    })
 }
 
 fn codex_help_supports_read_only(help: &str) -> bool {
@@ -358,12 +629,37 @@ fn binary_identity(program: &std::path::Path) -> BinaryIdentity {
     )
 }
 
+type VersionFlightKey = (String, BinaryIdentity);
+
+struct VersionFlight {
+    result: Mutex<Option<Option<String>>>,
+    complete: std::sync::Condvar,
+}
+
+#[allow(clippy::type_complexity)]
+fn version_inflight() -> &'static Mutex<HashMap<VersionFlightKey, std::sync::Weak<VersionFlight>>> {
+    static FLIGHTS: OnceLock<Mutex<HashMap<VersionFlightKey, std::sync::Weak<VersionFlight>>>> =
+        OnceLock::new();
+    FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// `<program> --version`, on a leash: a vendor binary that hangs must not hang
 /// the dispatch, so the probe runs on a worker thread and a timeout resolves to
 /// `None` (fail closed), not to a wait.
+#[cfg(unix)]
 fn run_version_probe(program: &std::path::Path) -> Option<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let output = run_program_probe_with_timeout(program, &["--version"], PROBE_TIMEOUT)?;
+    if !output.succeeded {
+        return None;
+    }
+    parse_version_output(&String::from_utf8_lossy(&output.stdout))
+        .or_else(|| parse_version_output(&String::from_utf8_lossy(&output.stderr)))
+}
 
+#[cfg(not(unix))]
+fn run_version_probe(program: &std::path::Path) -> Option<String> {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (tx, rx) = std::sync::mpsc::channel();
     let program = program.to_path_buf();
     std::thread::spawn(move || {
@@ -372,7 +668,6 @@ fn run_version_probe(program: &std::path::Path) -> Option<String> {
             .output();
         let _ = tx.send(output);
     });
-
     let output = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;
     if !output.status.success() {
         return None;
@@ -421,6 +716,292 @@ mod tests {
         assert!(!probe_codex_read_only_program(std::path::Path::new(
             "/no/such/codex"
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_coalesces_cold_cache_calls_for_one_binary_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-flight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).expect("owned probe fixture");
+        let program = root.join("vendor");
+        let calls = root.join("calls");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf 'call\\n' >> '{}'\nsleep 1\nprintf 'vendor 1.2.3\\n'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let program_name = program.to_string_lossy().into_owned();
+        let workers = (0..8)
+            .map(|_| {
+                let program_name = program_name.clone();
+                std::thread::spawn(move || probe_backend_version(&program_name))
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), Some("1.2.3".to_string()));
+        }
+        assert_eq!(
+            std::fs::read_to_string(calls).unwrap().lines().count(),
+            1,
+            "one binary identity must have one in-flight probe"
+        );
+        std::fs::remove_dir_all(root).expect("remove probe fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_refuses_a_result_when_the_binary_changes_mid_flight() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-upgrade-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).expect("owned upgrade fixture");
+        let program = root.join("vendor");
+        let started = root.join("started");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf 'started\\n' > '{}'\nsleep 1\nprintf 'vendor 1.0.0\\n'\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program_name = program.to_string_lossy().into_owned();
+        let probe_name = program_name.clone();
+        let probe = std::thread::spawn(move || probe_backend_version(&probe_name));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !started.exists() {
+            assert!(std::time::Instant::now() < deadline, "probe did not start");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n# a deliberately different length and identity\nprintf 'vendor 2.0.0\\n'\n",
+        )
+        .unwrap();
+        assert_eq!(probe.join().unwrap(), None);
+        assert_eq!(
+            probe_backend_version(&program_name),
+            Some("2.0.0".to_string())
+        );
+        std::fs::remove_dir_all(root).expect("remove upgrade fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_prefers_stdout_over_stderr_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-streams-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).expect("owned stream fixture");
+        let program = root.join("vendor");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'dependency 9.8.7\\n' >&2\nprintf 'vendor 1.2.3\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(run_version_probe(&program).as_deref(), Some("1.2.3"));
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'no stdout version\\n'\nprintf 'vendor 4.5.6\\n' >&2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            run_version_probe(&program).as_deref(),
+            Some("4.5.6"),
+            "stderr remains a fallback when stdout has no version"
+        );
+        std::fs::remove_dir_all(root).expect("remove stream fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_re_resolves_the_backend_path_before_publishing() {
+        const CHILD_ENV: &str = "TACHI_VERSION_PATH_REPLACEMENT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "certification::tests::version_probe_re_resolves_the_backend_path_before_publishing",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("run PATH replacement scenario in a child process");
+            assert!(
+                output.status.success(),
+                "child PATH scenario failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tachi-version-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let original = std::env::var_os("PATH");
+        let second_program = second.join("vendor");
+        let started = root.join("started");
+        std::fs::write(
+            &second_program,
+            format!(
+                "#!/bin/sh\nprintf 'started\\n' > '{}'\nsleep 1\nprintf 'vendor 1.0.0\\n'\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&second_program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let search_path = original
+            .as_ref()
+            .map(|path| format!("{}:{}", second.display(), path.to_string_lossy()))
+            .unwrap_or_else(|| second.display().to_string());
+        std::env::set_var("PATH", search_path);
+        let probe = std::thread::spawn(|| probe_backend_version("vendor"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !started.exists() {
+            assert!(std::time::Instant::now() < deadline, "probe did not start");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let first_program = first.join("vendor");
+        std::fs::write(&first_program, "#!/bin/sh\nprintf 'vendor 2.0.0\\n'\n").unwrap();
+        std::fs::set_permissions(&first_program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var(
+            "PATH",
+            original
+                .as_ref()
+                .map(|path| {
+                    format!(
+                        "{}:{}:{}",
+                        first.display(),
+                        second.display(),
+                        path.to_string_lossy()
+                    )
+                })
+                .unwrap_or_else(|| format!("{}:{}", first.display(), second.display())),
+        );
+        assert_eq!(probe.join().unwrap(), None);
+        if let Some(original) = original {
+            std::env::set_var("PATH", original);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::fs::remove_dir_all(root).expect("remove path fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn program_probe_escaped_root_child() {
+        if std::env::var_os("TACHI_PROGRAM_PROBE_ESCAPE_CHILD").is_none() {
+            return;
+        }
+        let id_file = std::env::temp_dir().join(format!("tachi-probe-escape-{}.pgid", unsafe {
+            libc::getppid()
+        }));
+        let Ok(pgid) = std::fs::read_to_string(&id_file) else {
+            return;
+        };
+        let pgid = pgid.trim().parse::<libc::pid_t>().unwrap();
+        assert_eq!(unsafe { libc::setpgid(0, pgid) }, 0);
+        std::fs::write(id_file.with_extension("escaped"), b"escaped").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn program_probe_timeout_kills_a_root_that_left_its_original_group() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "tachi-probe-escape-fixture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let id_file =
+            std::env::temp_dir().join(format!("tachi-probe-escape-{}.pgid", std::process::id()));
+        let witness = id_file.with_extension("escaped");
+        let mut anchor = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn anchor process group");
+        std::fs::write(&id_file, anchor.id().to_string()).unwrap();
+        let program = root.join("vendor");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nTACHI_PROGRAM_PROBE_ESCAPE_CHILD=1 exec '{}' --exact certification::tests::program_probe_escaped_root_child --nocapture --test-threads=1\n",
+                std::env::current_exe().unwrap().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_program_probe_with_timeout(
+                &program,
+                &["--version"],
+                std::time::Duration::from_secs(2),
+            ));
+        });
+        let escape_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !witness.exists() && std::time::Instant::now() < escape_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let escaped = witness.exists();
+        let output = rx.recv_timeout(std::time::Duration::from_secs(10));
+        let _ = anchor.kill();
+        let _ = anchor.wait();
+        let _ = std::fs::remove_file(&id_file);
+        let _ = std::fs::remove_file(&witness);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(escaped, "the probe root did not enter the anchor group");
+        assert!(output
+            .expect("a group-escaping root must not block the probe")
+            .is_none());
     }
 
     #[cfg(unix)]

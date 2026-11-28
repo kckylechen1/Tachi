@@ -1,6 +1,6 @@
 use memcore::MemoryStore;
 use memcore::{DbOpenContext, KernelPolicy, MigrationAuthority, ProfileRequirement, StoreProfile};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
 use std::sync::atomic::AtomicUsize;
@@ -307,6 +307,13 @@ impl ReadStorePool {
                 #[cfg(test)]
                 parked_observers: StdMutex::new(Vec::new()),
             }),
+        })
+    }
+
+    /// Whether every pooled reader and the writer share one physical file.
+    pub fn shares_physical_database(&self, writer: &MemoryStore) -> bool {
+        self.inner.stores.iter().all(|slot| {
+            lock_or_recover(slot, "read_pool_identity").shares_physical_database(writer)
         })
     }
 
@@ -1122,7 +1129,13 @@ impl DbRuntime {
                     store
                         .verify_opened_physical_db_identity(&bound_path)
                         .map_err(|error| error.to_string())?;
-                    f(store)
+                    let result = f(store);
+                    if result.is_ok() {
+                        store
+                            .verify_opened_physical_db_identity(&bound_path)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    result
                 });
             }
             // An unstamped bound pool must not swallow the declared
@@ -1131,7 +1144,13 @@ impl DbRuntime {
             BoundReadRoute::RequireDirectRead => {
                 let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
                 let mut store = open_read_store(&key, label, &self.kernel_policy)?;
-                return f(&mut store);
+                let result = f(&mut store);
+                if result.is_ok() {
+                    store
+                        .verify_opened_physical_db_identity(&key)
+                        .map_err(|error| error.to_string())?;
+                }
+                return result;
             }
             BoundReadRoute::NotBound => {}
         }
@@ -1160,13 +1179,25 @@ impl DbRuntime {
                             attached_path.display()
                         )
                     })?;
-                f(store)
+                let result = f(store);
+                if result.is_ok() {
+                    store
+                        .verify_opened_physical_db_identity(&attached_path)
+                        .map_err(|error| error.to_string())?;
+                }
+                result
             });
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
         let mut store = open_read_store(&key, label, &self.kernel_policy)?;
-        f(&mut store)
+        let result = f(&mut store);
+        if result.is_ok() {
+            store
+                .verify_opened_physical_db_identity(&key)
+                .map_err(|error| error.to_string())?;
+        }
+        result
     }
 
     /// Write a DB whose manifest role the caller has already resolved — the
@@ -1227,7 +1258,18 @@ impl DbRuntime {
             })?;
         let store_wait = store_wait_started.elapsed();
         _hold_warn.arm(gate_wait, store_wait);
-        f(&mut store)
+        let result = f(&mut store);
+        if result.is_ok() {
+            store
+                .verify_opened_physical_db_identity(&state.db_path)
+                .map_err(|error| {
+                    format!(
+                        "attached project write completed with a stale identity: {}: {error}",
+                        state.db_path.display()
+                    )
+                })?;
+        }
+        result
     }
 
     /// Read a DB whose manifest role the caller has already resolved (the
@@ -1639,9 +1681,20 @@ impl DbRuntime {
             let gate_wait = write_started.elapsed();
             let store_wait_started = Instant::now();
             let mut store = lock_or_recover(&self.global_store, "global_store");
+            store
+                .verify_opened_physical_db_identity(&self.global_db_path)
+                .map_err(|error| format!("global write refused: {error}"))?;
             let store_wait = store_wait_started.elapsed();
             _hold_warn.arm(gate_wait, store_wait);
-            return f(&mut store);
+            let result = f(&mut store);
+            if result.is_ok() {
+                store
+                    .verify_opened_physical_db_identity(&self.global_db_path)
+                    .map_err(|error| {
+                        format!("global write completed with a stale identity: {error}")
+                    })?;
+            }
+            return result;
         };
 
         let gate_wait_started = Instant::now();
@@ -1668,7 +1721,17 @@ impl DbRuntime {
             // when the closure returns OR panics. The post-hold warn and the
             // recorder receipt below are unchanged.
             let _watchdog = WriteHoldWatchdog::arm("global_store", gate_wait, resource_wait);
+            store
+                .verify_opened_physical_db_identity(&self.global_db_path)
+                .map_err(|error| format!("global write refused: {error}"))?;
             let result = f(&mut store);
+            if result.is_ok() {
+                store
+                    .verify_opened_physical_db_identity(&self.global_db_path)
+                    .map_err(|error| {
+                        format!("global write completed with a stale identity: {error}")
+                    })?;
+            }
             resource_hold = resource_hold_started
                 .expect("resource hold timer set before measured write")
                 .elapsed();
@@ -1737,7 +1800,18 @@ impl DbRuntime {
                         started: Instant::now(),
                         elapsed: &mut resource_hold_on_panic,
                     };
-                    f(store)
+                    store
+                        .verify_opened_physical_db_identity(&self.global_db_path)
+                        .map_err(|error| format!("global read refused: {error}"))?;
+                    let result = f(store);
+                    if result.is_ok() {
+                        store
+                            .verify_opened_physical_db_identity(&self.global_db_path)
+                            .map_err(|error| {
+                                format!("global read completed with a stale identity: {error}")
+                            })?;
+                    }
+                    result
                 });
             gate_hold = gate_hold_started
                 .expect("gate hold timer set after measured read admission")
@@ -1784,7 +1858,22 @@ impl DbRuntime {
     ) -> Result<T, String> {
         let Some(recorder) = self.global_contention_recorder.get().cloned() else {
             let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-            return self.global_read_pool.with_store("global_read_pool", f);
+            return self
+                .global_read_pool
+                .with_store("global_read_pool", |store| {
+                    store
+                        .verify_opened_physical_db_identity(&self.global_db_path)
+                        .map_err(|error| format!("global read refused: {error}"))?;
+                    let result = f(store);
+                    if result.is_ok() {
+                        store
+                            .verify_opened_physical_db_identity(&self.global_db_path)
+                            .map_err(|error| {
+                                format!("global read completed with a stale identity: {error}")
+                            })?;
+                    }
+                    result
+                });
         };
 
         self.with_global_store_read_instrumented(recorder, f).0
@@ -1808,9 +1897,22 @@ impl DbRuntime {
     ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
         let Some(recorder) = self.global_contention_recorder.get().cloned() else {
             let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-            let (result, receipt) = self
-                .global_read_pool
-                .with_store_recording("global_read_pool", f);
+            let (result, receipt) =
+                self.global_read_pool
+                    .with_store_recording("global_read_pool", |store| {
+                        store
+                            .verify_opened_physical_db_identity(&self.global_db_path)
+                            .map_err(|error| format!("global read refused: {error}"))?;
+                        let result = f(store);
+                        if result.is_ok() {
+                            store
+                                .verify_opened_physical_db_identity(&self.global_db_path)
+                                .map_err(|error| {
+                                    format!("global read completed with a stale identity: {error}")
+                                })?;
+                        }
+                        result
+                    });
             return Ok((result?, receipt));
         };
 
@@ -1834,9 +1936,30 @@ impl DbRuntime {
         let gate_wait = write_started.elapsed();
         let store_wait_started = Instant::now();
         let mut store = lock_or_recover(&state.store, "project_store");
+        store
+            .verify_opened_physical_db_identity(&state.db_path)
+            .map_err(|error| {
+                format!(
+                    "bound project write refused: physical identity changed under the bound store: {}: {error}",
+                    state.db_path.display()
+                )
+            })?;
         let store_wait = store_wait_started.elapsed();
         _hold_warn.arm(gate_wait, store_wait);
-        f(&mut store)
+        let result = f(&mut store);
+        if result.is_ok() {
+            // The write may already have committed, but do not report success
+            // for a handle whose path was replaced during the callback.
+            store
+                .verify_opened_physical_db_identity(&state.db_path)
+                .map_err(|error| {
+                    format!(
+                        "bound project write completed with a stale store identity: {}: {error}",
+                        state.db_path.display()
+                    )
+                })?;
+        }
+        result
     }
 
     pub fn with_project_store_read<T>(
@@ -1848,7 +1971,29 @@ impl DbRuntime {
             .as_ref()
             .ok_or_else(|| "No project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
-        state.read_pool.with_store("project_read_pool", f)
+        let bound_path = state.db_path.clone();
+        state.read_pool.with_store("project_read_pool", |store| {
+            store
+                .verify_opened_physical_db_identity(&bound_path)
+                .map_err(|error| {
+                    format!(
+                        "bound project read refused: physical identity changed under the bound pool: {}: {error}",
+                        bound_path.display()
+                    )
+                })?;
+            let result = f(store);
+            if result.is_ok() {
+                store.verify_opened_physical_db_identity(&bound_path).map_err(
+                    |error| {
+                        format!(
+                            "bound project read completed with a stale store identity: {}: {error}",
+                            bound_path.display()
+                        )
+                    },
+                )?;
+            }
+            result
+        })
     }
 
     pub fn with_store_for_scope<T>(
@@ -1968,6 +2113,8 @@ static WRITE_HOLD_WARN_THRESHOLD_OVERRIDE_MILLIS: AtomicU64 = AtomicU64::new(0);
 /// compiled into test builds.
 #[cfg(test)]
 static WRITE_HOLD_WARN_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static WRITE_HOLD_WATCHDOG_THREAD_SPAWNS: AtomicU64 = AtomicU64::new(0);
 
 fn write_hold_warn_threshold() -> Duration {
     #[cfg(test)]
@@ -2024,103 +2171,185 @@ fn warn_if_write_hold_exceeds_threshold(
     emit_write_hold_warn(label, gate_wait, store_wait, held, false);
 }
 
-/// issue #1588 FIX-B (W1): single-shot in-hold watchdog armed at store-lock
-/// acquisition, so a hold that never returns is not silent — the Drop-only
-/// warn fires after release, and a forever-hold never releases. A named,
-/// detached thread polls the disarm flag in small steps until the threshold
-/// elapses; if the hold is STILL held (the closure has not returned; the
-/// guard's Drop has not disarmed), it emits the `still_held: true` tier of
-/// the forensics warn DURING the hold. Polling (not one long sleep) means a
-/// disarmed watchdog exits within one poll step instead of lingering up to a
-/// full threshold. At most one warn per hold; a second threshold multiple is
-/// deliberately NOT required (single-shot). The watchdog touches no lock — it
-/// only reads the disarm atomic and emits a warn.
+/// issue #1588 FIX-B (W1): one shared timer worker owns all in-hold watchdogs.
+/// Registering a write adds a unique deadline entry; Drop removes it through
+/// the same scheduler lock. The worker wakes for the earliest deadline and
+/// claims due entries before logging outside the lock, so short writes do not
+/// create an OS thread and a cancelled hold cannot fire after disarm.
 struct WriteHoldWatchdog {
-    disarm: Arc<AtomicBool>,
+    id: u64,
+}
+
+#[derive(Clone)]
+struct SharedWriteHoldWatchdog {
+    shared: Arc<WatchdogShared>,
+    worker_available: Arc<AtomicBool>,
+}
+
+struct WatchdogShared {
+    state: StdMutex<WatchdogState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct WatchdogState {
+    next_id: u64,
+    entries: BTreeMap<u64, WatchdogEntry>,
+}
+
+struct WatchdogEntry {
+    started: Instant,
+    deadline: Instant,
+    label: String,
+    gate_wait: Duration,
+    store_wait: Duration,
+}
+
+impl SharedWriteHoldWatchdog {
+    fn global() -> &'static Self {
+        static REGISTRY: OnceLock<SharedWriteHoldWatchdog> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            let registry = Self {
+                shared: Arc::new(WatchdogShared {
+                    state: StdMutex::new(WatchdogState {
+                        next_id: 1,
+                        entries: BTreeMap::new(),
+                    }),
+                    wake: Condvar::new(),
+                }),
+                worker_available: Arc::new(AtomicBool::new(false)),
+            };
+            let worker = registry.clone();
+            let worker_available = registry.worker_available.clone();
+            match std::thread::Builder::new()
+                .name("write-hold-watchdog".to_string())
+                .spawn(move || worker.run())
+            {
+                Ok(_handle) => {
+                    worker_available.store(true, Ordering::Release);
+                    #[cfg(test)]
+                    WRITE_HOLD_WATCHDOG_THREAD_SPAWNS.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "shared write-hold watchdog failed to start; only post-hold warnings remain available");
+                }
+            }
+            registry
+        })
+    }
+
+    fn arm(&self, label: &str, gate_wait: Duration, store_wait: Duration) -> u64 {
+        if !self.worker_available.load(Ordering::Acquire) {
+            return 0;
+        }
+        let started = Instant::now();
+        let deadline = started + write_hold_warn_threshold();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = loop {
+            let candidate = state.next_id;
+            state.next_id = state.next_id.wrapping_add(1);
+            if candidate != 0 && !state.entries.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        state.entries.insert(
+            id,
+            WatchdogEntry {
+                started,
+                deadline,
+                label: label.to_owned(),
+                gate_wait,
+                store_wait,
+            },
+        );
+        self.shared.wake.notify_one();
+        id
+    }
+
+    fn disarm(&self, id: u64) {
+        if id == 0 {
+            return;
+        }
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .remove(&id);
+        self.shared.wake.notify_one();
+    }
+
+    fn run(&self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let now = Instant::now();
+            let due = state
+                .entries
+                .iter()
+                .find_map(|(id, entry)| (entry.deadline <= now).then_some(*id));
+            if let Some(id) = due {
+                let entry = state
+                    .entries
+                    .remove(&id)
+                    .expect("due watchdog entry remains present");
+                drop(state);
+                // Removal is the claim. A disarm that won the scheduler lock
+                // first removed the entry; this firing held at its deadline.
+                emit_write_hold_warn(
+                    &entry.label,
+                    entry.gate_wait,
+                    entry.store_wait,
+                    entry.started.elapsed(),
+                    true,
+                );
+                state = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                continue;
+            }
+            if let Some(next_deadline) = state.entries.values().map(|entry| entry.deadline).min() {
+                let wait = next_deadline.saturating_duration_since(Instant::now());
+                state = self
+                    .shared
+                    .wake
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
+            } else {
+                state = self
+                    .shared
+                    .wake
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
 }
 
 impl WriteHoldWatchdog {
-    /// Spawn the watchdog at store-lock acquisition. The thread captures only
-    /// the disarm Arc, the owned label, and the acquisition instants/durations
-    /// — nothing borrowed from the guard.
+    /// Register with the shared timer worker instead of creating one OS
+    /// thread per write. `0` means the worker failed to start.
     fn arm(label: &str, gate_wait: Duration, store_wait: Duration) -> Self {
-        let disarm = Arc::new(AtomicBool::new(true));
-        let watchdog_disarm = Arc::clone(&disarm);
-        let label_owned = label.to_owned();
-        let thread_label = label_owned.clone();
-        let spawn_result = std::thread::Builder::new()
-            .name("write-hold-watchdog".to_string())
-            .spawn(move || {
-                // Poll the disarm flag in 10ms steps until the threshold
-                // elapses: the watchdog must NOT linger up to a full
-                // threshold after the hold returns — once the guard's Drop
-                // disarms, this thread exits within one poll step. Only the
-                // atomic is read (and the single-shot CAS at fire time); no
-                // lock is ever touched.
-                let started = Instant::now();
-                let threshold = write_hold_warn_threshold();
-                loop {
-                    if !watchdog_disarm.load(Ordering::Relaxed) {
-                        return; // disarmed: the hold returned; nothing to fire
-                    }
-                    if started.elapsed() >= threshold {
-                        break; // threshold elapsed and the hold is still held
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                // Single-shot: only the thread that flips armed -> disarmed may
-                // warn. If the guard's Drop disarmed during the last poll step
-                // (the hold returned at or before the threshold), nothing fires
-                // — the post-hold Drop tier covers that case alone.
-                if watchdog_disarm
-                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    emit_write_hold_warn(
-                        &thread_label,
-                        gate_wait,
-                        store_wait,
-                        started.elapsed(),
-                        true,
-                    );
-                }
-            });
-        match spawn_result {
-            Ok(handle) => {
-                // Detach: the watchdog owns its lifecycle; nobody joins it.
-                drop(handle);
-            }
-            Err(e) => {
-                // Refuse to be silent about a failed watchdog: the in-hold tier
-                // is unavailable for this hold, but the post-hold Drop tier
-                // still covers holds that return.
-                tracing::warn!(
-                    label = %label_owned,
-                    error = %e,
-                    "write-hold watchdog spawn failed; in-hold warn tier unavailable \
-                     for this hold"
-                );
-            }
+        Self {
+            id: SharedWriteHoldWatchdog::global().arm(label, gate_wait, store_wait),
         }
-        Self { disarm }
     }
 
-    /// Called by the guard's Drop: the hold is over (or about to be), so a
-    /// still-sleeping watchdog must not fire.
     fn disarm(&self) {
-        self.disarm.store(false, Ordering::SeqCst);
+        SharedWriteHoldWatchdog::global().disarm(self.id);
     }
 }
 
-/// issue #1588 R8: a scoped watchdog disarms itself when the armed scope
-/// exits — on the closure's return AND on a panicking closure's unwind. The
-/// recorder path arms the watchdog as a plain local; this Drop is what turns
-/// "closure return" into the disarm event on both exit paths (an explicit
-/// `disarm` in only the Ok branch would leave a panicking hold's watchdog
-/// armed, firing a spurious `still_held` warn after the hold already ended).
-/// Idempotent: the pre-existing `WriteHoldWarnGuard::drop` explicit `disarm`
-/// remains correct — this Drop then stores `false` a second time, which is
-/// harmless. The Drop never emits; it only suppresses.
 impl Drop for WriteHoldWatchdog {
     fn drop(&mut self) {
         self.disarm();
@@ -2358,6 +2587,20 @@ impl ProjectDbState {
         let read_pool =
             ReadStorePool::open_read_only(db_str, read_pool_size, &resolved_label, policy)
                 .map_err(|e| format!("open project read db: {e}"))?;
+        if !read_pool.shares_physical_database(&store) {
+            return Err(format!(
+                "project writer/read pool identity mismatch: {}",
+                db_path.display()
+            ));
+        }
+        store
+            .verify_opened_physical_db_identity(&db_path)
+            .map_err(|error| {
+                format!(
+                    "project writer/read pool opened across a file replacement: {}: {error}",
+                    db_path.display()
+                )
+            })?;
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
             read_pool,
@@ -4336,6 +4579,45 @@ mod tests {
             .expect("named write on an unbound runtime");
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn shared_watchdog_does_not_spawn_a_thread_per_write() {
+        let _serial = WRITER_LOCKOUT_TESTS_SERIAL.lock().unwrap();
+        let warmup = WriteHoldWatchdog::arm("watchdog-warmup", Duration::ZERO, Duration::ZERO);
+        assert!(SharedWriteHoldWatchdog::global()
+            .worker_available
+            .load(Ordering::Acquire));
+        drop(warmup);
+        let before = WRITE_HOLD_WATCHDOG_THREAD_SPAWNS.load(Ordering::Relaxed);
+        let guards = (0..16)
+            .map(|_| WriteHoldWatchdog::arm("shared-watchdog", Duration::ZERO, Duration::ZERO))
+            .collect::<Vec<_>>();
+        assert!(guards.iter().all(|guard| guard.id != 0));
+        assert_eq!(
+            WRITE_HOLD_WATCHDOG_THREAD_SPAWNS.load(Ordering::Relaxed),
+            before,
+            "sixteen registrations must reuse the already-running worker"
+        );
+        drop(guards);
+    }
+
+    #[test]
+    fn shared_watchdog_disarms_only_the_selected_same_label_hold() {
+        let _serial = WRITER_LOCKOUT_TESTS_SERIAL.lock().unwrap();
+        WRITE_HOLD_WARN_THRESHOLD_OVERRIDE_MILLIS.store(50, Ordering::Relaxed);
+        let first = WriteHoldWatchdog::arm("same-label", Duration::ZERO, Duration::ZERO);
+        let second = WriteHoldWatchdog::arm("same-label", Duration::ZERO, Duration::ZERO);
+        let baseline = WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed);
+        drop(first);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) == baseline {
+            assert!(Instant::now() < deadline, "second hold did not warn");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(second);
+        assert_eq!(WRITE_HOLD_WARN_COUNT.load(Ordering::Relaxed) - baseline, 1);
+        WRITE_HOLD_WARN_THRESHOLD_OVERRIDE_MILLIS.store(0, Ordering::Relaxed);
     }
 
     /// #1588 FIX-B (T4, re-anchored R8/W1): a writer hold beyond the threshold

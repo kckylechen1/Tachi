@@ -2765,6 +2765,7 @@ version = "1.9.2"
 dependencies = [
  "dirs",
  "jiff",
+ "libc",
  "memcore",
  "rusqlite",
  "serde",

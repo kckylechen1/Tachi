@@ -298,6 +298,40 @@ fn verification_gate_detects_failed_and_stale_receipts() {
 }
 
 #[test]
+fn verification_gate_rejects_contradictory_or_malformed_completion_flags() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    for (flow_id, field, value) in [
+        ("flow_gate-timeout-zero", "timed_out", json!(true)),
+        ("flow_gate-abandoned-zero", "kill_abandoned", json!(true)),
+        ("flow_gate-invalid-timeout", "timed_out", json!("false")),
+    ] {
+        write_gate_ledger(flow_id);
+        let mut receipt = valid_receipt("fmt", "abc");
+        receipt["flow_id"] = json!(flow_id);
+        receipt[field] = value;
+        let home = seed_receipts(flow_id, &[("fmt", receipt)]);
+        let server = gate_server(home.path());
+        seed_gate_claim(&server, flow_id, "abc");
+        let gate = evaluate_verification_gate(&server, Some(flow_id))
+            .unwrap()
+            .unwrap();
+        assert!(gate["failed"].as_array().unwrap().contains(&json!("fmt")));
+        assert!(!gate["passed"].as_array().unwrap().contains(&json!("fmt")));
+    }
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[test]
 fn verification_gate_receipt_head_mismatch_is_stale() {
     let _guard = crate::utils::global_test_lock()
         .lock()

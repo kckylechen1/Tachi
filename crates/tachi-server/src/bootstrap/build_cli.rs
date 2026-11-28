@@ -252,8 +252,8 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                 println!("repo: {repo_id}");
                 match &holder {
                     Some(h) => println!(
-                        "executor slot: HELD by {} (pid {}, since {})",
-                        h.ticket_id, h.pid, h.acquired_at
+                        "executor slot: HELD by {} (pid {}, since {}, acquisition {})",
+                        h.ticket_id, h.pid, h.acquired_at, h.acquisition_id
                     ),
                     None => println!("executor slot: free"),
                 }
@@ -319,9 +319,19 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
             Ok(())
         }
 
-        BuildAction::Abandon { reason, json } => {
+        BuildAction::Abandon {
+            ticket_id,
+            acquisition_id,
+            reason,
+            json,
+        } => {
             let mut store = open_global_store()?;
-            let abandoned = build_broker::abandon_stale_slot(&mut store, &reason)?;
+            let abandoned = build_broker::abandon_stale_slot(
+                &mut store,
+                &ticket_id,
+                acquisition_id.as_deref(),
+                &reason,
+            )?;
             if json {
                 println!(
                     "{}",

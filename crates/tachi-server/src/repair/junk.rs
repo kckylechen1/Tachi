@@ -13,14 +13,12 @@ use rusqlite::TransactionBehavior;
 
 pub struct JunkCleanup;
 
-fn has_table(ctx: &DbContext, name: &str) -> bool {
-    ctx.conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-            [name],
-            |row| row.get::<_, i64>(0),
-        )
-        .is_ok()
+fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool, RepairError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get::<_, bool>(0),
+    )?)
 }
 
 // Invariant: R8 may physically delete only active, non-protected rows that
@@ -82,14 +80,18 @@ impl RepairRule for JunkCleanup {
 
     fn apply(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut report = self.dry_run(ctx)?;
-        let has_memories_fts = has_table(ctx, "memories_fts");
-        let has_memories_symbolic_fts = has_table(ctx, "memories_symbolic_fts");
-        let has_memories_vec = has_table(ctx, "memories_vec");
-        let has_access_history = has_table(ctx, "access_history");
-        let has_memory_edges = has_table(ctx, "memory_edges");
         let tx = ctx
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Schema inspection belongs to the same immediate transaction as the
+        // deletes. In particular, a concurrent v47 migration cannot install
+        // mappings after a stale pre-transaction presence check.
+        let has_memories_fts = has_table(&tx, "memories_fts")?;
+        let has_memories_symbolic_fts = has_table(&tx, "memories_symbolic_fts")?;
+        let has_memories_vec = has_table(&tx, "memories_vec")?;
+        let has_access_history = has_table(&tx, "access_history")?;
+        let has_memory_edges = has_table(&tx, "memory_edges")?;
+        let has_projection_map = has_table(&tx, "memories_fts_projection_map")?;
         let targets = {
             let mut stmt = tx.prepare(&rerank_cache_sql())?;
             let targets = stmt
@@ -144,6 +146,12 @@ impl RepairRule for JunkCleanup {
         if has_memory_edges {
             tx.execute(
                 "DELETE FROM memory_edges WHERE source_id IN (SELECT id FROM cleanup_targets) OR target_id IN (SELECT id FROM cleanup_targets)",
+                [],
+            )?;
+        }
+        if has_projection_map {
+            tx.execute(
+                "DELETE FROM memories_fts_projection_map WHERE memory_id IN (SELECT id FROM cleanup_targets)",
                 [],
             )?;
         }

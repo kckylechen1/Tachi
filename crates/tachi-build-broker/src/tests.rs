@@ -20,8 +20,8 @@ use super::ticket::{
     MAX_TICKET_ATTEMPTS,
 };
 use super::{
-    abandon_stale_slot, cancel_queued_ticket, execute_ticket, load_receipt, pending_tickets,
-    run_next, slot, ExecutorSeat, LEFT_QUEUE,
+    abandon_observed_stale_slot, abandon_stale_slot, cancel_queued_ticket, execute_ticket,
+    load_receipt, pending_tickets, run_next, slot, ExecutorSeat, LEFT_QUEUE,
 };
 
 const MAIN_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -394,22 +394,27 @@ fn a_quarantined_resident_target_is_never_reused_without_clearing() {
 #[test]
 fn two_tickets_cannot_hold_the_executor_slot_at_once() {
     let mut store = store();
-    assert_eq!(
-        slot::claim_for_execution(&mut store, "t-1").unwrap(),
-        slot::Claim::Held
-    );
+    let first = match slot::claim_for_execution(&mut store, "t-1").unwrap() {
+        slot::Claim::Held(holder) => holder,
+        claim => panic!("first ticket must hold the slot: {claim:?}"),
+    };
     match slot::claim_for_execution(&mut store, "t-2").unwrap() {
         slot::Claim::Busy { holder } => assert_eq!(holder.ticket_id, "t-1"),
         claim => panic!("two tickets must never both hold the executor slot: {claim:?}"),
     }
+    let non_holder = slot::SlotHolder {
+        ticket_id: "t-2".into(),
+        acquisition_id: "not-the-owner".into(),
+        ..first.clone()
+    };
     // A non-holder cannot release the slot out from under the holder.
-    assert!(slot::release_slot(&store, "t-2").is_err());
-    assert!(slot::release_slot(&store, "t-1").unwrap());
+    assert!(slot::release_slot(&mut store, &non_holder).is_err());
+    assert!(slot::release_slot(&mut store, &first).unwrap());
     // Now it is free again.
-    assert_eq!(
+    assert!(matches!(
         slot::claim_for_execution(&mut store, "t-2").unwrap(),
-        slot::Claim::Held
-    );
+        slot::Claim::Held(_)
+    ));
 }
 
 #[test]
@@ -594,9 +599,16 @@ fn abandoning_a_stale_slot_quarantines_the_dead_builds_target_before_releasing()
     // Simulate a daemon that died mid-build: slot held, target recorded, no
     // receipt, no release.
     slot::claim_for_execution(&mut store, "t-dead").unwrap();
-    slot::record_slot_target(&store, "t-dead", "/seat/target-resident").unwrap();
+    let holder = slot::current_holder(&store).unwrap().unwrap();
+    slot::record_slot_target(&mut store, &holder, "/seat/target-resident").unwrap();
 
-    assert!(abandon_stale_slot(&mut store, "daemon killed").unwrap());
+    assert!(abandon_stale_slot(
+        &mut store,
+        "t-dead",
+        Some(&holder.acquisition_id),
+        "daemon killed"
+    )
+    .unwrap());
 
     let res = memcore::find_resource_by_path(
         store.connection(),
@@ -611,6 +623,77 @@ fn abandoning_a_stale_slot_quarantines_the_dead_builds_target_before_releasing()
         "crash recovery must fence off the dead build's target BEFORE freeing the slot"
     );
     assert!(slot::current_holder(&store).unwrap().is_none());
+}
+
+#[test]
+fn delayed_abandon_does_not_touch_a_successor_holder_or_its_target() {
+    let mut store = store();
+    let target = "/seat/target-resident";
+
+    slot::claim_for_execution(&mut store, "t-dead").unwrap();
+    let observed_dead = slot::current_holder(&store).unwrap().unwrap();
+    slot::record_slot_target(&mut store, &observed_dead, target).unwrap();
+    let observed_dead = slot::current_holder(&store).unwrap().unwrap();
+    assert!(
+        abandon_observed_stale_slot(&mut store, observed_dead.clone(), "first recovery").unwrap()
+    );
+
+    let resource = memcore::find_resource_by_path(
+        store.connection(),
+        target,
+        memcore::ResourceKind::BuildTarget,
+    )
+    .unwrap()
+    .unwrap();
+    memcore::release_quarantine(store.connection_mut(), &resource.resource_id, |_| Ok(0)).unwrap();
+
+    slot::claim_for_execution(&mut store, "t-successor").unwrap();
+    let successor = slot::current_holder(&store).unwrap().unwrap();
+    slot::record_slot_target(&mut store, &successor, target).unwrap();
+    let successor = slot::current_holder(&store).unwrap().unwrap();
+    assert_ne!(successor.acquisition_id, observed_dead.acquisition_id);
+
+    assert!(!abandon_observed_stale_slot(&mut store, observed_dead, "delayed recovery").unwrap());
+    assert_eq!(slot::current_holder(&store).unwrap(), Some(successor));
+    assert_eq!(
+        memcore::find_resource_by_path(
+            store.connection(),
+            target,
+            memcore::ResourceKind::BuildTarget,
+        )
+        .unwrap()
+        .unwrap()
+        .state,
+        memcore::ResourceState::Active
+    );
+}
+
+#[test]
+fn public_abandon_requires_the_previously_observed_acquisition() {
+    let mut store = store();
+    slot::claim_for_execution(&mut store, "t-dead").unwrap();
+    let observed_dead = slot::current_holder(&store).unwrap().unwrap();
+    slot::record_slot_target(&mut store, &observed_dead, "/seat/target-resident").unwrap();
+    let observed_dead = slot::current_holder(&store).unwrap().unwrap();
+    assert!(abandon_stale_slot(
+        &mut store,
+        "t-dead",
+        Some(&observed_dead.acquisition_id),
+        "first recovery",
+    )
+    .unwrap());
+
+    slot::claim_for_execution(&mut store, "t-successor").unwrap();
+    let successor = slot::current_holder(&store).unwrap().unwrap();
+    let error = abandon_stale_slot(
+        &mut store,
+        "t-dead",
+        Some(&observed_dead.acquisition_id),
+        "delayed recovery",
+    )
+    .expect_err("a delayed command must not target the successor");
+    assert!(error.contains("t-successor"), "{error}");
+    assert_eq!(slot::current_holder(&store).unwrap(), Some(successor));
 }
 
 // ─── ticket immutability + queue ────────────────────────────────────────────

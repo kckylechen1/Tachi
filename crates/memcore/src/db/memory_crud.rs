@@ -9,8 +9,10 @@ use super::common::{
 };
 use super::sqlite_vec::serialize_f32;
 
-pub(crate) use super::fts_projection::sync_memories_fts;
 pub use super::fts_projection::{delete_memories_symbolic_fts, sync_memories_symbolic_fts};
+pub(crate) use super::fts_projection::{
+    insert_memories_fts, sync_memories_fts, sync_memories_fts_from_memories,
+};
 
 mod access;
 mod delete;
@@ -47,13 +49,13 @@ pub(crate) use read::{fetch_by_ids_with_vector_table, fetch_embeddings_by_ids};
 pub(crate) use read::{get_active_resource_entry, list_by_path_recent_for_recall};
 #[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
-pub(crate) use search::search_fts_with_normalized_as_of;
-pub(crate) use search::search_symbolic_candidates_with_relevance;
+pub(crate) use search::search_fts_with_normalized_as_of_and_domain;
+pub(crate) use search::search_symbolic_candidates_with_relevance_and_domain;
 pub(crate) use search::wiki_corpus_store_sql_splice;
 pub(crate) use search::{ensure_symbolic_score_function, RecallTables};
 pub use search::{
-    search_fts, search_symbolic_candidates, search_vec, symbolic_trigram_select_sql,
-    SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
+    search_fts, search_symbolic_candidates, search_vec, search_vec_with_domain,
+    symbolic_trigram_select_sql, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
 /// tachi#1607 snapshot-import seam: transaction-scoped, no public signature
 /// mentions a `Connection`/`Transaction` — the store-level
@@ -2391,7 +2393,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
     let kws = entry.keywords.join(" ");
     let mut entities = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
-    sync_memories_fts(
+    insert_memories_fts(
         tx,
         &entry.id,
         &path,
@@ -2674,7 +2676,8 @@ fn upsert_prepared_within_tx(
         .transpose()?;
     let write_time_utc = now_utc_iso();
 
-    let (path, metadata_json) = update::prepare_upsert_metadata(tx, entry, &path, &clean_text)?;
+    let (path, metadata_json, body_changed) =
+        update::prepare_upsert_metadata(tx, entry, &path, &clean_text)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
@@ -2686,11 +2689,25 @@ fn upsert_prepared_within_tx(
     // than the stored one. It is a carry-through, not an observation of a read
     // — the only production code that *earns* those counters is
     // `record_access_with_updates`, reached only from `hybrid_search`. A caller
-    // that re-saves an existing id from a default-constructed entry therefore
+    // who re-saves an existing id from a default-constructed entry therefore
     // resets the counter to that entry's value; `tier` below is deliberately
     // guarded against exactly that kind of downgrade, and these two are not.
     // `recall_count` / `query_diversity` are set on insert and left alone on
     // conflict — they appear in the column list but not in the update set.
+    let existing_memory = memory_row_exists_within_tx(tx, &entry.id)?;
+    if body_changed && !vec_available && crate::db::table_exists(tx, "memories_vec")? {
+        let stale_vector_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories_vec WHERE id = ?1)",
+            params![entry.id],
+            |row| row.get(0),
+        )?;
+        if stale_vector_exists {
+            return Err(MemoryError::InvalidArg(format!(
+                "memory '{}' body changed without invalidating or replacing the old vector while vector projection is unavailable; refusing stale retrieval evidence",
+                entry.id
+            )));
+        }
+    }
     let rows_written = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
@@ -2782,7 +2799,12 @@ fn upsert_prepared_within_tx(
     let mut ents_vec = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut ents_vec, entry.persons.clone());
     let ents = ents_vec.join(" ");
-    sync_memories_fts(
+    let project = if existing_memory {
+        sync_memories_fts
+    } else {
+        insert_memories_fts
+    };
+    project(
         tx,
         &entry.id,
         &path,
@@ -2803,6 +2825,10 @@ fn upsert_prepared_within_tx(
                 params![entry.id, blob],
             )?;
         }
+    } else if body_changed && vec_available {
+        // An omitted vector is meaningful on update: the old embedding no
+        // longer describes the new body and must not remain KNN evidence.
+        tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![entry.id])?;
     }
 
     Ok(IdlessUpsertResult::Saved)

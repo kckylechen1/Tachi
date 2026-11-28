@@ -34,7 +34,7 @@ fn old_columns(conn: &Connection, table: &str) -> String {
 }
 
 #[test]
-fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_portable_44() {
+fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_migrates_portable_47() {
     let mut conn = version_44(StoreProfile::TachiFull);
     let project = "a".repeat(64);
     conn.execute(
@@ -133,20 +133,26 @@ fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_portable_44(
 
     // Portable production opens use the projected D7 funnel. The legacy
     // unprojected migration runner above deliberately stamps the Product head.
+    // v47 is a real Portable migration, so the current opener requires the same
+    // explicit authority and adds exactly its sentinel/projection map.
     let portable_dir = tempfile::tempdir().unwrap();
     let portable_path = portable_dir.path().join("portable.db");
-    with_prefix(44, || {
-        drop(
-            crate::MemoryStore::open_with_context(
-                portable_path.to_str().unwrap(),
-                &crate::db::DbOpenContext::create_fresh()
-                    .with_profile(StoreProfile::PortableKernel),
-            )
-            .unwrap(),
-        );
-    });
+    drop(
+        crate::MemoryStore::open_with_context(
+            portable_path.to_str().unwrap(),
+            &crate::db::DbOpenContext::create_fresh().with_profile(StoreProfile::PortableKernel),
+        )
+        .unwrap(),
+    );
+    Connection::open(&portable_path)
+        .unwrap()
+        .execute_batch(
+            "DROP TABLE memories_fts_projection_map;
+             DELETE FROM hard_state WHERE namespace='migrations' AND key='v47_fts_projection_keys';
+             PRAGMA user_version=44;",
+        )
+        .unwrap();
     let portable = Connection::open(&portable_path).unwrap();
-    let portable_before = schema_inventory(&portable);
     let portable_sentinels = query_rows(
         &portable,
         "SELECT * FROM hard_state WHERE namespace='migrations'",
@@ -155,7 +161,7 @@ fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_portable_44(
     drop(
         crate::MemoryStore::open_with_context(
             portable_path.to_str().unwrap(),
-            &crate::db::DbOpenContext::open_existing_deny()
+            &crate::db::DbOpenContext::open_existing_allow("test:v44-to-v47-portable")
                 .with_profile(StoreProfile::PortableKernel),
         )
         .unwrap(),
@@ -163,17 +169,23 @@ fn v44_to_current_preserves_local_rows_replay_keys_foreign_keys_and_portable_44(
     let portable = Connection::open(&portable_path).unwrap();
     assert_eq!(
         crate::db::migrations::read_schema_version(&portable).unwrap(),
-        44
+        47
     );
-    assert_eq!(schema_inventory(&portable), portable_before);
-    assert_eq!(
-        query_rows(
-            &portable,
-            "SELECT * FROM hard_state WHERE namespace='migrations'"
-        ),
-        portable_sentinels
+    let migrated_sentinels = query_rows(
+        &portable,
+        "SELECT * FROM hard_state WHERE namespace='migrations'",
     );
-    assert_eq!(crate::db::migrations::PORTABLE_EXPECTED_SCHEMA_VERSION, 44);
+    assert_eq!(migrated_sentinels.len(), portable_sentinels.len() + 1);
+    let v47_sentinel: i64 = portable
+        .query_row(
+            "SELECT COUNT(*) FROM hard_state
+             WHERE namespace='migrations' AND key='v47_fts_projection_keys'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(v47_sentinel, 1);
+    assert_eq!(crate::db::migrations::PORTABLE_EXPECTED_SCHEMA_VERSION, 47);
 }
 
 #[test]

@@ -44,6 +44,7 @@ catalogue! {
     44, "v44_typed_record_erasure", Portable, |conn, _context, _report| { crate::db::typed_records::migrate_v44(conn) };
     45, "v45_remote_job_mailbox", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v45_remote_mailbox(conn)?; } Ok(()) };
     46, "v46_remote_submissions", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v46_remote_submissions(conn)?; } Ok(()) };
+    47, "v47_fts_projection_keys", Portable, |conn, _context, _report| { projection_keys::migrate_v47_fts_projection_keys(conn) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {
@@ -220,7 +221,7 @@ mod tests {
         // catalogue, but cannot silently reclassify a shipped suffix.
         assert_eq!(BASELINE_SCHEMA_VERSION, 39);
         assert_eq!(PORTABLE_COMPAT_FLOOR, 39);
-        assert!(MIGRATIONS.len() >= 8);
+        assert!(MIGRATIONS.len() >= 9);
         assert_eq!(MIGRATIONS[0].index, 39);
         let expected_scopes = [
             (39, MigrationScope::Product),
@@ -231,6 +232,7 @@ mod tests {
             (44, MigrationScope::Portable),
             (45, MigrationScope::Product),
             (46, MigrationScope::Product),
+            (47, MigrationScope::Portable),
         ];
         for (migration, (expected_index, expected_scope)) in
             MIGRATIONS.iter().zip(expected_scopes.iter())
@@ -244,8 +246,8 @@ mod tests {
         }
         assert_eq!(portable_version(&MIGRATIONS[..1]), 39);
         assert_eq!(expected_version(&MIGRATIONS[..1]), 39);
-        assert_eq!(portable_version(MIGRATIONS), 44);
-        assert_eq!(expected_version(MIGRATIONS), 46);
+        assert_eq!(portable_version(MIGRATIONS), 47);
+        assert_eq!(expected_version(MIGRATIONS), 47);
         let keys: std::collections::BTreeSet<_> =
             MIGRATIONS.iter().map(|entry| entry.sentinel).collect();
         assert_eq!(keys.len(), MIGRATIONS.len(), "sentinels are unique");
