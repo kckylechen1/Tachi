@@ -254,8 +254,6 @@ impl super::super::LlmClient {
             Ok(output) => output,
             Err(_) => return Err("claude cli timeout after 5 minutes".to_string()),
         };
-        #[cfg(unix)]
-        group.disarm();
         let output = output?;
 
         if !output.status.success() {
@@ -271,6 +269,10 @@ impl super::super::LlmClient {
         if text.is_empty() {
             return Err("claude cli returned empty output".to_string());
         }
+        // The group stays armed until the CLI is known to have answered. One
+        // that exits early leaves helpers behind, and they go with the call.
+        #[cfg(unix)]
+        group.disarm();
         Ok(text)
     }
 }
