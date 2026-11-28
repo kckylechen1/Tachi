@@ -25,6 +25,8 @@ fn typed_staff_server_resolver_preserves_fixed_native_profile_semantics() {
     if !supported {
         eprintln!("native sandbox unavailable: this host exercises explicit Staff refusal, not successful native admission");
     }
+    let temp_home = tempfile::tempdir().unwrap();
+    let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
     let server = crate::staffing_ops::tests::test_server();
     for (name, worker) in [
         ("codex_sol_review", Some("codex")),
