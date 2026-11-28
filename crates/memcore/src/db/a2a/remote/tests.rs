@@ -1303,3 +1303,74 @@ fn gc_session_claims_prunes_released_remote_claims_without_fk_failure() {
         .unwrap();
     assert_eq!(preserved.run.unwrap().local_claim_id, remote_claim_id);
 }
+
+#[test]
+fn expired_supervised_run_retains_slot_until_supervisor_records_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    enable_extensions();
+    let conn = Connection::open(dir.path().join("supervised-slot.db")).unwrap();
+    let (binding, gateway, access) = setup(&conn);
+    let decision = RemoteAdmissionDecision::AdmitSupervised(RemoteLocalAdmissionSpec {
+        canonical_project: "e".repeat(64),
+        adapter_kind: RemoteAdapterKind::NativeReview,
+        policy_profile: "codex_sol_review".into(),
+        resource_slot: "supervised-slot".into(),
+        max_concurrent_runs: 1,
+        lease_ttl_secs: 600,
+        issue_ref: "owner/repo#review_revision".into(),
+        worktree_path: "/fixture/repo".into(),
+        writable: false,
+    });
+    let admit = |id| {
+        let RemoteTaskInsertOutcome::Created(task) = admit_remote_task(
+            &conn,
+            &binding,
+            &gateway,
+            &access,
+            &request(id, &binding),
+            &decision,
+        )
+        .unwrap() else {
+            panic!("expected a new task");
+        };
+        task
+    };
+    let task = admit("supervised-first");
+    let run = task.run.unwrap();
+    record_remote_task_started(&conn, &gateway, &task.envelope.envelope_id, None).unwrap();
+    conn.execute(
+        "UPDATE session_claims SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE claim_id=?1",
+        [&run.local_claim_id],
+    )
+    .unwrap();
+
+    let blocked = admit("supervised-blocked");
+    assert_eq!(
+        blocked.receipts[1].detail,
+        Some(RemoteReceiptDetail::Refusal {
+            reason: RemoteRejectionReason::ResourceExhausted
+        })
+    );
+    assert_eq!(
+        get_claim(&conn, &run.local_claim_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        ClaimState::Active
+    );
+
+    record_remote_task_terminal(
+        &conn,
+        &gateway,
+        &task.envelope.envelope_id,
+        RemoteTerminalOutcome::Failed,
+        None,
+        Some("execution_timeout"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        admit("supervised-next").envelope.current_state,
+        "remote_admitted"
+    );
+}

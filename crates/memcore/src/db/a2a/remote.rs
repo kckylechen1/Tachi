@@ -354,6 +354,8 @@ pub struct RemoteLocalAdmissionSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteAdmissionDecision {
     Admit(RemoteLocalAdmissionSpec),
+    /// The gateway supervisor owns terminal transitions, including lease expiry.
+    AdmitSupervised(RemoteLocalAdmissionSpec),
     Reject(RemoteRejectionReason),
 }
 
@@ -964,12 +966,15 @@ pub fn admit_remote_task(
                     *reason,
                 );
             }
-            RemoteAdmissionDecision::Admit(spec) => {
+            RemoteAdmissionDecision::Admit(spec)
+            | RemoteAdmissionDecision::AdmitSupervised(spec) => {
                 validate_admission_spec(&request.header, spec)?;
                 spec
             }
         };
-        reconcile_active_remote_runs(conn, gateway)?;
+        if matches!(decision, RemoteAdmissionDecision::Admit(_)) {
+            reconcile_active_remote_runs(conn, gateway)?;
+        }
         let active_in_slot: i64 = conn.query_row(
             "SELECT COUNT(*) FROM a2a_remote_runs
              WHERE resource_slot=?1 AND lifecycle_state IN ('admitted','started','cancel_requested')",

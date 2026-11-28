@@ -3,6 +3,7 @@ mod acp_native;
 pub(crate) use acp_native::approval::tests::run_native_permission_fixture;
 #[cfg(any(unix, windows))]
 pub(crate) use acp_native::approval::NativeAcpApprovals;
+pub(crate) use acp_native::{run_remote_native_review, RemoteNativeReviewOutcome};
 mod acpx;
 mod board;
 mod dispatch;
@@ -18,7 +19,7 @@ mod path_gate;
 mod predicate;
 mod prompt;
 pub(crate) mod signature_evidence;
-mod subprocess;
+pub(crate) mod subprocess;
 
 // Re-exports preserving the legacy public surface so external callers
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep

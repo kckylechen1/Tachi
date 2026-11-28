@@ -13,7 +13,9 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use serde_json::{json, Value};
 use std::error::Error;
+use std::fs::File;
 use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -157,9 +159,39 @@ fn init_logging() {
         .try_init();
 }
 
+pub(super) fn acquire_gateway_supervisor_lock(home: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(home.join("remote-gateway.lock"))?;
+        // SAFETY: lock owns the open descriptor throughout this call.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(lock)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "remote gateway locking is unavailable",
+        ))
+    }
+}
+
 pub(super) async fn serve(
     config: GatewayConfig,
     server: crate::MemoryServer,
+    _supervisor_lock: File,
 ) -> Result<(), Box<dyn Error>> {
     init_logging();
     let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
@@ -192,25 +224,44 @@ pub(super) async fn serve(
                 agent_identity_id: identity,
                 connection_id,
             };
+            super::executor::recover_orphaned_gateway_runs(&server, &config, &gateway_actor)?;
             server.with_global_store(|store| {
                 memcore::db::a2a::reconcile_active_remote_runs(store.connection(), &gateway_actor)
                     .map_err(|error| error.to_string())
             })?;
         }
     }
+    let execution_label = match config.execution_mode {
+        super::config::DestinationExecutionMode::Execute => "enabled",
+        super::config::DestinationExecutionMode::RefusalOnly
+        | super::config::DestinationExecutionMode::AdmitOnly => "unavailable",
+    };
     println!(
         "{}",
-        json!({"remote_gateway_listening":listener.local_addr()?.to_string(),"execution":"unavailable"})
+        json!({"remote_gateway_listening":listener.local_addr()?.to_string(),"execution":execution_label})
     );
     let config = Arc::new(config);
+    let run_registry = Arc::new(super::executor::RemoteRunRegistry::new());
     let slots = Arc::new(AdmissionSlots::new());
     let unauthenticated: UnauthenticatedEvents =
         Arc::new(std::sync::Mutex::new(EventBudget::new(Instant::now())));
     let mut backoff = Duration::ZERO;
     let mut connections = JoinSet::new();
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+            _ = async {
+                #[cfg(unix)]
+                {
+                    let _ = sigterm.recv().await;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<()>().await;
+                }
+            } => break,
             Some(_) = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
                 let (stream, peer) = match accepted {
@@ -248,6 +299,7 @@ pub(super) async fn serve(
                 let config = config.clone();
                 let base = server.clone();
                 let verifier = verifier.clone();
+                let run_registry = run_registry.clone();
                 let slots = slots.clone();
                 let unauthenticated = unauthenticated.clone();
                 connections.spawn(async move {
@@ -269,7 +321,7 @@ pub(super) async fn serve(
                             log_unauthenticated(&unauthenticated, "connection_slots_busy", peer, "");
                             return;
                         };
-                        match Connection::from_tls(&base, config.clone(), stream.get_ref().1, verifier.clone()).await {
+                        match Connection::from_tls(&base, config.clone(), stream.get_ref().1, verifier.clone(), run_registry).await {
                             Ok(connection) => (stream, established, Arc::new(connection)),
                             Err(rejection) => {
                                 log_unauthenticated(
@@ -309,6 +361,7 @@ pub(super) async fn serve(
     }
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    run_registry.shutdown().await;
     Ok(())
 }
 
@@ -336,6 +389,11 @@ fn health_snapshot(connection: &Connection) -> Response {
     let Some(admission) = connection.server.verified_work_claim_connection() else {
         return admission_unavailable();
     };
+    let execution_label = match connection.config.execution_mode {
+        super::config::DestinationExecutionMode::Execute => "enabled",
+        super::config::DestinationExecutionMode::RefusalOnly
+        | super::config::DestinationExecutionMode::AdmitOnly => "unavailable",
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -353,7 +411,7 @@ fn health_snapshot(connection: &Connection) -> Response {
                 "verification_method":admission.verification_method,
                 "verification_version":admission.verification_version,
             },
-            "execution":"unavailable"
+            "execution":execution_label
         })),
     )
         .into_response()
@@ -493,6 +551,21 @@ pub(super) async fn probe_with_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_home_has_at_most_one_supervisor() {
+        let home = tempfile::tempdir().unwrap();
+        let lock = acquire_gateway_supervisor_lock(home.path()).unwrap();
+        assert_eq!(
+            acquire_gateway_supervisor_lock(home.path())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        drop(lock);
+        assert!(acquire_gateway_supervisor_lock(home.path()).is_ok());
+    }
 
     #[test]
     fn a_peer_that_closes_before_accept_does_not_pause_the_listener() {
