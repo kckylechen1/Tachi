@@ -1506,8 +1506,10 @@ fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
     );
 
     // Checked before anything is loaded: a resolution that is not the
-    // fixture's must not get as far as loading its files. The resolver works
-    // from the canonical cwd, so the expected path is canonicalized too.
+    // fixture's must not get as far as loading its files. Both sides are
+    // canonicalized: the resolver joins the cwd without canonicalizing it,
+    // and on Windows `canonicalize` spells a path with a `\\?\` prefix, which
+    // does not compare equal to the plain spelling.
     let canonical_app_home = std::fs::canonicalize(&app_home).expect("the fixture's app home");
     fixture.load_with_resolved_app_home(|resolved, source| {
         assert_eq!(
@@ -1515,6 +1517,7 @@ fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
             crate::path_utils::TachiHomeSource::WorkspaceData,
             "the fixture must be resolved the way a checkout-found app home is"
         );
+        let resolved = std::fs::canonicalize(resolved).expect("the resolved app home exists");
         assert_eq!(
             resolved, canonical_app_home,
             "the resolved app home must be the fixture's"
