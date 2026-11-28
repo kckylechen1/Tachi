@@ -1378,6 +1378,24 @@ impl HostProfileEnvFixture {
         load_env_files(
             self.home.path(),
             self.app_home.path(),
+            false,
+            true,
+            Some(self.repo.path()),
+        );
+    }
+
+    /// Resolves the app home the way startup does, lets the caller check it,
+    /// and only then loads with it, flagged the way startup flags it.
+    fn load_with_resolved_app_home(
+        &self,
+        check: impl FnOnce(&std::path::Path, crate::path_utils::TachiHomeSource),
+    ) {
+        let resolution = crate::path_utils::resolve_tachi_home();
+        check(&resolution.path, resolution.source);
+        load_env_files(
+            self.home.path(),
+            &resolution.path,
+            resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
             true,
             Some(self.repo.path()),
         );
@@ -1396,6 +1414,130 @@ impl Drop for HostProfileEnvFixture {
             None => std::env::remove_var("TACHI_TEST_HOST_PROFILE_FIXTURE"),
         }
     }
+}
+
+/// Restores one process variable when it goes out of scope.
+struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+
+impl Drop for RestoreEnv {
+    fn drop(&mut self) {
+        match self.1.as_ref() {
+            Some(value) => std::env::set_var(self.0, value),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// A project-local file may set ordinary Tachi settings. It does not speak
+/// for the operator's Vault: `TACHI_VAULT_CHILD_ENV=all` from a checkout
+/// would hand every dispatch the project's undeclared secrets.
+#[test]
+fn project_local_env_does_not_set_vault_authority() {
+    let fixture = HostProfileEnvFixture::new();
+    // A known starting point: an operator who already set the mode must not
+    // make the refusal look satisfied.
+    let _restore_mode = RestoreEnv(
+        "TACHI_VAULT_CHILD_ENV",
+        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
+    );
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+    let _restore_probe = RestoreEnv(
+        "TACHI_VAULT_PROBE_FIXTURE",
+        std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
+    );
+    std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
+    fixture.write_env(
+        fixture.repo.path().join(".tachi/config.env"),
+        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=repo\n",
+    );
+
+    fixture.load();
+
+    assert!(
+        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
+        "a project-local file must not choose what the Vault exports to dispatches"
+    );
+    // Only the export mode is refused. Other settings still load.
+    assert_eq!(
+        std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
+        Ok("repo")
+    );
+}
+
+/// An app home that `resolve_tachi_home` finds inside a checkout is content a
+/// repository can hold too. Its env files take the same refusal, and keep
+/// loading the way a whole-file load does, byte order mark included.
+#[test]
+fn a_checkout_discovered_app_home_does_not_set_vault_authority() {
+    let fixture = HostProfileEnvFixture::new();
+    // Every name the resolver honors. With one of them left set, the test
+    // would load the operator's real app home before it failed.
+    let _restore_tachi_home = RestoreEnv("TACHI_HOME", std::env::var_os("TACHI_HOME"));
+    let _restore_sigil_home = RestoreEnv("SIGIL_HOME", std::env::var_os("SIGIL_HOME"));
+    let _restore_app_home = RestoreEnv("TACHI_APP_HOME", std::env::var_os("TACHI_APP_HOME"));
+    for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
+        std::env::remove_var(key);
+    }
+    let _restore_mode = RestoreEnv(
+        "TACHI_VAULT_CHILD_ENV",
+        std::env::var_os("TACHI_VAULT_CHILD_ENV"),
+    );
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+    let _restore_probe = RestoreEnv(
+        "TACHI_VAULT_PROBE_FIXTURE",
+        std::env::var_os("TACHI_VAULT_PROBE_FIXTURE"),
+    );
+    std::env::remove_var("TACHI_VAULT_PROBE_FIXTURE");
+    // The layout `resolve_tachi_home` looks for above the cwd.
+    let app_home = fixture.repo.path().join("data").join("tachi");
+    fixture.write_env(
+        app_home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        "",
+    );
+    fixture.write_env(
+        app_home.join("secrets.env"),
+        "TACHI_VAULT_CHILD_ENV=all\nTACHI_VAULT_PROBE_FIXTURE=secrets\n",
+    );
+    fixture.write_env(
+        app_home.join("config.env"),
+        "\u{feff}TACHI_HOST_PROFILE=home_data\n\
+         TACHI_VAULT_CHILD_ENV=all\n\
+         TACHI_VAULT_PROBE_FIXTURE=app_home\n",
+    );
+
+    // Checked before anything is loaded: a resolution that is not the
+    // fixture's must not get as far as loading its files. Both sides are
+    // canonicalized: the resolver joins the cwd without canonicalizing it,
+    // and on Windows `canonicalize` spells a path with a `\\?\` prefix, which
+    // does not compare equal to the plain spelling.
+    let canonical_app_home = std::fs::canonicalize(&app_home).expect("the fixture's app home");
+    fixture.load_with_resolved_app_home(|resolved, source| {
+        assert_eq!(
+            source,
+            crate::path_utils::TachiHomeSource::WorkspaceData,
+            "the fixture must be resolved the way a checkout-found app home is"
+        );
+        let resolved = std::fs::canonicalize(resolved).expect("the resolved app home exists");
+        assert_eq!(
+            resolved, canonical_app_home,
+            "the resolved app home must be the fixture's"
+        );
+    });
+
+    assert!(
+        std::env::var_os("TACHI_VAULT_CHILD_ENV").is_none(),
+        "an app home found in a checkout must not choose what the Vault exports"
+    );
+    // Both files still load; `config.env` still overrides `secrets.env`.
+    assert_eq!(
+        std::env::var("TACHI_VAULT_PROBE_FIXTURE").as_deref(),
+        Ok("app_home")
+    );
+    // The mark on the first line disappears, as it does for a whole-file load.
+    assert_eq!(
+        std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+        Ok("home_data")
+    );
 }
 
 #[test]

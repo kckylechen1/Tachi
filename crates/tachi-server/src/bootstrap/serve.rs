@@ -97,6 +97,10 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
     Ok(runtime)
 }
 
+/// Loads an env file that lives in a checkout: the project-local files, and
+/// the files of an app home found inside one. Such a file may set ordinary
+/// Tachi settings, but neither what the daemon executes nor what the Vault
+/// hands to a dispatch.
 fn load_project_env_file(path: &Path, override_existing: bool) {
     // Directories (e.g. `.env/`) can be opened read-only on Unix and repeatedly
     // yield EISDIR from dotenvy's iterator; require a regular file and abort on
@@ -104,10 +108,15 @@ fn load_project_env_file(path: &Path, override_existing: bool) {
     if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
         return;
     }
-    let Ok(iter) = dotenvy::from_path_iter(path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return;
     };
-    for item in iter {
+    let mut reader = std::io::BufReader::new(file);
+    // dotenvy removes a leading byte order mark only when it loads a whole
+    // file. Read line by line, that line is a parse error and the rest of the
+    // file is lost after it.
+    remove_leading_bom(&mut reader);
+    for item in dotenvy::Iter::new(reader) {
         let Ok((key, value)) = item else {
             break;
         };
@@ -118,15 +127,36 @@ fn load_project_env_file(path: &Path, override_existing: bool) {
             );
             continue;
         }
+        // A checkout does not choose what the Vault hands to a dispatch.
+        if key.eq_ignore_ascii_case("TACHI_VAULT_CHILD_ENV") {
+            tracing::warn!(
+                "[startup] ignored Vault export-mode variable '{key}' from {}",
+                path.display()
+            );
+            continue;
+        }
         if override_existing || std::env::var_os(&key).is_none() {
             std::env::set_var(&key, &value);
         }
     }
 }
 
+/// The first step of dotenvy's whole-file load.
+fn remove_leading_bom(reader: &mut impl std::io::BufRead) {
+    const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+    if reader
+        .fill_buf()
+        .map(|buffer| buffer.starts_with(&BOM))
+        .unwrap_or(false)
+    {
+        reader.consume(3);
+    }
+}
+
 fn load_env_files(
     home: &Path,
     app_home: &Path,
+    app_home_in_checkout: bool,
     load_project_local_env: bool,
     git_root: Option<&Path>,
 ) {
@@ -134,9 +164,20 @@ fn load_env_files(
     // Load provider configuration for explicit daemon and CLI startup.
     // `from_path` (not override): already-set process env — Cursor inject,
     // shell export, prior dotenv — wins over the file.
-    let _ = dotenvy::from_path(app_home.join("secrets.env"));
+    //
+    // An app home found inside a checkout is content a repository can hold.
+    // Its files get the same refusals as the project-local ones below.
+    if app_home_in_checkout {
+        load_project_env_file(&app_home.join("secrets.env"), false);
+    } else {
+        let _ = dotenvy::from_path(app_home.join("secrets.env"));
+    }
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
-    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    if app_home_in_checkout {
+        load_project_env_file(&app_home.join("config.env"), true);
+    } else {
+        let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    }
     let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
 
@@ -593,6 +634,7 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     load_env_files(
         &home,
         &app_home,
+        app_home_resolution.source == crate::path_utils::TachiHomeSource::WorkspaceData,
         load_project_local_env,
         git_root.as_deref(),
     );

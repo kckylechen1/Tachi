@@ -28,10 +28,12 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "COMSPEC",
     "NODE_OPTIONS",
     "NODE_PATH",
+    "NPM_CONFIG_SCRIPT_SHELL",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PYTHONHOME",
     "PYTHONWARNINGS",
+    "PERL5DB",
     "PERL5OPT",
     "PERL5LIB",
     "RUBYOPT",
@@ -45,13 +47,17 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
     "RUSTC",
+    "RUSTDOC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTDOC",
     "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     "CARGO_HOME",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
@@ -63,12 +69,22 @@ const EXECUTION_ENVIRONMENT_NAMES: &[&str] = &[
 const EXECUTION_ENVIRONMENT_NAME_PREFIXES: &[&str] =
     &["LD_", "DYLD_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
+/// `CARGO_TARGET_<TRIPLE>_RUNNER` and `_LINKER` choose the programs a build
+/// runs for that target. The prefix on its own is the ordinary target
+/// directory and stays allowed.
+const TARGET_SELECTOR_PREFIX: &str = "CARGO_TARGET_";
+const TARGET_SELECTOR_SUFFIXES: &[&str] = &["_RUNNER", "_LINKER"];
+
 pub fn is_execution_environment_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     EXECUTION_ENVIRONMENT_NAMES.contains(&upper.as_str())
         || EXECUTION_ENVIRONMENT_NAME_PREFIXES
             .iter()
             .any(|prefix| upper.starts_with(prefix))
+        || (upper.starts_with(TARGET_SELECTOR_PREFIX)
+            && TARGET_SELECTOR_SUFFIXES
+                .iter()
+                .any(|suffix| upper.ends_with(suffix)))
 }
 
 pub fn is_shell_env_name(name: &str) -> bool {
@@ -100,5 +116,34 @@ mod tests {
             assert!(is_execution_environment_name(name), "{name}");
         }
         assert!(!is_execution_environment_name("OPENAI_API_KEY"));
+    }
+
+    // Names that make a toolchain run a program the binding chose. Ordinary
+    // toolchain settings are not selectors and stay allowed.
+    #[test]
+    fn execution_environment_names_cover_tool_selectors_only() {
+        for name in [
+            "RUSTDOC",
+            "rustdoc",
+            "CARGO_BUILD_RUSTDOC",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            "NPM_CONFIG_SCRIPT_SHELL",
+            "npm_config_script_shell",
+            "GIT_CONFIG_PARAMETERS",
+            "PERL5DB",
+        ] {
+            assert!(is_execution_environment_name(name), "{name}");
+        }
+        for name in [
+            "NPM_CONFIG_REGISTRY",
+            "NPM_CONFIG_CACHE",
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_JOBS",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            assert!(!is_execution_environment_name(name), "{name}");
+        }
     }
 }
