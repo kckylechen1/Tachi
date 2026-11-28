@@ -41,6 +41,9 @@ pub enum RemoteA2aAction {
         config: PathBuf,
         #[arg(long)]
         submission: String,
+        /// Query the enrolled destination over mTLS `GetTask` and reconcile monotonically.
+        #[arg(long)]
+        reconcile: bool,
     },
     /// Serve mutual-TLS admission only; this does not expose MCP or start jobs.
     Serve {

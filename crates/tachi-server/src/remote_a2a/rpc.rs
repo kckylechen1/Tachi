@@ -1,20 +1,24 @@
-//! Authenticated inbound tasks and truthful refusal receipts. Execution is
-//! unavailable until a destination claim/resource/lifecycle adapter is admitted.
+//! Authenticated inbound tasks, destination-local admission, and truthful
+//! lifecycle receipts. Worker launch remains disabled in this slice (`RefusalOnly`
+//! / `AdmitOnly`).
 
 use super::admission::Connection;
-use super::profile::{self, DELEGATION, PROVENANCE};
+use super::config::DestinationExecutionMode;
+use super::profile::{self, JobKind, DELEGATION, PROVENANCE};
 use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use memcore::db::a2a::{
-    insert_remote_rejection, is_retained_task_quota_exceeded, list_remote_tasks, read_remote_task,
-    NewRemoteTask, RemoteJobGrant, RemoteTask, RemoteTaskAccess, RemoteTaskHeader,
-    RemoteTaskInsertOutcome,
+    admit_remote_task, is_retained_task_quota_exceeded, list_remote_tasks, read_remote_task,
+    record_remote_task_cancel_requested, NewRemoteTask, RemoteAdapterKind, RemoteAdmissionDecision,
+    RemoteJobGrant, RemoteLocalAdmissionSpec, RemoteRejectionReason, RemoteTask, RemoteTaskAccess,
+    RemoteTaskHeader, RemoteTaskInsertOutcome,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -267,6 +271,137 @@ fn access(connection: &Connection) -> RemoteTaskAccess {
     }
 }
 
+fn pinned_git_command(dest: &super::config::DestinationPolicy) -> Option<std::process::Command> {
+    let (canonical_root, canonical_git_dir) =
+        super::config::resolve_pinned_git_dir(&dest.repo_root).ok()?;
+    if canonical_root != dest.canonical_repo_root || canonical_git_dir != dest.canonical_git_dir {
+        return None;
+    }
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("--git-dir")
+        .arg(&canonical_git_dir)
+        .arg("--work-tree")
+        .arg(&canonical_root);
+    if let Some(parent) = canonical_root.parent() {
+        cmd.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+    cmd.stdin(Stdio::null());
+    Some(cmd)
+}
+
+fn verify_exact_git_commit(dest: &super::config::DestinationPolicy, head_sha: &str) -> bool {
+    let Some(mut cmd) = pinned_git_command(dest) else {
+        return false;
+    };
+    let target = format!("{head_sha}^{{commit}}");
+    let output = cmd
+        .args(["rev-parse", "--verify", "--quiet", &target])
+        .output();
+    matches!(
+        output,
+        Ok(out) if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == head_sha
+    )
+}
+
+fn verify_trusted_pr_head(
+    dest: &super::config::DestinationPolicy,
+    pull_request: u32,
+    head_sha: &str,
+) -> bool {
+    let local_ref = format!("refs/pull/{pull_request}/head");
+    let remote_ref = format!("refs/remotes/origin/pull/{pull_request}/head");
+    let Some(mut cmd) = pinned_git_command(dest) else {
+        return false;
+    };
+    let Ok(out) = cmd
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &local_ref,
+            &remote_ref,
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut found = false;
+    for line in stdout.lines() {
+        let Some((refname, oid)) = line.split_once(' ') else {
+            return false;
+        };
+        if refname == local_ref || refname == remote_ref {
+            if oid.trim() != head_sha {
+                return false;
+            }
+            found = true;
+        }
+    }
+    found
+}
+
+fn admission_decision(
+    connection: &Connection,
+    job: &profile::RemoteJob,
+) -> RemoteAdmissionDecision {
+    match connection.config.execution_mode {
+        DestinationExecutionMode::RefusalOnly => {
+            RemoteAdmissionDecision::Reject(RemoteRejectionReason::ExecutionUnavailable)
+        }
+        DestinationExecutionMode::AdmitOnly => {
+            let Some(dest) = connection
+                .config
+                .destinations
+                .iter()
+                .find(|d| d.repository == job.repository && d.allowed_jobs.contains(&job.job))
+            else {
+                return RemoteAdmissionDecision::Reject(RemoteRejectionReason::PolicyDenied);
+            };
+            if !verify_exact_git_commit(dest, &job.head_sha) {
+                return RemoteAdmissionDecision::Reject(RemoteRejectionReason::HeadNotFound);
+            }
+            if job.job == JobKind::VerifyPr {
+                let Some(pr) = job.pull_request else {
+                    return RemoteAdmissionDecision::Reject(RemoteRejectionReason::PolicyDenied);
+                };
+                if !verify_trusted_pr_head(dest, pr, &job.head_sha) {
+                    return RemoteAdmissionDecision::Reject(RemoteRejectionReason::HeadNotFound);
+                }
+            }
+            let (adapter_kind, policy_profile, issue_ref) = match job.job {
+                JobKind::ReviewRevision => (
+                    RemoteAdapterKind::NativeReview,
+                    dest.review_profile.clone().unwrap_or_default(),
+                    format!("remote:{}:review_revision", job.repository),
+                ),
+                JobKind::VerifyPr => (
+                    RemoteAdapterKind::Dgx2VerifyPr,
+                    dest.verify_policy.clone().unwrap_or_default(),
+                    format!(
+                        "remote:{}:pr:{}",
+                        job.repository,
+                        job.pull_request.unwrap_or(0)
+                    ),
+                ),
+            };
+            RemoteAdmissionDecision::Admit(RemoteLocalAdmissionSpec {
+                canonical_project: dest.canonical_project.clone(),
+                adapter_kind,
+                policy_profile,
+                resource_slot: dest.resource_slot.clone(),
+                max_concurrent_runs: dest.max_concurrent_runs,
+                lease_ttl_secs: dest.lease_ttl_secs,
+                issue_ref,
+                worktree_path: dest.repo_root.to_string_lossy().into_owned(),
+                writable: false,
+            })
+        }
+    }
+}
+
 fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Value, RpcError> {
     let binding = binding(connection)?;
     let access = access(connection);
@@ -292,6 +427,7 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
             {
                 return Err(INVALID);
             }
+            let decision = admission_decision(connection, job);
             let request = NewRemoteTask {
                 envelope_id: format!("remote-task-{}", uuid::Uuid::new_v4()),
                 canonical_body: job.canonical_body().map_err(|_| INVALID)?,
@@ -304,18 +440,20 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                     repository: job.repository.clone(),
                     job: job.job.as_str().to_string(),
                     head_sha: job.head_sha.clone(),
+                    pull_request: job.pull_request.map(i64::from),
                     origin_claim_id: job.origin_claim.claim_id.clone(),
                     origin_claim_version: job.origin_claim.transition_version as i64,
                     destination_host_id: connection.config.host_id.clone(),
                 },
             };
             let outcome = storage(connection.server.with_global_store(|store| {
-                Ok(insert_remote_rejection(
+                Ok(admit_remote_task(
                     store.connection(),
                     &binding,
                     &connection.gateway_actor,
                     &access,
                     &request,
+                    &decision,
                 ))
             }))?;
             let task = match outcome {
@@ -331,12 +469,33 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                 return Err(INVALID);
             }
             let task = storage(connection.server.with_global_store(|store| {
-                Ok(read_remote_task(
-                    store.connection(),
-                    &binding,
-                    &access,
-                    &request.id,
-                ))
+                let task =
+                    match read_remote_task(store.connection(), &binding, &access, &request.id) {
+                        Ok(Some(task)) => task,
+                        other => return Ok(other),
+                    };
+                if matches!(
+                    task.envelope.current_state.as_str(),
+                    "remote_admitted" | "remote_started" | "remote_cancel_requested"
+                ) {
+                    match memcore::db::a2a::reconcile_remote_run_if_expired(
+                        store.connection(),
+                        &connection.gateway_actor,
+                        &request.id,
+                    ) {
+                        Ok(true) => {
+                            return Ok(read_remote_task(
+                                store.connection(),
+                                &binding,
+                                &access,
+                                &request.id,
+                            ));
+                        }
+                        Ok(false) => {}
+                        Err(err) => return Ok(Err(err)),
+                    }
+                }
+                Ok(Ok(Some(task)))
             }))?
             .ok_or(NOT_FOUND)?;
             task_value(&task)
@@ -372,13 +531,38 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                 "nextPageToken":page.next_cursor.unwrap_or_default()}),
             )
         }
-        "CancelTask" | "SubscribeToTask" => {
+        "CancelTask" => {
             let request: profile::TaskId = typed(params)?;
             if !profile::opaque_token(&request.id, 128) {
                 return Err(INVALID);
             }
-            // Resolve authorization first, even when this terminal-only slice
-            // cannot cancel or stream. Knowing another peer's ID reveals nothing.
+            let result = connection
+                .server
+                .with_global_store(|store| {
+                    Ok(record_remote_task_cancel_requested(
+                        store.connection(),
+                        &binding,
+                        &connection.gateway_actor,
+                        &access,
+                        &request.id,
+                    ))
+                })
+                .map_err(|_| INTERNAL)?;
+            match result {
+                Ok(Some(task)) => task_value(&task),
+                Ok(None) => Err(NOT_FOUND),
+                Err(memcore::MemoryError::InvalidArg(_)) => Err(RpcError {
+                    code: -32002,
+                    message: "Task is not cancelable",
+                }),
+                Err(_) => Err(INTERNAL),
+            }
+        }
+        "SubscribeToTask" => {
+            let request: profile::TaskId = typed(params)?;
+            if !profile::opaque_token(&request.id, 128) {
+                return Err(INVALID);
+            }
             storage(connection.server.with_global_store(|store| {
                 Ok(read_remote_task(
                     store.connection(),
@@ -388,16 +572,9 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
                 ))
             }))?
             .ok_or(NOT_FOUND)?;
-            Err(if method == "CancelTask" {
-                RpcError {
-                    code: -32002,
-                    message: "Task is not cancelable",
-                }
-            } else {
-                RpcError {
-                    code: -32004,
-                    message: "Streaming is unavailable for this terminal task",
-                }
+            Err(RpcError {
+                code: -32004,
+                message: "Streaming is unavailable for this task",
             })
         }
         _ => Err(RpcError {
@@ -409,28 +586,73 @@ fn dispatch(connection: &Connection, method: &str, params: Value) -> Result<Valu
 
 fn task_value(task: &RemoteTask) -> Result<Value, RpcError> {
     let envelope = &task.envelope;
-    let terminal = task
+    let status_state = match envelope.current_state.as_str() {
+        "remote_rejected" => "TASK_STATE_REJECTED",
+        "remote_admitted" => "TASK_STATE_SUBMITTED",
+        "remote_started" => "TASK_STATE_WORKING",
+        "remote_cancel_requested" => {
+            if task
+                .receipts
+                .iter()
+                .any(|entry| entry.receipt.state == "remote_started")
+            {
+                "TASK_STATE_WORKING"
+            } else {
+                "TASK_STATE_SUBMITTED"
+            }
+        }
+        "remote_completed" => "TASK_STATE_COMPLETED",
+        "remote_failed" => "TASK_STATE_FAILED",
+        "remote_canceled" => "TASK_STATE_CANCELED",
+        _ => return Err(INTERNAL),
+    };
+    let status_receipt = task
         .receipts
         .iter()
-        .find(|entry| {
-            entry.receipt.state == "remote_rejected"
-                && entry.receipt.envelope_version == envelope.state_version
-                && entry.detail.is_some()
-        })
+        .find(|entry| entry.receipt.state == envelope.current_state && entry.detail.is_some())
         .ok_or(INTERNAL)?;
-    if envelope.current_state != "remote_rejected" {
-        return Err(INTERNAL);
-    }
-    let receipts: Vec<_> = task.receipts.iter().map(|entry| {
-        let receipt = &entry.receipt;
-        json!({"receipt_id":receipt.receipt_id,"revision":receipt.envelope_version,
-            "fact":if receipt.state == "remote_received" {"received"} else {"authorization_refused"},
-            "occurred_at":receipt.occurred_at,"actor":receipt.actor_agent_identity_id,
-            "admission_ref":receipt.actor_admission_id,"detail":entry.detail})
-    }).collect();
+    let (local_claim, local_run_id) = if envelope.current_state == "remote_rejected" {
+        (Value::Null, Value::Null)
+    } else {
+        let Some(run) = task.run.as_ref() else {
+            return Err(INTERNAL);
+        };
+        (
+            json!({"claim_id":run.local_claim_id,"transition_version":run.local_claim_version}),
+            Value::String(run.local_run_id.clone()),
+        )
+    };
+    let receipts = task
+        .receipts
+        .iter()
+        .map(|entry| {
+            let receipt = &entry.receipt;
+            let fact = match receipt.state.as_str() {
+                "remote_received" => "received",
+                "remote_rejected" => "authorization_refused",
+                "remote_admitted" => "admitted",
+                "remote_started" => "started",
+                "remote_cancel_requested" => "cancel_requested",
+                "remote_completed" => "completed",
+                "remote_failed" => "failed",
+                "remote_canceled" => "canceled",
+                "remote_cleanup" => "cleanup",
+                _ => return Err(INTERNAL),
+            };
+            Ok(json!({
+                "receipt_id":receipt.receipt_id,
+                "revision":receipt.envelope_version,
+                "fact":fact,
+                "occurred_at":receipt.occurred_at,
+                "actor":receipt.actor_agent_identity_id,
+                "admission_ref":receipt.actor_admission_id,
+                "detail":entry.detail
+            }))
+        })
+        .collect::<Result<Vec<_>, RpcError>>()?;
     Ok(json!({
         "id":envelope.envelope_id, "contextId":format!("context:{}",envelope.envelope_id),
-        "status":{"state":"TASK_STATE_REJECTED","timestamp":terminal.receipt.occurred_at},
+        "status":{"state":status_state,"timestamp":status_receipt.receipt.occurred_at},
         "metadata":{(PROVENANCE):{
             "schema_version":"tachi.remote_receipt.v1", "task_id":envelope.envelope_id,
             "input_digest":envelope.body_digest,"origin":envelope.issuer_agent_identity_id,
@@ -439,7 +661,7 @@ fn task_value(task: &RemoteTask) -> Result<Value, RpcError> {
             "trust_domain":envelope.issuer_trust_domain,"repository":task.header.repository,
             "head_sha":task.header.head_sha,"job":task.header.job,
             "origin_claim":{"claim_id":task.header.origin_claim_id,"transition_version":task.header.origin_claim_version},
-            "local_claim":null,"local_run_id":null,"revision":envelope.state_version,"receipts":receipts
+            "local_claim":local_claim,"local_run_id":local_run_id,"revision":envelope.state_version,"receipts":receipts
         }}
     }))
 }
@@ -460,20 +682,35 @@ pub(super) async fn agent_card(State(connection): State<Arc<Connection>>) -> Res
             json!({"error":"remote profile unavailable"}),
         );
     };
+    let (card_desc, provenance_desc, skill_name, skill_desc) =
+        match connection.config.execution_mode {
+            DestinationExecutionMode::RefusalOnly => (
+                "Authenticated task receipts; execution is unavailable.",
+                "Authenticated host refusal receipts",
+                "Record remote task refusal",
+                "Validate a bounded review or verification request and retain its refusal for reconciliation. No worker is started.",
+            ),
+            DestinationExecutionMode::AdmitOnly => (
+                "Authenticated task admission and run-correlation receipts; worker launch is disabled.",
+                "Authenticated host admission and lifecycle receipts",
+                "Admit bounded remote task",
+                "Validate a bounded review or verification request, verify commit and local claim/slot admission, and retain correlation receipts without launching a worker.",
+            ),
+        };
     response(
         StatusCode::OK,
         json!({
-            "name":"Tachi remote task admission", "description":"Authenticated task receipts; execution is unavailable.",
+            "name":"Tachi remote task admission", "description":card_desc,
             "version":"1.0", "supportedInterfaces":[{"url":url.as_str(),"protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
             "capabilities":{"streaming":false,"pushNotifications":false,"extensions":[
                 {"uri":DELEGATION,"required":true,"description":"Closed, repository-granted remote jobs"},
-                {"uri":PROVENANCE,"required":true,"description":"Authenticated host refusal receipts"}
+                {"uri":PROVENANCE,"required":true,"description":provenance_desc}
             ]},
             "defaultInputModes":["application/json"],"defaultOutputModes":["application/json"],
             "securitySchemes":{"owner_mtls":{"mtlsSecurityScheme":{}}},
             "securityRequirements":[{"schemes":{"owner_mtls":{"list":[]}}}],
-            "skills":[{"id":"remote_job_admission","name":"Record remote task refusal",
-                "description":"Validate a bounded review or verification request and retain its refusal for reconciliation. No worker is started.",
+            "skills":[{"id":"remote_job_admission","name":skill_name,
+                "description":skill_desc,
                 "tags":["review","verification"]}]
         }),
     )

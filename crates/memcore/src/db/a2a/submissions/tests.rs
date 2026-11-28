@@ -423,3 +423,202 @@ fn stored_window_and_attempt_deadline_use_the_canonical_utc_spelling() {
     );
     assert_eq!(stored_until.len(), 24, "{stored_until}");
 }
+
+#[test]
+fn reconcile_remote_submission_advances_monotonically_without_resending_or_flipping_terminal() {
+    let store = MemoryStore::open_in_memory().unwrap();
+    let conn = store.connection();
+    let (actor, binding, body) = fixture(&store);
+    let prepared = prepare_remote_submission(conn, &actor, &binding, &body).unwrap();
+    let attempt = reserve_remote_submission(
+        conn,
+        &actor,
+        &binding,
+        "owner:domain",
+        &prepared.submission_id,
+    )
+    .unwrap()
+    .unwrap();
+    let mk_receipt = |rev: i64, status_state: &str, run_id: &str, receipts: Vec<Value>| {
+        json!({
+            "id": "remote-task-1",
+            "status": {"state": status_state},
+            "metadata": {"urn:tachi:a2a:ext:provenance-receipt:v1": {
+                "schema_version": "tachi.remote_receipt.v1",
+                "task_id": "remote-task-1",
+                "input_digest": "a".repeat(64),
+                "origin": actor.agent_identity_id,
+                "origin_admission_ref": "origin-adm-1",
+                "destination": binding.destination,
+                "destination_host_id": binding.destination_host_id,
+                "trust_domain": "owner:domain",
+                "repository": binding.repository,
+                "head_sha": binding.head_sha,
+                "job": binding.job,
+                "origin_claim": {"claim_id": binding.origin_claim_id, "transition_version": binding.origin_claim_version},
+                "local_claim": {"claim_id": "rclaim-1", "transition_version": 0},
+                "local_run_id": run_id,
+                "revision": rev,
+                "receipts": receipts
+            }}
+        })
+    };
+    let r1 = json!({"receipt_id": "rec-1", "revision": 1, "fact": "received"});
+    let r2 = json!({"receipt_id": "rec-2", "revision": 2, "fact": "admitted"});
+    let r3 = json!({"receipt_id": "rec-3", "revision": 3, "fact": "started"});
+    let r4 = json!({"receipt_id": "rec-4", "revision": 4, "fact": "completed"});
+    let r5 = json!({"receipt_id": "rec-5", "revision": 5, "fact": "cleanup"});
+
+    let submitted_receipt = mk_receipt(
+        2,
+        "TASK_STATE_SUBMITTED",
+        "rrun-1",
+        vec![r1.clone(), r2.clone()],
+    );
+    let submitted = finish_remote_submission(
+        conn,
+        &actor,
+        &attempt,
+        &RemoteSubmissionResult::Accepted {
+            state: "submitted",
+            task_id: "remote-task-1".into(),
+            receipt: submitted_receipt.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(submitted.current_state, "submitted");
+    assert!(!submitted.retry_allowed);
+    assert!(reserve_remote_submission(
+        conn,
+        &actor,
+        &binding,
+        "owner:domain",
+        &prepared.submission_id
+    )
+    .unwrap()
+    .is_none());
+
+    let working_receipt = mk_receipt(
+        3,
+        "TASK_STATE_WORKING",
+        "rrun-1",
+        vec![r1.clone(), r2.clone(), r3.clone()],
+    );
+    let working = reconcile_remote_submission(
+        conn,
+        &actor,
+        &prepared.submission_id,
+        "working",
+        "remote-task-1",
+        &working_receipt,
+    )
+    .unwrap();
+    assert_eq!(working.current_state, "working");
+
+    // Regression to older revision or state is rejected.
+    assert!(reconcile_remote_submission(
+        conn,
+        &actor,
+        &prepared.submission_id,
+        "submitted",
+        "remote-task-1",
+        &submitted_receipt,
+    )
+    .is_err());
+
+    let completed_receipt = mk_receipt(
+        4,
+        "TASK_STATE_COMPLETED",
+        "rrun-1",
+        vec![r1.clone(), r2.clone(), r3.clone(), r4.clone()],
+    );
+    let completed = reconcile_remote_submission(
+        conn,
+        &actor,
+        &prepared.submission_id,
+        "completed",
+        "remote-task-1",
+        &completed_receipt,
+    )
+    .unwrap();
+    assert_eq!(completed.current_state, "completed");
+
+    // Flipping terminal state, swapping local_run_id, rewriting prior receipt, or dropping receipts must fail.
+    for forged in [
+        (
+            "failed",
+            mk_receipt(
+                5,
+                "TASK_STATE_FAILED",
+                "rrun-1",
+                vec![
+                    r1.clone(),
+                    r2.clone(),
+                    r3.clone(),
+                    json!({"receipt_id":"rec-4","revision":4,"fact":"failed"}),
+                ],
+            ),
+        ),
+        (
+            "completed",
+            mk_receipt(
+                5,
+                "TASK_STATE_COMPLETED",
+                "rrun-swapped",
+                vec![r1.clone(), r2.clone(), r3.clone(), r4.clone(), r5.clone()],
+            ),
+        ),
+        (
+            "completed",
+            mk_receipt(
+                5,
+                "TASK_STATE_COMPLETED",
+                "rrun-1",
+                vec![
+                    r1.clone(),
+                    r2.clone(),
+                    r3.clone(),
+                    json!({"receipt_id":"rec-4-rewritten","revision":4,"fact":"completed"}),
+                    r5.clone(),
+                ],
+            ),
+        ),
+        (
+            "completed",
+            mk_receipt(
+                5,
+                "TASK_STATE_COMPLETED",
+                "rrun-1",
+                vec![r1.clone(), r2.clone(), r3.clone()],
+            ),
+        ),
+    ] {
+        assert!(reconcile_remote_submission(
+            conn,
+            &actor,
+            &prepared.submission_id,
+            forged.0,
+            "remote-task-1",
+            &forged.1,
+        )
+        .is_err());
+    }
+
+    let cleaned_receipt = mk_receipt(
+        5,
+        "TASK_STATE_COMPLETED",
+        "rrun-1",
+        vec![r1, r2, r3, r4, r5],
+    );
+    let cleaned = reconcile_remote_submission(
+        conn,
+        &actor,
+        &prepared.submission_id,
+        "completed",
+        "remote-task-1",
+        &cleaned_receipt,
+    )
+    .unwrap();
+    assert_eq!(cleaned.current_state, "completed");
+    assert_eq!(cleaned.remote_receipt, Some(cleaned_receipt));
+}

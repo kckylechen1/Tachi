@@ -146,7 +146,17 @@ pub(super) async fn run(
             config: path,
             submission,
         } => resume(server, authority, config, path, &actor, submission).await?,
-        RemoteA2aAction::Status { submission, .. } => read(server, &actor, submission)?,
+        RemoteA2aAction::Status {
+            config: path,
+            submission,
+            reconcile,
+        } => {
+            if *reconcile {
+                reconcile_via_get_task(server, authority, config, path, &actor, submission).await?
+            } else {
+                read(server, &actor, submission)?
+            }
+        }
         _ => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -181,6 +191,11 @@ async fn resume(
 ) -> Result<RemoteSubmission, Box<dyn Error>> {
     loop {
         let current = read(server, actor, id)?;
+        if matches!(current.current_state.as_str(), "submitted" | "working")
+            && current.remote_task_id.is_some()
+        {
+            return reconcile_via_get_task(server, authority, original, path, actor, id).await;
+        }
         if !current.retry_allowed {
             return Ok(current);
         }
@@ -374,39 +389,143 @@ async fn send(
         .body(bytes)
         .send()
         .await;
-    let Ok(mut response) = response else {
+    let Ok(response) = response else {
         return unknown("transport_unknown", true);
     };
     if !response.status().is_success() {
         return unknown("remote_http_refusal", response.status().is_server_error());
     }
+    if !validate_rpc_headers(&response) {
+        return unknown("invalid_response", false);
+    }
+    let bytes = match read_bounded_rpc_body(response).await {
+        Ok(bytes) => bytes,
+        Err(class) => return unknown(class, class == "transport_unknown"),
+    };
+    interpret_response(&bytes, &attempt.submission)
+}
+
+fn validate_rpc_headers(response: &reqwest::Response) -> bool {
     let header = |name| {
         response
             .headers()
             .get(name)
             .and_then(|value| value.to_str().ok())
     };
-    if header("a2a-version") != Some("1.0")
-        || header("content-type").and_then(|value| value.split(';').next())
-            != Some("application/a2a+json")
-        || !header("a2a-extensions").is_some_and(|value| {
+    header("a2a-version") == Some("1.0")
+        && header("content-type").and_then(|value| value.split(';').next())
+            == Some("application/a2a+json")
+        && header("a2a-extensions").is_some_and(|value| {
             let values: Vec<_> = value.split(',').map(str::trim).collect();
             values.contains(&DELEGATION) && values.contains(&PROVENANCE)
         })
-        || response.headers().contains_key("content-encoding")
-    {
-        return unknown("invalid_response", false);
-    }
+        && !response.headers().contains_key("content-encoding")
+}
+
+async fn read_bounded_rpc_body(mut response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
     let mut bytes = Vec::new();
     loop {
         match response.chunk().await {
-            Ok(Some(chunk)) if bytes.len() + chunk.len() <= 8192 => bytes.extend_from_slice(&chunk),
-            Ok(None) => break,
-            Ok(Some(_)) => return unknown("invalid_response", false),
-            Err(_) => return unknown("transport_unknown", true),
+            Ok(Some(chunk)) if bytes.len() + chunk.len() <= 16384 => {
+                bytes.extend_from_slice(&chunk)
+            }
+            Ok(None) => return Ok(bytes),
+            Ok(Some(_)) => return Err("invalid_response"),
+            Err(_) => return Err("transport_unknown"),
         }
     }
-    interpret_response(&bytes, &attempt.submission)
+}
+
+async fn reconcile_via_get_task(
+    server: &crate::MemoryServer,
+    authority: &crate::MemoryServer,
+    original: &GatewayConfig,
+    path: &Path,
+    actor: &A2aTransitionActor,
+    id: &str,
+) -> Result<RemoteSubmission, Box<dyn Error>> {
+    let current = read(server, actor, id)?;
+    let task_id = current
+        .remote_task_id
+        .as_deref()
+        .ok_or("remote submission has no remote_task_id to reconcile")?;
+    let config = reload(path, original)?;
+    let bound = if let Some(body) = current.body.as_deref() {
+        let job = profile::parse_job(body.as_bytes())
+            .map_err(|_| "frozen remote submission profile is invalid")?;
+        let current_bound = binding(&config, &job)?;
+        if current_bound != current.binding {
+            return Err(
+                "operator binding changed; cannot reconcile against a different binding".into(),
+            );
+        }
+        current_bound
+    } else {
+        current.binding.clone()
+    };
+    let peer = peer(&config, &bound.destination)?;
+    if config.issuer_id != bound.issuer_id
+        || config.trust_domain != current.trust_domain
+        || peer.host_id != bound.destination_host_id
+        || peer.public_key_sha256 != bound.destination_key_sha256
+        || peer.endpoint.as_deref() != Some(bound.endpoint.as_str())
+    {
+        return Err("operator destination peer binding changed".into());
+    }
+    let grant_active = peer.outbound.iter().any(|grant| {
+        grant.repository == bound.repository
+            && grant.canonical_project == bound.canonical_project
+            && grant.jobs.iter().any(|job| job.as_str() == bound.job)
+    });
+    if !grant_active {
+        return Err("operator outbound repository/job grant is no longer active".into());
+    }
+    require_gateway_key(authority, &bound)?;
+    let client = transport::pinned_client(&config, peer)?;
+    transport::probe_with_client(&config, peer, &client).await?;
+    let rpc_id = format!("reconcile-{}", uuid::Uuid::new_v4());
+    let req_bytes = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "GetTask",
+        "params": {
+            "id": task_id,
+            "historyLength": 0
+        }
+    }))?;
+    let url = url::Url::parse(&bound.endpoint)?.join("/rpc")?;
+    let response = client
+        .post(url)
+        .header("content-type", "application/a2a+json")
+        .header("a2a-version", "1.0")
+        .header("a2a-extensions", format!("{DELEGATION},{PROVENANCE}"))
+        .body(req_bytes)
+        .send()
+        .await?;
+    if !response.status().is_success() || !validate_rpc_headers(&response) {
+        return Err("destination GetTask RPC rejected or returned invalid framing".into());
+    }
+    let bytes = read_bounded_rpc_body(response)
+        .await
+        .map_err(|err| format!("failed reading destination GetTask response: {err}"))?;
+    let parsed = profile::parse_unique(&bytes)
+        .map_err(|_| "destination GetTask response was not valid unique JSON")?;
+    if parsed["jsonrpc"] != "2.0"
+        || parsed["id"] != rpc_id
+        || !keys(&parsed, &["jsonrpc", "id", "result"])
+    {
+        return Err("destination GetTask response failed RPC envelope checks".into());
+    }
+    let task = &parsed["result"];
+    let state = validate_task_snapshot(task, &current)
+        .ok_or("destination GetTask snapshot failed provenance/lifecycle validation")?;
+    let returned_id = task["id"]
+        .as_str()
+        .ok_or("destination GetTask snapshot missing task id")?;
+    Ok(server.with_global_store(|store| {
+        a2a::reconcile_remote_submission(store.connection(), actor, id, state, returned_id, task)
+            .map_err(|error| error.to_string())
+    })?)
 }
 
 fn keys(value: &Value, expected: &[&str]) -> bool {
@@ -434,16 +553,30 @@ fn interpret_response(bytes: &[u8], submission: &RemoteSubmission) -> RemoteSubm
         return unknown("invalid_response", false);
     }
     let task = &response["result"]["task"];
-    if !valid_refusal(task, submission) {
+    let Some(state) = validate_task_snapshot(task, submission) else {
         return unknown("invalid_response", false);
-    }
-    RemoteSubmissionResult::Refused {
-        task_id: task["id"].as_str().unwrap().into(),
-        receipt: task.clone(),
+    };
+    let task_id = task["id"].as_str().unwrap().into();
+    if state == "refused" {
+        RemoteSubmissionResult::Refused {
+            task_id,
+            receipt: task.clone(),
+        }
+    } else {
+        RemoteSubmissionResult::Accepted {
+            state,
+            task_id,
+            receipt: task.clone(),
+        }
     }
 }
 
+#[cfg(test)]
 fn valid_refusal(task: &Value, submission: &RemoteSubmission) -> bool {
+    validate_task_snapshot(task, submission) == Some("refused")
+}
+
+fn validate_task_snapshot(task: &Value, submission: &RemoteSubmission) -> Option<&'static str> {
     let token = |value: &Value| {
         value
             .as_str()
@@ -453,10 +586,9 @@ fn valid_refusal(task: &Value, submission: &RemoteSubmission) -> bool {
         || !token(&task["id"])
         || task["contextId"] != format!("context:{}", task["id"].as_str().unwrap())
         || !keys(&task["status"], &["state", "timestamp"])
-        || task["status"]["state"] != "TASK_STATE_REJECTED"
         || !keys(&task["metadata"], &[PROVENANCE])
     {
-        return false;
+        return None;
     }
     let provenance = &task["metadata"][PROVENANCE];
     let binding = &submission.binding;
@@ -493,19 +625,17 @@ fn valid_refusal(task: &Value, submission: &RemoteSubmission) -> bool {
         || provenance["job"] != binding.job
         || provenance["origin_claim"]
             != json!({"claim_id":binding.origin_claim_id,"transition_version":binding.origin_claim_version})
-        || !provenance["local_claim"].is_null()
-        || !provenance["local_run_id"].is_null()
-        || provenance["revision"] != 2
     {
-        return false;
+        return None;
     }
-    let Some(receipts) = provenance["receipts"]
-        .as_array()
-        .filter(|items| items.len() == 2)
-    else {
-        return false;
-    };
+    let revision = provenance["revision"].as_u64()?;
+    let receipts = provenance["receipts"].as_array()?;
+    if revision < 2 || receipts.len() != revision as usize {
+        return None;
+    }
     let mut previous = None;
+    let mut seen_ids = std::collections::HashSet::with_capacity(receipts.len());
+    let mut admission_ref: Option<&str> = None;
     for (index, receipt) in receipts.iter().enumerate() {
         if !keys(
             receipt,
@@ -519,45 +649,205 @@ fn valid_refusal(task: &Value, submission: &RemoteSubmission) -> bool {
                 "detail",
             ],
         ) || !token(&receipt["receipt_id"])
+            || !seen_ids.insert(receipt["receipt_id"].as_str().unwrap())
             || !token(&receipt["admission_ref"])
-            || receipt["revision"] != (index + 1)
+            || receipt["revision"].as_u64() != Some((index + 1) as u64)
             || receipt["actor"] != binding.destination
-            || receipt["fact"]
-                != if index == 0 {
-                    "received"
-                } else {
-                    "authorization_refused"
-                }
-            || receipt["detail"]
-                != if index == 0 {
-                    Value::Null
-                } else {
-                    json!({"reason":"execution_unavailable"})
-                }
         {
-            return false;
+            return None;
         }
-        let Some(time) = receipt["occurred_at"]
+        let current_ref = receipt["admission_ref"].as_str().unwrap();
+        match admission_ref {
+            None => admission_ref = Some(current_ref),
+            Some(first_ref) if first_ref != current_ref && index == 1 => return None,
+            _ => {}
+        }
+        let time = receipt["occurred_at"]
             .as_str()
-            .and_then(|time| time.parse::<jiff::Timestamp>().ok())
-        else {
-            return false;
-        };
-        // The destination stamped this receipt with its own clock. Accept it
-        // when that clock runs ahead of this host, within the same bound the
-        // destination allows for this origin's issued_at.
+            .and_then(|time| time.parse::<jiff::Timestamp>().ok())?;
         if time
             > jiff::Timestamp::now()
                 + jiff::SignedDuration::from_secs(REMOTE_CLOCK_SKEW_TOLERANCE_SECS)
-            || previous.is_some_and(|previous| time < previous)
+            || previous.is_some_and(|prev| time < prev)
         {
-            return false;
+            return None;
         }
         previous = Some(time);
     }
-    receipts[0]["receipt_id"] != receipts[1]["receipt_id"]
-        && receipts[0]["admission_ref"] == receipts[1]["admission_ref"]
-        && task["status"]["timestamp"] == receipts[1]["occurred_at"]
+    if receipts[0]["fact"] != "received" || !receipts[0]["detail"].is_null() {
+        return None;
+    }
+    let status_state = task["status"]["state"].as_str()?;
+    let status_ts = task["status"]["timestamp"].as_str()?;
+    if status_state == "TASK_STATE_REJECTED" {
+        if revision != 2
+            || !provenance["local_claim"].is_null()
+            || !provenance["local_run_id"].is_null()
+            || receipts[1]["fact"] != "authorization_refused"
+            || !receipts[1]["detail"].as_object().is_some_and(|obj| {
+                obj.len() == 1
+                    && obj.get("reason").and_then(Value::as_str).is_some_and(|r| {
+                        matches!(
+                            r,
+                            "execution_unavailable"
+                                | "policy_denied"
+                                | "head_not_found"
+                                | "resource_exhausted"
+                                | "claim_conflict"
+                        )
+                    })
+            })
+            || status_ts != receipts[1]["occurred_at"].as_str()?
+        {
+            return None;
+        }
+        return Some("refused");
+    }
+    if !token(&provenance["local_run_id"])
+        || !keys(
+            &provenance["local_claim"],
+            &["claim_id", "transition_version"],
+        )
+        || !token(&provenance["local_claim"]["claim_id"])
+        || provenance["local_claim"]["transition_version"]
+            .as_i64()
+            .is_none_or(|v| v < 0)
+    {
+        return None;
+    }
+    let local_run_id = provenance["local_run_id"].as_str()?;
+    let local_claim_id = provenance["local_claim"]["claim_id"].as_str()?;
+    let local_claim_version = provenance["local_claim"]["transition_version"].as_i64()?;
+    let expected_adapter = match binding.job.as_str() {
+        "review_revision" => "native_review",
+        "verify_pr" => "dgx2_verify_pr",
+        _ => return None,
+    };
+    let admitted_detail = receipts[1]["detail"].as_object()?;
+    if receipts[1]["fact"] != "admitted"
+        || admitted_detail.get("local_run_id").and_then(Value::as_str) != Some(local_run_id)
+        || admitted_detail
+            .get("local_claim_id")
+            .and_then(Value::as_str)
+            != Some(local_claim_id)
+        || admitted_detail
+            .get("local_claim_version")
+            .and_then(Value::as_i64)
+            != Some(local_claim_version)
+        || admitted_detail.get("adapter_kind").and_then(Value::as_str) != Some(expected_adapter)
+        || !admitted_detail
+            .get("policy_profile")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+        || !admitted_detail
+            .get("resource_slot")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return None;
+    }
+    let admitted_lease_expires = admitted_detail
+        .get("lease_expires_at")
+        .and_then(Value::as_str)
+        .and_then(|ts| ts.parse::<jiff::Timestamp>().ok())?;
+    let submission_expires = submission.expires_at.parse::<jiff::Timestamp>().ok()?;
+    let mut saw_started = false;
+    let mut saw_cancel_requested = false;
+    let mut terminal_fact: Option<&str> = None;
+    let mut terminal_ts: Option<&str> = None;
+    let mut saw_cleanup = false;
+    for receipt in &receipts[2..] {
+        let fact = receipt["fact"].as_str()?;
+        let detail = receipt["detail"].as_object()?;
+        if detail.get("local_run_id").and_then(Value::as_str) != Some(local_run_id) {
+            return None;
+        }
+        match fact {
+            "started" => {
+                let started_at = receipt["occurred_at"]
+                    .as_str()
+                    .and_then(|ts| ts.parse::<jiff::Timestamp>().ok())?;
+                if saw_started
+                    || saw_cancel_requested
+                    || terminal_fact.is_some()
+                    || saw_cleanup
+                    || detail.get("adapter_kind").and_then(Value::as_str) != Some(expected_adapter)
+                    || started_at > submission_expires
+                    || started_at > admitted_lease_expires
+                {
+                    return None;
+                }
+                saw_started = true;
+            }
+            "cancel_requested" => {
+                if saw_cancel_requested
+                    || terminal_fact.is_some()
+                    || saw_cleanup
+                    || detail
+                        .get("requested_by_identity_id")
+                        .and_then(Value::as_str)
+                        != Some(submission.origin.as_str())
+                {
+                    return None;
+                }
+                saw_cancel_requested = true;
+            }
+            "completed" => {
+                if !saw_started
+                    || terminal_fact.is_some()
+                    || saw_cleanup
+                    || detail.get("outcome").and_then(Value::as_str) != Some("completed")
+                {
+                    return None;
+                }
+                terminal_fact = Some("completed");
+                terminal_ts = receipt["occurred_at"].as_str();
+            }
+            "failed" | "canceled" => {
+                if terminal_fact.is_some()
+                    || saw_cleanup
+                    || detail.get("outcome").and_then(Value::as_str) != Some(fact)
+                {
+                    return None;
+                }
+                terminal_fact = Some(fact);
+                terminal_ts = receipt["occurred_at"].as_str();
+            }
+            "cleanup" => {
+                if terminal_fact.is_none()
+                    || saw_cleanup
+                    || !detail
+                        .get("cleanup_state")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| matches!(s, "cleaned" | "failed"))
+                {
+                    return None;
+                }
+                saw_cleanup = true;
+            }
+            _ => return None,
+        }
+    }
+    let (expected_status, expected_ts, mapped_state) = match terminal_fact {
+        Some("completed") => ("TASK_STATE_COMPLETED", terminal_ts?, "completed"),
+        Some("failed") => ("TASK_STATE_FAILED", terminal_ts?, "failed"),
+        Some("canceled") => ("TASK_STATE_CANCELED", terminal_ts?, "canceled"),
+        Some(_) => return None,
+        None if saw_started => (
+            "TASK_STATE_WORKING",
+            receipts.last()?.get("occurred_at")?.as_str()?,
+            "working",
+        ),
+        None => (
+            "TASK_STATE_SUBMITTED",
+            receipts.last()?.get("occurred_at")?.as_str()?,
+            "submitted",
+        ),
+    };
+    if status_state != expected_status || status_ts != expected_ts {
+        return None;
+    }
+    Some(mapped_state)
 }
 
 #[cfg(test)]

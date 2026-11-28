@@ -59,6 +59,11 @@ pub struct RemoteSubmissionAttempt {
 }
 
 pub enum RemoteSubmissionResult {
+    Accepted {
+        state: &'static str,
+        task_id: String,
+        receipt: Value,
+    },
     Refused {
         task_id: String,
         receipt: Value,
@@ -293,7 +298,16 @@ pub fn reserve_remote_submission(
         let submission = read(conn, actor, id)?;
         let now = jiff::Timestamp::now();
         if !submission.retry_allowed
-            || matches!(submission.current_state.as_str(), "refused" | "blocked")
+            || matches!(
+                submission.current_state.as_str(),
+                "refused"
+                    | "blocked"
+                    | "submitted"
+                    | "working"
+                    | "completed"
+                    | "failed"
+                    | "canceled"
+            )
         {
             return Ok(None);
         }
@@ -386,6 +400,26 @@ pub fn finish_remote_submission(
     with_composable_write(conn, |conn| {
         admission(conn, actor)?;
         let (state, error, retry, task_id, receipt) = match result {
+            RemoteSubmissionResult::Accepted {
+                state,
+                task_id,
+                receipt,
+            } => {
+                if !matches!(
+                    *state,
+                    "submitted" | "working" | "completed" | "failed" | "canceled"
+                ) || task_id.trim().is_empty()
+                {
+                    return Err(invalid("accepted state or task id is invalid"));
+                }
+                (
+                    *state,
+                    None,
+                    false,
+                    Some(task_id.as_str()),
+                    Some(serde_json::to_string(receipt)?),
+                )
+            }
             RemoteSubmissionResult::Refused { task_id, receipt } => (
                 "refused",
                 None,
@@ -436,6 +470,162 @@ pub fn finish_remote_submission(
             ));
         }
         read(conn, actor, &attempt.submission.submission_id)
+    })
+}
+
+fn submission_state_rank(state: &str) -> Result<u8, MemoryError> {
+    match state {
+        "unknown" => Ok(0),
+        "submitted" => Ok(1),
+        "working" => Ok(2),
+        "completed" | "failed" | "canceled" | "refused" => Ok(3),
+        _ => Err(invalid("cannot reconcile into non-remote state")),
+    }
+}
+
+fn receipt_revision(receipt: &Value) -> Result<i64, MemoryError> {
+    receipt
+        .pointer("/metadata/urn:tachi:a2a:ext:provenance-receipt:v1/revision")
+        .and_then(Value::as_i64)
+        .filter(|rev| *rev >= 2)
+        .ok_or_else(|| invalid("reconciled receipt is missing a valid revision"))
+}
+
+fn verify_append_only_provenance(
+    task_id: &str,
+    old_receipt: &Value,
+    new_receipt: &Value,
+) -> Result<(), MemoryError> {
+    if new_receipt.get("id").and_then(Value::as_str) != Some(task_id) {
+        return Err(invalid("reconciled receipt task id mismatch"));
+    }
+    fn provenance(receipt: &Value) -> Result<&serde_json::Map<String, Value>, MemoryError> {
+        receipt
+            .pointer("/metadata/urn:tachi:a2a:ext:provenance-receipt:v1")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("reconciled receipt is missing provenance metadata"))
+    }
+    let old_prov = provenance(old_receipt)?;
+    let new_prov = provenance(new_receipt)?;
+    for key in [
+        "schema_version",
+        "task_id",
+        "input_digest",
+        "origin",
+        "origin_admission_ref",
+        "destination",
+        "destination_host_id",
+        "trust_domain",
+        "repository",
+        "head_sha",
+        "job",
+        "origin_claim",
+        "local_claim",
+        "local_run_id",
+    ] {
+        let Some(old_val) = old_prov.get(key) else {
+            return Err(invalid("existing receipt provenance is incomplete"));
+        };
+        if new_prov.get(key) != Some(old_val) {
+            return Err(invalid(
+                "cannot mutate immutable reconciled provenance field",
+            ));
+        }
+    }
+    let old_receipts = old_prov
+        .get("receipts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("existing receipt list is missing"))?;
+    let new_receipts = new_prov
+        .get("receipts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("reconciled receipt list is missing"))?;
+    if new_receipts.len() < old_receipts.len()
+        || new_receipts[..old_receipts.len()] != old_receipts[..]
+    {
+        return Err(invalid(
+            "cannot rewrite or drop previously observed receipts",
+        ));
+    }
+    Ok(())
+}
+
+/// Persist an authenticated `GetTask` snapshot onto an existing submission
+/// without allocating a second SendMessage attempt.
+pub fn reconcile_remote_submission(
+    conn: &Connection,
+    actor: &A2aTransitionActor,
+    id: &str,
+    new_state: &str,
+    task_id: &str,
+    receipt: &Value,
+) -> Result<RemoteSubmission, MemoryError> {
+    if task_id.trim().is_empty() {
+        return Err(invalid("reconciled task id must be non-empty"));
+    }
+    let new_rank = submission_state_rank(new_state)?;
+    if new_rank == 0 {
+        return Err(invalid("reconciled state cannot be unknown"));
+    }
+    let new_rev = receipt_revision(receipt)?;
+    with_composable_write(conn, |conn| {
+        admission(conn, actor)?;
+        let current = read(conn, actor, id)?;
+        if current.attempts == 0
+            || matches!(
+                current.current_state.as_str(),
+                "pending" | "blocked" | "in_flight"
+            )
+        {
+            return Err(invalid(
+                "cannot reconcile a submission that is pending, blocked, or in flight",
+            ));
+        }
+        if let Some(existing_task) = current.remote_task_id.as_deref() {
+            if existing_task != task_id {
+                return Err(invalid("reconciled task id does not match submission"));
+            }
+        }
+        let old_rank = submission_state_rank(&current.current_state)?;
+        if let Some(old_receipt) = current.remote_receipt.as_ref() {
+            let old_rev = receipt_revision(old_receipt)?;
+            if new_rev < old_rev {
+                return Err(invalid("cannot regress reconciled receipt revision"));
+            }
+            if new_rev == old_rev {
+                if current.current_state == new_state && old_receipt == receipt {
+                    return Ok(current);
+                }
+                return Err(invalid("conflicting reconciled receipt at same revision"));
+            }
+            verify_append_only_provenance(task_id, old_receipt, receipt)?;
+        }
+        if new_rank < old_rank {
+            return Err(invalid("cannot regress reconciled remote submission state"));
+        }
+        if old_rank == 3 && current.current_state != new_state {
+            return Err(invalid("cannot overwrite terminal submission state"));
+        }
+        let encoded_receipt = serde_json::to_string(receipt)?;
+        let changed = conn.execute(
+            "UPDATE a2a_remote_submissions SET current_state=?3,state_version=state_version+1,
+             attempt_token=NULL,attempt_until=NULL,last_error=NULL,retry_allowed=0,
+             remote_task_id=?4,remote_receipt=?5,updated_at=?6
+             WHERE submission_id=?1 AND origin_agent_identity_id=?2 AND state_version=?7",
+            params![
+                id,
+                actor.agent_identity_id,
+                new_state,
+                task_id,
+                encoded_receipt,
+                now_utc_iso(),
+                current.state_version
+            ],
+        )?;
+        if changed != 1 {
+            return Err(invalid("submission changed during reconciliation"));
+        }
+        read(conn, actor, id)
     })
 }
 
