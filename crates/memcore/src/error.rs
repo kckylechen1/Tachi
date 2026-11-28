@@ -247,6 +247,9 @@ pub enum MemoryError {
     #[error("Invalid argument: {0}")]
     InvalidArg(String),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 

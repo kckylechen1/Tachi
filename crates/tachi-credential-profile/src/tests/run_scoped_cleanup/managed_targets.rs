@@ -52,6 +52,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(run_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect("apply run-scoped materialization");

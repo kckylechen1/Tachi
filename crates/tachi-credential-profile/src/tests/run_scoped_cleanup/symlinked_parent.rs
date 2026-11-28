@@ -45,6 +45,7 @@ fn credential_run_scoped_cleanup_refuses_to_traverse_a_symlinked_parent() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(run_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect("apply run-scoped materialization");
@@ -133,9 +134,15 @@ fn credential_run_scoped_cleanup_handles_non_canonical_run_dir_alias() {
     let report =
         crate::cleanup_ephemeral_credential_materializations(&store, &alias_run_dir, false)
             .expect("cleanup via alias run_dir");
-    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(report.removed.is_empty(), "{report:?}");
     assert!(report.errors.is_empty(), "{report:?}");
-    assert!(!real_run_dir.join("credentials").join("auth.json").exists());
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(real_run_dir.join("credentials").join("auth.json").exists());
+    let rows = store
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&rows[0].value_json).unwrap();
+    assert!(metadata["cleanup_status"].is_null());
 }
 
 #[test]
@@ -222,7 +229,13 @@ fn credential_run_scoped_cleanup_handles_alias_nested_inside_real_run_dir() {
     let report =
         crate::cleanup_ephemeral_credential_materializations(&store, &alias_run_dir, false)
             .expect("cleanup via nested alias run_dir");
-    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(report.removed.is_empty(), "{report:?}");
     assert!(report.errors.is_empty(), "{report:?}");
-    assert!(!real_run_dir.join("credentials").join("auth.json").exists());
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(real_run_dir.join("credentials").join("auth.json").exists());
+    let rows = store
+        .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&rows[0].value_json).unwrap();
+    assert!(metadata["cleanup_status"].is_null());
 }

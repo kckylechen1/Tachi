@@ -164,12 +164,18 @@ pub(super) fn materialize_dispatch_credentials(
     agent_norm: &str,
     selected_profile: Option<&str>,
     run_dir: &Path,
+    dispatch_id: &str,
 ) -> Result<DispatchCredentialMaterialization, String> {
     if grant.credential_profiles.is_empty() {
         return Ok(DispatchCredentialMaterialization {
             reports: Vec::new(),
             env: HashMap::new(),
         });
+    }
+
+    let dispatch_id = dispatch_id.trim();
+    if dispatch_id.is_empty() {
+        return Err("dispatch credential materialization requires a non-empty dispatch ID".into());
     }
 
     let cwd = grant.allowed_cwd.as_deref();
@@ -183,58 +189,94 @@ pub(super) fn materialize_dispatch_credentials(
 
     let mut reports = Vec::new();
     let mut env = HashMap::new();
-    for profile_name in profile_names {
-        let (_, profile) = find_dispatch_credential_profile(&profile_name, cwd)?;
-        let consumer = dispatch_credential_consumer(agent_norm, selected_profile, &profile);
-        let plan = server.with_global_store(|store| {
-            plan_credential_materialization_with_run_dir(
-                &profile_name,
-                &profile,
-                &consumer,
-                store,
-                Some(run_dir),
-            )
-        })?;
-        if !credential_report_ready(&plan) {
-            let plan_json = serde_json::to_string(&credential_materialize_report_json(&plan))
-                .map_err(|e| format!("serialize credential plan: {e}"))?;
-            return Err(format!(
-                "Credential profile '{}' is not ready for consumer '{}': {}",
-                profile_name, consumer, plan_json
-            ));
-        }
+    let apply = (|| -> Result<(), String> {
+        for profile_name in profile_names {
+            let (_, profile) = find_dispatch_credential_profile(&profile_name, cwd)?;
+            let consumer = dispatch_credential_consumer(agent_norm, selected_profile, &profile);
+            let plan = server.with_global_store(|store| {
+                plan_credential_materialization_with_run_dir(
+                    &profile_name,
+                    &profile,
+                    &consumer,
+                    store,
+                    Some(run_dir),
+                )
+            })?;
+            if !credential_report_ready(&plan) {
+                let plan_json = serde_json::to_string(&credential_materialize_report_json(&plan))
+                    .map_err(|e| format!("serialize credential plan: {e}"))?;
+                return Err(format!(
+                    "Credential profile '{}' is not ready for consumer '{}': {}",
+                    profile_name, consumer, plan_json
+                ));
+            }
 
-        let secret_names = profile_secret_names(&profile);
-        let mut secret_values = HashMap::new();
-        for secret_name in secret_names {
-            let value = read_unlocked_vault_secret(server, &secret_name, Some(&consumer), false)
+            let secret_names = profile_secret_names(&profile);
+            let mut secret_values = HashMap::new();
+            for secret_name in secret_names {
+                let value = read_unlocked_vault_secret(server, &secret_name, Some(&consumer), false)
                 .map_err(|err| {
                     format!(
                         "Credential profile '{}' requires unlocked Vault secret '{}' for consumer '{}': {}",
                         profile_name, secret_name, consumer, err
                     )
                 })?;
-            secret_values.insert(secret_name, value);
+                secret_values.insert(secret_name, value);
+            }
+
+            let result = server.with_global_store(|store| {
+                apply_credential_materialization(
+                    &profile_name,
+                    &profile,
+                    &consumer,
+                    store,
+                    &secret_values,
+                    &CredentialApplyOptions {
+                        allow_existing: false,
+                        run_dir: Some(run_dir.to_path_buf()),
+                        run_generation: Some(dispatch_id.to_owned()),
+                    },
+                )
+            })?;
+            env.extend(result.env);
+            reports.push(result.report);
         }
 
-        let result = server.with_global_store(|store| {
-            apply_credential_materialization(
-                &profile_name,
-                &profile,
-                &consumer,
-                store,
-                &secret_values,
-                &CredentialApplyOptions {
-                    allow_existing: false,
-                    run_dir: Some(run_dir.to_path_buf()),
-                },
-            )
-        })?;
-        env.extend(result.env);
-        reports.push(result.report);
+        Ok(())
+    })();
+    if let Err(mut error) = apply {
+        if !reports.is_empty() {
+            append_dispatch_credential_cleanup_error(server, run_dir, dispatch_id, &mut error);
+        }
+        return Err(error);
     }
 
     Ok(DispatchCredentialMaterialization { reports, env })
+}
+
+pub(super) fn append_dispatch_credential_cleanup_error(
+    server: &MemoryServer,
+    run_dir: &Path,
+    dispatch_id: &str,
+    error: &mut String,
+) {
+    match server.with_global_store(|store| {
+        cleanup_ephemeral_credential_materializations_for_run(
+            store,
+            run_dir,
+            Some(dispatch_id),
+            false,
+        )
+    }) {
+        Ok(report) if report.errors.is_empty() => {}
+        Ok(report) => error.push_str(&format!(
+            "; temporary credential cleanup incomplete: {}",
+            report.errors.join("; ")
+        )),
+        Err(cleanup_error) => error.push_str(&format!(
+            "; temporary credential cleanup could not be confirmed: {cleanup_error}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +307,7 @@ mod tests {
             "custom",
             Some("typed-profile"),
             run_dir.path(),
+            "p3-credential-dispatch",
         ) {
             Err(err) => err,
             Ok(_) => {
@@ -275,6 +318,73 @@ mod tests {
             err.contains(missing_selector),
             "production materializer must report the independently minted selector: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_failure_on_second_profile_cleans_first_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let run = root.path().join("run");
+        let workspace = root.path().join("workspace");
+        let profiles = workspace.join(default_credentials_dir());
+        std::fs::create_dir(&run).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        let server = MemoryServer::new(root.path().join("global.db"), None).unwrap();
+        crate::vault_test_api::seed_vault(&server, "credential-test-password").unwrap();
+        server
+            .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
+                name: "FIRST_SECRET".into(),
+                value: "fixture-value".into(),
+                secret_type: "api_key".into(),
+                description: "fixture".into(),
+                allowed_agents: None,
+            })
+            .unwrap();
+        std::fs::write(profiles.join("profiles.json"), json!({
+            "credential_profiles": {
+                "first": { "materializers": [
+                    { "type": "config_overlay", "source": "FIRST_SECRET", "target": "{credentials_dir}/probe.key" }
+                ] },
+                "second": { "materializers": [
+                    { "type": "config_overlay", "source": "MISSING_SECRET", "target": "{credentials_dir}/second.key" }
+                ] }
+            }
+        }).to_string()).unwrap();
+        let grant = tachi_params::ExecutionGrant {
+            grant_id: "fixture-grant".into(),
+            allowed_cwd: Some(workspace),
+            credential_profiles: vec!["first".into(), "second".into()],
+            env_id: None,
+            unmanaged_cwd_allowed: false,
+            mcp_access: None,
+            allowed_tools: Vec::new(),
+            permission_profile: None,
+            sandbox: None,
+            max_turns: None,
+            timeout_secs: 5,
+        };
+        let error =
+            materialize_dispatch_credentials(&server, &grant, "codex", None, &run, "fixture-run")
+                .err()
+                .expect("second profile must fail");
+        assert!(
+            error.contains("second") && error.contains("MISSING_SECRET"),
+            "{error}"
+        );
+        assert!(!run.join("credentials/probe.key").exists());
+        server
+            .with_global_store(|store| {
+                let rows = store
+                    .list_state(tachi_credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+                    .map_err(|err| err.to_string())?;
+                assert_eq!(rows.len(), 1);
+                let metadata: serde_json::Value =
+                    serde_json::from_str(&rows[0].value_json).unwrap();
+                assert_eq!(metadata["profile"], "first");
+                assert_eq!(metadata["cleanup_status"], "cleaned");
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

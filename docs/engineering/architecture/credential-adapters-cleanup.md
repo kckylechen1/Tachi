@@ -16,7 +16,12 @@ They reject path traversal and symlinks in target components. Unix writes use
 held directory descriptors with no-follow traversal and atomic publication.
 An explicit `--allow-existing` may replace only a leaf inside the authorized
 run directory; it does not overwrite a hardlink's external backing file.
-Run-directory aliases are resolved to the authorized canonical directory.
+Run-directory aliases are resolved once to the authorized canonical directory.
+Version 2 metadata binds each overlay to that directory's device and inode,
+the relative file path, and the dispatch ID when supplied. Materialization and
+cleanup share a SQLite `BEGIN IMMEDIATE` transaction across filesystem changes
+and bookkeeping. An approved replacement supersedes any active row that owns
+its target before the new row becomes visible.
 File overlays are unavailable on non-Unix systems; env adapters remain usable.
 
 A manual file overlay must supply `--run-dir`. Dispatch supplies its own run
@@ -70,8 +75,13 @@ writers.
 - Historical `config_patch` targets outside `--run-dir` are not deleted
   automatically. Matching targets inside a scoped run directory are ephemeral
   run artifacts and may be removed during cleanup.
-- TTL, hash checks, canonical run-directory matching and old metadata formats
-  remain supported by doctor and cleanup.
+- Run-scoped cleanup matches version 2 rows by directory identity and, when
+  supplied, run generation. A live alias works while it points at the bound
+  directory. Version 1 rows require an absolute target and a run directory
+  reachable without symlinks other than macOS platform aliases. Relative
+  targets and unverified legacy aliases stay open.
+- Doctor and cleanup continue to read version 1 metadata. Cleaned and
+  superseded rows expire after 30 days.
 
 ```sh
 tachi vault cleanup --profile codex_shared --consumer codex_cli

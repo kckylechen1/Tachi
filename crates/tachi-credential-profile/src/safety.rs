@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
-mod unix;
+pub(super) mod unix;
 
 pub(super) fn is_high_risk_credential_target(path: &Path) -> bool {
     let raw = path.to_string_lossy();
@@ -11,49 +11,62 @@ pub(super) fn is_high_risk_credential_target(path: &Path) -> bool {
         || raw.contains("/.claude-code-router/")
 }
 
-struct RunTarget {
-    root: PathBuf,
-    relative: PathBuf,
+pub(super) fn refuse_parent_dir(path: &Path, label: &str) -> Result<(), String> {
+    if path.components().any(|part| part == Component::ParentDir) {
+        return Err(format!("{label} must not contain '..'"));
+    }
+    Ok(())
 }
 
-impl RunTarget {
-    fn path(&self) -> PathBuf {
-        self.root.join(&self.relative)
+pub(super) fn absolute_run_dir(run_dir: &Path) -> Result<PathBuf, String> {
+    refuse_parent_dir(run_dir, "credential run_dir")?;
+    if run_dir.is_absolute() {
+        return Ok(run_dir.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(run_dir))
+        .map_err(|err| format!("resolve current directory: {err}"))
+}
+
+pub(super) struct RunDirectory {
+    granted: PathBuf,
+    pub(super) canonical: PathBuf,
+}
+
+impl RunDirectory {
+    pub(super) fn resolve(run_dir: &Path) -> Result<Self, String> {
+        let granted = absolute_run_dir(run_dir)?;
+        let canonical = fs::canonicalize(&granted)
+            .map_err(|err| format!("resolve credential run_dir '{}': {err}", run_dir.display()))?;
+        Ok(Self { granted, canonical })
     }
 }
 
-// This check also serves dry-run planning. The writer independently anchors all
-// operations to a directory fd and never follows a descendant symlink.
-fn resolve_run_target(target: &Path, run_dir: Option<&Path>) -> Result<RunTarget, String> {
-    let run_dir = run_dir.ok_or_else(|| {
-        "config_overlay requires a caller-granted run_dir; persistent file targets are retired"
-            .to_string()
-    })?;
+// Planning inspects the path for diagnostics. Publication anchors its own
+// traversal to directory descriptors and never follows a descendant symlink.
+pub(super) fn checked_run_target(
+    target: &Path,
+    run_dir: Result<Option<&RunDirectory>, &str>,
+) -> Result<PathBuf, String> {
+    refuse_parent_dir(target, "config_overlay target")?;
     if !cfg!(unix) {
         return Err("config_overlay file output requires Unix directory-fd confinement; use env or config_content_env on this platform".to_string());
     }
-    if target
-        .components()
-        .any(|part| matches!(part, Component::ParentDir))
-    {
-        return Err("config_overlay target must not contain '..'".to_string());
-    }
-    let root = fs::canonicalize(run_dir)
-        .map_err(|err| format!("resolve credential run_dir '{}': {err}", run_dir.display()))?;
+    let run_dir = run_dir?.ok_or_else(|| {
+        "config_overlay requires a caller-granted run_dir; persistent file targets are retired"
+            .to_string()
+    })?;
+    let root = &run_dir.canonical;
     if !root.is_dir() {
         return Err("credential run_dir must be an existing directory".to_string());
     }
-    let granted_path = if run_dir.is_absolute() {
-        run_dir.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|err| format!("resolve current directory: {err}"))?
-            .join(run_dir)
-    };
+    if root.to_str().is_none() {
+        return Err("credential run_dir must be valid UTF-8 for file overlays".to_string());
+    }
     let relative = if target.is_absolute() {
         target
-            .strip_prefix(&granted_path)
-            .or_else(|_| target.strip_prefix(&root))
+            .strip_prefix(&run_dir.granted)
+            .or_else(|_| target.strip_prefix(root))
             .map_err(|_| {
                 "config_overlay target must be inside the caller-granted run_dir".to_string()
             })?
@@ -99,11 +112,7 @@ fn resolve_run_target(target: &Path, run_dir: Option<&Path>) -> Result<RunTarget
             }
         }
     }
-    Ok(RunTarget { root, relative })
-}
-
-pub(super) fn checked_run_target(target: &Path, run_dir: Option<&Path>) -> Result<PathBuf, String> {
-    resolve_run_target(target, run_dir).map(|resolved| resolved.path())
+    Ok(absolute_target)
 }
 
 pub(super) fn credential_file_mode(chmod: Option<&str>) -> Result<u32, String> {
@@ -114,24 +123,4 @@ pub(super) fn credential_file_mode(chmod: Option<&str>) -> Result<u32, String> {
         return Err("credential config_overlay chmod must be 0400 or 0600".to_string());
     }
     Ok(mode)
-}
-
-pub(super) fn write_run_file(
-    target: &Path,
-    run_dir: Option<&Path>,
-    value: &str,
-    chmod: Option<&str>,
-    allow_existing: bool,
-) -> Result<(), String> {
-    let resolved = resolve_run_target(target, run_dir)?;
-    let mode = credential_file_mode(chmod)?;
-    #[cfg(unix)]
-    {
-        unix::write_run_file(&resolved, value, mode, allow_existing)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (resolved, value, mode, allow_existing);
-        Err("config_overlay file output is unavailable on this platform".to_string())
-    }
 }

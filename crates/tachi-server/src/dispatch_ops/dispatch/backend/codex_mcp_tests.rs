@@ -511,6 +511,7 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
                 &CredentialApplyOptions {
                     allow_existing: false,
                     run_dir: Some(fixture.root.clone()),
+                    run_generation: None,
                 },
             )
         })
@@ -572,6 +573,7 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
                 &CredentialApplyOptions {
                     allow_existing: false,
                     run_dir: Some(other_run.clone()),
+                    run_generation: None,
                 },
             )
         })

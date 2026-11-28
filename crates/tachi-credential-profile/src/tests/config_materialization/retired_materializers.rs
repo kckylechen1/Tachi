@@ -58,6 +58,7 @@ fn retired_file_materializers_fail_before_any_write_and_remain_diagnosable() {
             &values,
             &crate::CredentialApplyOptions {
                 run_dir: Some(run_dir.clone()),
+                run_generation: None,
                 allow_existing: true,
             },
         )

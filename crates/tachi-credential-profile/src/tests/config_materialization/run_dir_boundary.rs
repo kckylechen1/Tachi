@@ -59,6 +59,7 @@ impl Fixture {
             &values,
             &crate::CredentialApplyOptions {
                 run_dir: run_dir.map(Path::to_path_buf),
+                run_generation: None,
                 allow_existing,
             },
         )

@@ -124,6 +124,7 @@ pub struct CredentialDoctorSummary {
 pub struct CredentialApplyOptions {
     pub allow_existing: bool,
     pub run_dir: Option<PathBuf>,
+    pub run_generation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -164,6 +165,7 @@ pub struct CredentialCleanupReport {
 #[derive(Debug, Clone, Default)]
 pub struct CredentialCleanupOptions {
     pub run_dir: Option<PathBuf>,
+    pub run_generation: Option<String>,
     pub profile: Option<String>,
     pub consumer: Option<String>,
     pub dry_run: bool,

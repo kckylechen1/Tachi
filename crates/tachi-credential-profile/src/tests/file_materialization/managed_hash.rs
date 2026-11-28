@@ -31,6 +31,7 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(out_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect("apply temporary config materialization");

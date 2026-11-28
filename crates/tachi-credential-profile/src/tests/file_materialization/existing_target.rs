@@ -45,6 +45,7 @@ fn credential_materialize_apply_refuses_existing_file_by_default() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(out_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect_err("existing file should require allow_existing");

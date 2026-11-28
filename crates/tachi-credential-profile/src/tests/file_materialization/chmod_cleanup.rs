@@ -46,6 +46,7 @@ fn credential_materialize_rejects_invalid_or_broad_chmod_before_writing() {
             &crate::CredentialApplyOptions {
                 allow_existing: false,
                 run_dir: Some(out_dir.path().to_path_buf()),
+                run_generation: None,
             },
         )
         .expect_err("unsafe chmod must fail before creating a credential file");

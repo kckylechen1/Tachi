@@ -65,6 +65,7 @@ fn credential_materialize_apply_writes_file_0600_and_returns_env_map() {
         &crate::CredentialApplyOptions {
             allow_existing: false,
             run_dir: Some(out_dir.path().to_path_buf()),
+            run_generation: None,
         },
     )
     .expect("apply materialization");

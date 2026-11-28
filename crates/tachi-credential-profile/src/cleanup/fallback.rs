@@ -3,17 +3,39 @@
 //! is removed.
 
 use super::{
-    ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection, TargetLocation,
+    LiveRunRoot, ManagedCredentialMaterialization, RemovableTarget, Removal, TargetInspection,
+    TargetLocation,
 };
+use memcore::anchored_fs::DirectoryIdentity;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-pub(super) fn locate(
-    metadata: &ManagedCredentialMaterialization,
-    _run_dir: Option<&Path>,
-) -> TargetLocation {
-    let target = PathBuf::from(&metadata.target);
+pub(super) fn locate_bound(
+    _root: &LiveRunRoot,
+    _identity: DirectoryIdentity,
+    _relative: &Path,
+    _capture: Option<&OsStr>,
+) -> Result<TargetLocation, String> {
+    Err("bound target requires Unix directory identity verification".into())
+}
+
+pub(super) fn locate_bound_for_operator(
+    _metadata: &ManagedCredentialMaterialization,
+    _identity: DirectoryIdentity,
+    _relative: &Path,
+    _mark_only: bool,
+    _capture: Option<&OsStr>,
+) -> Result<TargetLocation, String> {
+    Err("bound target requires Unix directory identity verification".into())
+}
+
+pub(super) fn locate_legacy(_root: &LiveRunRoot, _target: &Path) -> Result<TargetLocation, String> {
+    Err("legacy target requires a run_dir opened without symlinks".into())
+}
+
+pub(super) fn locate_for_operator(target: &Path) -> TargetLocation {
     let Some(leaf) = target.file_name() else {
         return TargetLocation::Unremovable(format!("'{}' does not name a file", target.display()));
     };
@@ -22,7 +44,7 @@ pub(super) fn locate(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
         .to_path_buf();
-    match fs::symlink_metadata(&target) {
+    match fs::symlink_metadata(target) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => TargetLocation::Missing,
         Err(err) => TargetLocation::Unremovable(format!("inspect it: {err}")),
         Ok(entry) if entry.file_type().is_symlink() => {
@@ -107,10 +129,35 @@ pub(super) fn inspect(
     TargetInspection::RegularFile { bytes }
 }
 
+pub(super) fn restore(
+    _target: &RemovableTarget,
+    _backup: &Path,
+    _destination: &Path,
+    _identity: (u64, u64),
+    _capture: Option<&OsStr>,
+) -> io::Result<()> {
+    Err(io::Error::other("credential backup recovery requires Unix"))
+}
+
+pub(super) fn confirm_original(
+    _target: &RemovableTarget,
+    _inode: (u64, u64),
+    _capture: Option<&OsStr>,
+) -> io::Result<bool> {
+    Ok(false)
+}
+
 pub(super) fn remove<A: Fn(&[u8]) -> bool>(
     target: &RemovableTarget,
+    identity: Option<(u64, u64)>,
+    _capture: Option<&OsStr>,
     require_managed_content: Option<&A>,
 ) -> io::Result<Removal> {
+    if identity.is_some() {
+        return Err(io::Error::other(
+            "credential inode verification requires Unix",
+        ));
+    }
     let path = target.parent.join(&target.leaf);
     let Some(accept) = require_managed_content else {
         return match fs::remove_file(&path) {

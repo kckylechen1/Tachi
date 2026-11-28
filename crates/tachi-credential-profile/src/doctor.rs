@@ -1,10 +1,11 @@
 use super::cleanup::{inspect_target_file, TargetInspection};
 use super::managed::{managed_materialization_content_hash, read_managed_materialization};
-use super::plan::{materializer_has_file_target, plan_credential_materialization_with_run_dir};
-use super::safety::is_high_risk_credential_target;
+use super::plan::{materializer_has_file_target, plan_with_resolved_run_dir};
+use super::safety::{is_high_risk_credential_target, refuse_parent_dir};
 use super::types::{
     CredentialDoctorIssue, CredentialDoctorReport, CredentialDoctorSummary, CredentialProfile,
 };
+use memcore::anchored_fs::AnchoredDirectory;
 use memcore::MemoryStore;
 use std::path::{Path, PathBuf};
 
@@ -71,13 +72,17 @@ pub fn doctor_credential_profile(
     store: &MemoryStore,
     run_dir: Option<&Path>,
 ) -> Result<CredentialDoctorReport, String> {
-    let plan = plan_credential_materialization_with_run_dir(
-        profile_name,
-        profile,
-        consumer,
-        store,
-        run_dir,
-    )?;
+    if let Some(run_dir) = run_dir {
+        refuse_parent_dir(run_dir, "credential run_dir")?;
+    }
+    let (plan, run_root) =
+        plan_with_resolved_run_dir(profile_name, profile, consumer, store, run_dir)?;
+    let run_identity = run_root.as_ref().and_then(|root| {
+        AnchoredDirectory::open_absolute(&root.canonical)
+            .ok()?
+            .identity()
+            .ok()
+    });
     let mut issues = Vec::new();
 
     if !plan.allowed {
@@ -144,19 +149,28 @@ pub fn doctor_credential_profile(
 
         if materializer_has_file_target(&step.materializer_type, &step.target) {
             let target = PathBuf::from(&step.target);
-            let managed = match read_managed_materialization(store, profile_name, consumer, step) {
-                Ok(managed) => managed,
-                Err(err) => {
-                    issues.push(CredentialDoctorIssue {
-                        severity: "medium".to_string(),
-                        code: "managed_metadata_unreadable".to_string(),
-                        message: err,
-                        source: Some(step.resolved_secret.clone()),
-                        target: Some(step.target.clone()),
-                    });
-                    None
-                }
-            };
+            let binding = run_identity
+                .zip(run_root.as_ref())
+                .and_then(|(identity, root)| {
+                    target
+                        .strip_prefix(&root.canonical)
+                        .ok()
+                        .map(|relative| (identity, relative))
+                });
+            let managed =
+                match read_managed_materialization(store, profile_name, consumer, step, binding) {
+                    Ok(managed) => managed,
+                    Err(err) => {
+                        issues.push(CredentialDoctorIssue {
+                            severity: "medium".to_string(),
+                            code: "managed_metadata_unreadable".to_string(),
+                            message: err,
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        });
+                        None
+                    }
+                };
             if is_high_risk_credential_target(&target) {
                 issues.push(CredentialDoctorIssue {
                     severity: "high".to_string(),
@@ -173,7 +187,7 @@ pub fn doctor_credential_profile(
                 TargetInspection::Missing => {
                     if managed
                         .as_ref()
-                        .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                        .is_some_and(|managed| managed.cleanup_status.is_none())
                     {
                         issues.push(CredentialDoctorIssue {
                             severity: "high".to_string(),
@@ -204,7 +218,7 @@ pub fn doctor_credential_profile(
                 TargetInspection::Unreadable { reason } => {
                     if managed
                         .as_ref()
-                        .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                        .is_some_and(|managed| managed.cleanup_status.is_none())
                     {
                         issues.push(CredentialDoctorIssue {
                             severity: "medium".to_string(),
@@ -253,14 +267,14 @@ pub fn doctor_credential_profile(
                     let mut managed_target_readable = true;
                     if let Some(managed) = managed
                         .as_ref()
-                        .filter(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                        .filter(|managed| managed.cleanup_status.is_none())
                     {
                         match std::str::from_utf8(&bytes) {
                             Ok(current) => {
                                 let current_hash = managed_materialization_content_hash(
                                     profile_name,
                                     consumer,
-                                    &step.target,
+                                    &managed.target,
                                     current,
                                 );
                                 if current_hash != managed.content_hash {
